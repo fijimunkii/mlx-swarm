@@ -27,14 +27,15 @@ jobs:
         with:
           go-version-file: go.mod
       - run: swift --version
-      - name: Build MLX worker
-        working-directory: worker/mlx
-        run: swift build
+      - name: Build MLX worker and Metal library
+        run: ./scripts/build-mlx-worker.sh
       - name: Smoke test MLX worker
-        working-directory: worker/mlx
         run: |
-          swift run --skip-build MLXWorker health
-          swift run --skip-build MLXWorker capabilities
-          swift run --skip-build MLXWorker shard-smoke
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          "$worker" health
+          "$worker" capabilities
+          "$worker" shard-smoke
       - name: Relay shard across two worker processes with Go
-        run: go run ./cmd/swarm-local -worker worker/mlx/.build/debug/MLXWorker
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          go run ./cmd/swarm-local -worker "$worker"

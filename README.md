@@ -42,37 +42,45 @@ Community-scale, fault-tolerant distributed inference on heterogeneous consumer 
 
 Future NVIDIA workers should preserve the same swarm protocol and use MLX's CUDA backend where practical.
 
-## Local worker
+## Building the MLX worker on macOS
 
-The worker has zero-download health/capability commands, a tiny real generation path, and deterministic shard-boundary tests.
+MLX's Metal shader library is built by Xcode, not command-line SwiftPM. Use the repository helper rather than `swift build`:
 
 ```bash
-cd worker/mlx
-swift build
-swift run --skip-build MLXWorker health
-swift run --skip-build MLXWorker capabilities
-swift run --skip-build MLXWorker shard-smoke
-swift run --skip-build MLXWorker generate "Reply with exactly: swarm online"
+./scripts/build-mlx-worker.sh
+```
+
+The resulting executable is:
+
+```text
+worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker
+```
+
+Then run:
+
+```bash
+worker="worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+"$worker" health
+"$worker" capabilities
+"$worker" shard-smoke
+"$worker" generate "Reply with exactly: swarm online"
 ```
 
 `generate` uses MLX Swift LM's registered `mlx-community/SmolLM-135M-Instruct-4bit` model and downloads/caches its Hugging Face assets on first use.
 
 ### Go-relayed two-process shard proof
 
-The first true process-boundary test uses a deterministic tiny Gemma 3 model so it requires no checkpoint download. Go launches one Swift worker process for layers 0–3, captures its language-neutral tensor payload, then launches a fresh Swift worker for layers 4–7 and forwards the payload over stdin. The second process checks the result against its own full-model reference.
+After building the worker:
 
 ```bash
-# From the repository root, after `cd worker/mlx && swift build && cd ../..`
-go run ./cmd/swarm-local -worker worker/mlx/.build/debug/MLXWorker
+go run ./cmd/swarm-local
 ```
 
-The relay payload is exactly the shape we expect to place on the swarm transport: `shape + dtype + contiguous bytes`. JSON/base64 framing is temporary; the WAN transport will carry the existing protobuf `Tensor` fields directly.
+Go launches one Swift worker for layers 0–3, captures its `WireTensor`, launches an independently initialized worker for layers 4–7, forwards the payload over stdin, and verifies the result against the second process's full-model reference.
 
-The worker also keeps file-based `shard-produce` / `shard-finish` commands as a debugging aid, but the primary experiment does not share a file or MLX process state.
+The relay payload is exactly the shape we expect to put on the swarm transport: `shape + dtype + contiguous bytes`. JSON/base64 framing is temporary; the protobuf `Tensor` message already models the intended representation.
 
 ## First milestone
-
-Prove a deterministic two-node pipeline using a small model:
 
 1. Establish a real single-worker MLX Swift LM reference path.
 2. Prove complementary layer ranges compose across separate worker processes.
@@ -98,4 +106,4 @@ ROADMAP.md                staged experimental plan
 
 ## Status
 
-M2 process-boundary proof: Go can relay a serialized hidden state between two independently initialized Swift/MLX worker processes. The next step is moving the same tensor payload over the Go swarm network between two machines.
+M1/M2 boundary proof in progress: Swift compilation is green; CI now builds via Xcode so MLX's Metal shader library is available at runtime. The next step is the Go-relayed two-process shard test and then the same tensor over the LAN between two Macs.

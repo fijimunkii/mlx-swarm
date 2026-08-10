@@ -21,16 +21,16 @@ type shardResult struct {
 }
 
 type runSummary struct {
-	Worker             string  `json:"worker"`
-	BoundaryWireBytes  int     `json:"boundaryWireBytes"`
-	BoundaryTensorBytes int    `json:"boundaryTensorBytes"`
-	ProducerMillis     float64 `json:"producerMillis"`
-	ConsumerMillis     float64 `json:"consumerMillis"`
-	MatchesSingleRange bool    `json:"matchesSingleRange"`
-	Model              string  `json:"model"`
-	Layers             int     `json:"layers"`
-	SplitLayer         int     `json:"splitLayer"`
-	BoundaryDType      string  `json:"boundaryDType"`
+	Worker              string  `json:"worker"`
+	BoundaryWireBytes   int     `json:"boundaryWireBytes"`
+	BoundaryTensorBytes int     `json:"boundaryTensorBytes"`
+	ProducerMillis      float64 `json:"producerMillis"`
+	ConsumerMillis      float64 `json:"consumerMillis"`
+	MatchesSingleRange  bool    `json:"matchesSingleRange"`
+	Model               string  `json:"model"`
+	Layers              int     `json:"layers"`
+	SplitLayer          int     `json:"splitLayer"`
+	BoundaryDType       string  `json:"boundaryDType"`
 }
 
 func main() {
@@ -79,7 +79,7 @@ func defaultWorkerPath() string {
 	if path := os.Getenv("MLX_SWARM_WORKER"); path != "" {
 		return path
 	}
-	return "worker/mlx/.build/debug/MLXWorker"
+	return "worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
 }
 
 func runWorker(worker string, args []string, input []byte) ([]byte, time.Duration, error) {
