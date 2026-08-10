@@ -140,7 +140,13 @@ jobs:
           fi
 
           echo "receiver_tailscale_ip=$peer_ip"
-          tailscale ping --timeout=10s "$peer_ip" || true
+          ping_output="$(tailscale ping --timeout=10s "$peer_ip" 2>&1 || true)"
+          printf '%s\n' "$ping_output"
+          route_line="$(printf '%s\n' "$ping_output" | grep '^pong from ' | tail -n 1 || true)"
+          route="$(printf '%s\n' "$route_line" | sed -E 's/^.* via (.*) in [^ ]+$/\1/')"
+          if [ -z "$route" ]; then
+            route="unknown"
+          fi
 
           ready=0
           for _ in {1..120}; do
@@ -156,6 +162,36 @@ jobs:
             exit 1
           fi
 
-          go run ./cmd/swarm-net \
+          network_json="$(go run ./cmd/swarm-net \
             -worker "$worker" \
-            -peer "http://${peer_ip}:8080"
+            -peer "http://${peer_ip}:8080")"
+          printf '%s\n' "$network_json"
+
+          if [ "$(printf '%s' "$network_json" | jq -r '.matchesSingleRange')" != "true" ]; then
+            echo "Distributed output did not match reference" >&2
+            exit 1
+          fi
+
+          {
+            echo "## MLX Swarm distributed benchmark"
+            echo
+            echo "Two independent GitHub-hosted macOS runners, connected through Tailscale."
+            echo
+            echo "| Metric | Value |"
+            echo "|---|---:|"
+            printf '| Model | `%s` |\n' "$(printf '%s' "$network_json" | jq -r '.model')"
+            printf '| Layers | %s (split at %s) |\n' "$(printf '%s' "$network_json" | jq -r '.layers')" "$(printf '%s' "$network_json" | jq -r '.splitLayer')"
+            printf '| Boundary dtype | `%s` |\n' "$(printf '%s' "$network_json" | jq -r '.boundaryDType')"
+            printf '| Tensor bytes | %s |\n' "$(printf '%s' "$network_json" | jq -r '.boundaryTensorBytes')"
+            printf '| Wire bytes | %s |\n' "$(printf '%s' "$network_json" | jq -r '.boundaryWireBytes')"
+            printf '| Producer | %.3f ms |\n' "$(printf '%s' "$network_json" | jq -r '.producerMillis')"
+            printf '| Network round trip | %.3f ms |\n' "$(printf '%s' "$network_json" | jq -r '.networkMillis')"
+            printf '| Remote worker | %.3f ms |\n' "$(printf '%s' "$network_json" | jq -r '.remoteWorkerMillis')"
+            printf '| Transport overhead | %.3f ms |\n' "$(printf '%s' "$network_json" | jq -r '.transportOverheadMillis')"
+            printf '| Total producer + remote | %.3f ms |\n' "$(printf '%s' "$network_json" | jq -r '.totalMillis')"
+            printf '| Effective wire throughput | %.3f MB/s |\n' "$(printf '%s' "$network_json" | jq -r '.wireEffectiveMBps')"
+            printf '| Tailscale route | `%s` |\n' "$route"
+            printf '| Correctness | **%s** |\n' "$(printf '%s' "$network_json" | jq -r 'if .matchesSingleRange then "MATCH" else "MISMATCH" end')"
+            echo
+            echo "Route probe: \`$route_line\`"
+          } >> "$GITHUB_STEP_SUMMARY"
