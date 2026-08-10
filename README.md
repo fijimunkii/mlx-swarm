@@ -44,27 +44,43 @@ Future NVIDIA workers should preserve the same swarm protocol and use MLX's CUDA
 
 ## Local worker
 
-The first worker has a zero-download health command and a real local generation path through MLX Swift LM.
+The worker has zero-download health/capability commands, a tiny real generation path, and deterministic shard-boundary tests.
 
 ```bash
 cd worker/mlx
 swift build
 swift run --skip-build MLXWorker health
+swift run --skip-build MLXWorker capabilities
+swift run --skip-build MLXWorker shard-smoke
 swift run --skip-build MLXWorker generate "Reply with exactly: swarm online"
 ```
 
-`generate` currently uses MLX Swift LM's registered `mlx-community/SmolLM-135M-Instruct-4bit` model and downloads/caches its Hugging Face assets on first use. This tiny model is our fast single-worker reference path; larger Qwen/Gemma models will be used when we begin exercising layer-range sharding.
+`generate` uses MLX Swift LM's registered `mlx-community/SmolLM-135M-Instruct-4bit` model and downloads/caches its Hugging Face assets on first use.
+
+### Two-process shard proof
+
+The first true process-boundary test uses a deterministic tiny Gemma 3 model so it requires no checkpoint download. One worker process executes the first half and writes only a language-neutral tensor payload; a second independently initialized worker consumes it, runs the complementary layers, and checks the result against its own full-model reference.
+
+```bash
+boundary="$(mktemp)"
+swift run --skip-build MLXWorker shard-produce "$boundary"
+swift run --skip-build MLXWorker shard-finish "$boundary"
+rm -f "$boundary"
+```
+
+The boundary payload is exactly the shape we expect to place on the swarm transport: `shape + dtype + contiguous bytes`.
 
 ## First milestone
 
 Prove a deterministic two-node pipeline using a small model:
 
 1. Establish a real single-worker MLX Swift LM reference path.
-2. Load complementary layer ranges on two Apple-silicon Macs.
-3. Execute a forward pass across both workers.
-4. Compare distributed logits against the single-node baseline.
-5. Record bytes transferred, p50/p95 stage latency, TTFT, and tokens/sec.
-6. Kill or pause a worker and characterize failure behavior.
+2. Prove complementary layer ranges compose across separate worker processes.
+3. Replace the local file boundary with the swarm transport.
+4. Split a real checkpoint across two Apple-silicon Macs.
+5. Compare distributed logits against the single-node baseline.
+6. Record bytes transferred, p50/p95 stage latency, TTFT, and tokens/sec.
+7. Kill or pause a worker and characterize failure behavior.
 
 Only after correctness is established do we add hedged execution, dynamic placement, WAN peers, and pooled-memory-only models.
 
@@ -81,4 +97,4 @@ ROADMAP.md                staged experimental plan
 
 ## Status
 
-M1 in progress: establishing the single-worker reference path before adding layer-range execution and two-node transport.
+M1/M2 boundary proof in progress: the worker can serialize a hidden state between independent OS processes. The next step is replacing the temporary file handoff with the Go swarm transport.
