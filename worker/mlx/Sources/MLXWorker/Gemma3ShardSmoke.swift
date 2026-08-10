@@ -24,8 +24,14 @@ struct ShardProduceResult: Codable {
 
 private enum TinyGemma3Fixture {
     static let seed: UInt64 = 0x4D4C_5853_5741_524D // "MLXSWARM"
-    static let tokens = MLXArray([3, 14, 15, 92, 65, 35], [1, 6])
-    static let mask = MLXFast.ScaledDotProductAttentionMaskMode.causal
+
+    static func tokens() -> MLXArray {
+        MLXArray([3, 14, 15, 92, 65, 35], [1, 6])
+    }
+
+    static func mask() -> MLXFast.ScaledDotProductAttentionMaskMode {
+        .causal
+    }
 
     static func makeModel() -> Gemma3TextModel {
         // Seeding before construction gives independent worker processes the
@@ -56,7 +62,7 @@ private enum TinyGemma3Fixture {
     }
 
     static func embeddedInput(_ inner: Gemma3Model) -> MLXArray {
-        let embedded = inner.embedTokens(tokens)
+        let embedded = inner.embedTokens(tokens())
         let scale = MLXArray(sqrt(Float(inner.config.hiddenSize)), dtype: .bfloat16)
         return embedded * scale.asType(embedded.dtype)
     }
@@ -64,7 +70,7 @@ private enum TinyGemma3Fixture {
     static func fullReference(_ inner: Gemma3Model) -> MLXArray {
         var hidden = embeddedInput(inner)
         for layer in inner.layers {
-            hidden = layer(hidden, mask: mask, cache: nil)
+            hidden = layer(hidden, mask: mask(), cache: nil)
         }
         eval(hidden)
         return hidden
@@ -114,7 +120,7 @@ enum Gemma3ShardSmoke {
 
         var hidden = TinyGemma3Fixture.embeddedInput(inner)
         for layer in inner.layers[..<splitLayer] {
-            hidden = layer(hidden, mask: TinyGemma3Fixture.mask, cache: nil)
+            hidden = layer(hidden, mask: TinyGemma3Fixture.mask(), cache: nil)
         }
         eval(hidden)
 
@@ -150,7 +156,7 @@ enum Gemma3ShardSmoke {
 
         var hidden = boundary.materialize()
         for layer in inner.layers[splitLayer...] {
-            hidden = layer(hidden, mask: TinyGemma3Fixture.mask, cache: nil)
+            hidden = layer(hidden, mask: TinyGemma3Fixture.mask(), cache: nil)
         }
         eval(hidden)
 
