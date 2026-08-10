@@ -7,6 +7,8 @@ struct ShardSmokeResult: Codable {
     let model: String
     let layers: Int
     let splitLayer: Int
+    let boundaryBytes: Int
+    let boundaryDType: String
     let outputShape: [Int]
     let matchesSingleRange: Bool
 }
@@ -62,10 +64,13 @@ enum Gemma3ShardSmoke {
         for layer in inner.layers[..<splitLayer] {
             splitRange = layer(splitRange, mask: mask, cache: nil)
         }
-
-        // Force the exact boundary we will eventually serialize to another
-        // worker instead of relying on one lazy graph spanning both ranges.
         eval(splitRange)
+
+        // This is the real future network boundary: detach the lazy graph,
+        // copy the hidden state into a language-neutral byte payload, then
+        // construct a fresh MLXArray before resuming the remaining layers.
+        let boundary = WireTensor(splitRange)
+        splitRange = boundary.materialize()
 
         for layer in inner.layers[splitLayer...] {
             splitRange = layer(splitRange, mask: mask, cache: nil)
@@ -78,6 +83,8 @@ enum Gemma3ShardSmoke {
             model: "gemma3-random-tiny",
             layers: inner.layers.count,
             splitLayer: splitLayer,
+            boundaryBytes: boundary.data.count,
+            boundaryDType: boundary.dtype.rawValue,
             outputShape: splitRange.shape,
             matchesSingleRange: matches
         )
