@@ -13,50 +13,21 @@ Community-scale, fault-tolerant distributed inference on heterogeneous consumer 
 - **Consumer nodes are disposable.** The design assumes workers can slow down, sleep, disconnect, or disappear.
 - **Measure before optimizing.** v0 exists to establish correctness and characterize latency/failure behavior.
 
-## v0 architecture
-
-```text
-                         +------------------+
-                         |      swarmd      |
-                         |       (Go)       |
-                         |                  |
-                         | registry         |
-                         | scheduler        |
-                         | health           |
-                         | transport        |
-                         +--------+---------+
-                                  |
-                         local RPC / protocol
-                                  |
-                         +--------v---------+
-                         |    mlx-worker    |
-                         |     (Swift)      |
-                         |                  |
-                         | MLX Swift LM     |
-                         | MLX Swift        |
-                         +--------+---------+
-                                  |
-                              MLX core
-                             C++ / Metal
-```
-
-Future NVIDIA workers should preserve the same swarm protocol and use MLX's CUDA backend where practical.
-
 ## Building the MLX worker on macOS
 
-MLX's Metal shader library is built by Xcode, not command-line SwiftPM. Use the repository helper rather than `swift build`:
+MLX's Metal shader library is built by Xcode, not command-line SwiftPM. Use the repository helper:
 
 ```bash
 ./scripts/build-mlx-worker.sh
 ```
 
-The resulting executable is:
+The executable is produced at:
 
 ```text
 worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker
 ```
 
-Then run:
+## Local worker
 
 ```bash
 worker="worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
@@ -68,9 +39,7 @@ worker="worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
 
 `generate` uses MLX Swift LM's registered `mlx-community/SmolLM-135M-Instruct-4bit` model and downloads/caches its Hugging Face assets on first use.
 
-### Go-relayed two-process shard proof
-
-After building the worker:
+### Go-relayed two-process proof
 
 ```bash
 go run ./cmd/swarm-local
@@ -78,26 +47,50 @@ go run ./cmd/swarm-local
 
 Go launches one Swift worker for layers 0–3, captures its `WireTensor`, launches an independently initialized worker for layers 4–7, forwards the payload over stdin, and verifies the result against the second process's full-model reference.
 
-The relay payload is exactly the shape we expect to put on the swarm transport: `shape + dtype + contiguous bytes`. JSON/base64 framing is temporary; the protobuf `Tensor` message already models the intended representation.
+### Two-Mac network proof
+
+`swarmd` now has a deliberately temporary HTTP endpoint carrying the same tensor payload. This transport is **unauthenticated and unencrypted** and is only for a trusted LAN/debug experiment; do not expose it to the public Internet.
+
+On Mac B:
+
+```bash
+./scripts/build-mlx-worker.sh
+MLX_SWARM_WORKER="$PWD/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker" \
+SWARMD_ADDR=0.0.0.0:8080 \
+go run ./cmd/swarmd
+```
+
+On Mac A:
+
+```bash
+./scripts/build-mlx-worker.sh
+go run ./cmd/swarm-net \
+  -peer http://MAC_B_LAN_IP:8080
+```
+
+The result records logical tensor bytes, encoded wire bytes, local producer time, network/remote time, and whether the remote completion matches the reference.
+
+The current boundary representation is `shape + dtype + contiguous bytes`. JSON/base64 framing is temporary; `proto/swarm.proto` already models the intended raw-byte tensor message.
 
 ## First milestone
 
 1. Establish a real single-worker MLX Swift LM reference path.
-2. Prove complementary layer ranges compose across separate worker processes.
-3. Replace the local Go process relay with peer-to-peer swarm transport.
-4. Split a real checkpoint across two Apple-silicon Macs.
+2. Prove complementary layer ranges compose across independent worker processes.
+3. Prove the same boundary crosses the Go network between two machines.
+4. Split a real checkpoint across the two Apple-silicon Macs.
 5. Compare distributed logits against the single-node baseline.
-6. Record bytes transferred, p50/p95 stage latency, TTFT, and tokens/sec.
+6. Record p50/p95 stage latency, transfer bytes, TTFT, and tokens/sec.
 7. Kill or pause a worker and characterize failure behavior.
 
-Only after correctness is established do we add hedged execution, dynamic placement, WAN peers, and pooled-memory-only models.
+Only after correctness is established do we add hedged execution, dynamic placement, public membership, and pooled-memory-only models.
 
 ## Repository layout
 
 ```text
-cmd/swarmd/              Go daemon
-cmd/swarm-local/         local two-worker orchestration/benchmark
-internal/                Go control-plane packages
+cmd/swarmd/              Go daemon / debug network receiver
+cmd/swarm-local/         local two-worker orchestration
+cmd/swarm-net/           two-machine shard experiment client
+internal/                Go control-plane and worker-process packages
 proto/                   language-neutral protocol definitions
 worker/mlx/              Swift MLX worker
 ARCHITECTURE.md           design boundaries and execution model
@@ -106,4 +99,4 @@ ROADMAP.md                staged experimental plan
 
 ## Status
 
-M1/M2 boundary proof in progress: Swift compilation is green; CI now builds via Xcode so MLX's Metal shader library is available at runtime. The next step is the Go-relayed two-process shard test and then the same tensor over the LAN between two Macs.
+M2 network proof in progress. The process boundary and Go relay are implemented; the next physical experiment sends the same tensor between the two Macs.

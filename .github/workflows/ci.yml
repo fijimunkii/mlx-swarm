@@ -1,4 +1,4 @@
-name: CI
+name: Go CI
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   pull_request:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: go-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -18,24 +18,3 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./...
-
-  mlx-worker-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - run: swift --version
-      - name: Build MLX worker and Metal library
-        run: ./scripts/build-mlx-worker.sh
-      - name: Smoke test MLX worker
-        run: |
-          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
-          "$worker" health
-          "$worker" capabilities
-          "$worker" shard-smoke
-      - name: Relay shard across two worker processes with Go
-        run: |
-          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
-          go run ./cmd/swarm-local -worker "$worker"

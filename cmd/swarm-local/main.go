@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"time"
+
+	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
 
 type shardResult struct {
@@ -34,22 +36,26 @@ type runSummary struct {
 }
 
 func main() {
-	worker := flag.String("worker", defaultWorkerPath(), "path to the built MLXWorker executable")
+	worker := flag.String("worker", workerproc.DefaultPath(), "path to the built MLXWorker executable")
 	flag.Parse()
 
-	payload, producerDuration, err := runWorker(*worker, []string{"shard-produce-stdio"}, nil)
+	client := workerproc.Client{Path: *worker}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	producer, err := client.Run(ctx, []string{"shard-produce-stdio"}, nil)
 	if err != nil {
 		fatalf("producer failed: %v", err)
 	}
 
-	output, consumerDuration, err := runWorker(*worker, []string{"shard-finish-stdio"}, payload)
+	consumer, err := client.Run(ctx, []string{"shard-finish-stdio"}, producer.Output)
 	if err != nil {
 		fatalf("consumer failed: %v", err)
 	}
 
 	var result shardResult
-	if err := json.Unmarshal(bytes.TrimSpace(output), &result); err != nil {
-		fatalf("decode consumer result: %v; output=%q", err, output)
+	if err := json.Unmarshal(bytes.TrimSpace(consumer.Output), &result); err != nil {
+		fatalf("decode consumer result: %v; output=%q", err, consumer.Output)
 	}
 	if !result.MatchesSingleRange {
 		fatalf("distributed result did not match single-range reference")
@@ -57,10 +63,10 @@ func main() {
 
 	summary := runSummary{
 		Worker:              *worker,
-		BoundaryWireBytes:   len(payload),
+		BoundaryWireBytes:   len(producer.Output),
 		BoundaryTensorBytes: result.BoundaryBytes,
-		ProducerMillis:      millis(producerDuration),
-		ConsumerMillis:      millis(consumerDuration),
+		ProducerMillis:      millis(producer.Duration),
+		ConsumerMillis:      millis(consumer.Duration),
 		MatchesSingleRange:  result.MatchesSingleRange,
 		Model:               result.Model,
 		Layers:              result.Layers,
@@ -73,32 +79,6 @@ func main() {
 		fatalf("encode summary: %v", err)
 	}
 	fmt.Println(string(encoded))
-}
-
-func defaultWorkerPath() string {
-	if path := os.Getenv("MLX_SWARM_WORKER"); path != "" {
-		return path
-	}
-	return "worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
-}
-
-func runWorker(worker string, args []string, input []byte) ([]byte, time.Duration, error) {
-	cmd := exec.Command(worker, args...)
-	if input != nil {
-		cmd.Stdin = bytes.NewReader(input)
-	}
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	start := time.Now()
-	err := cmd.Run()
-	duration := time.Since(start)
-	if err != nil {
-		return nil, duration, fmt.Errorf("%w: %s", err, bytes.TrimSpace(stderr.Bytes()))
-	}
-	return stdout.Bytes(), duration, nil
 }
 
 func millis(d time.Duration) float64 {
