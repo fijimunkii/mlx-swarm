@@ -42,15 +42,29 @@ Community-scale, fault-tolerant distributed inference on heterogeneous consumer 
 
 Future NVIDIA workers should preserve the same swarm protocol and use MLX's CUDA backend where practical.
 
+## Local worker
+
+The first worker has a zero-download health command and a real local generation path through MLX Swift LM.
+
+```bash
+cd worker/mlx
+swift build
+swift run --skip-build MLXWorker health
+swift run --skip-build MLXWorker generate "Reply with exactly: swarm online"
+```
+
+`generate` currently uses the MLX Swift LM registry entry for Gemma 3 1B QAT 4-bit and downloads/caches its Hugging Face assets on first use. This command is the single-worker reference path we will compare distributed execution against.
+
 ## First milestone
 
 Prove a deterministic two-node pipeline using a small model:
 
-1. Load complementary layer ranges on two Apple-silicon Macs.
-2. Execute a forward pass across both workers.
-3. Compare distributed logits against a single-node baseline.
-4. Record bytes transferred, p50/p95 stage latency, TTFT, and tokens/sec.
-5. Kill or pause a worker and characterize failure behavior.
+1. Establish a real single-worker MLX Swift LM reference path.
+2. Load complementary layer ranges on two Apple-silicon Macs.
+3. Execute a forward pass across both workers.
+4. Compare distributed logits against the single-node baseline.
+5. Record bytes transferred, p50/p95 stage latency, TTFT, and tokens/sec.
+6. Kill or pause a worker and characterize failure behavior.
 
 Only after correctness is established do we add hedged execution, dynamic placement, WAN peers, and pooled-memory-only models.
 
@@ -67,4 +81,4 @@ ROADMAP.md                staged experimental plan
 
 ## Status
 
-Bootstrap stage. Interfaces are intentionally small and expected to change.
+M1 in progress: establishing the single-worker reference path before adding layer-range execution and two-node transport.
