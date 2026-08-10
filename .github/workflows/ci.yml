@@ -32,3 +32,4 @@ jobs:
         run: |
           swift run --skip-build MLXWorker health
           swift run --skip-build MLXWorker capabilities
+          swift run --skip-build MLXWorker shard-smoke

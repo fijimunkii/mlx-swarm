@@ -12,9 +12,11 @@ let package = Package(
             url: "https://github.com/ml-explore/mlx-swift",
             exact: "0.31.6"
         ),
+        // Pin the merged GemmaEncoder SPI until mlx-swift-lm cuts a release
+        // containing https://github.com/ml-explore/mlx-swift-lm/pull/387.
         .package(
             url: "https://github.com/ml-explore/mlx-swift-lm",
-            exact: "3.31.4"
+            revision: "6608a3565178240f1f42a23cb832ee1c59a16208"
         ),
         .package(
             url: "https://github.com/huggingface/swift-huggingface",
@@ -30,6 +32,7 @@ let package = Package(
             name: "MLXWorker",
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),

@@ -9,6 +9,7 @@ import Tokenizers
 private enum WorkerCommand {
     case health
     case capabilities
+    case shardSmoke
     case generate(prompt: String)
 
     init(arguments: [String]) throws {
@@ -22,6 +23,8 @@ private enum WorkerCommand {
             self = .health
         case "capabilities":
             self = .capabilities
+        case "shard-smoke":
+            self = .shardSmoke
         case "generate":
             let prompt = arguments.dropFirst().joined(separator: " ")
             guard !prompt.isEmpty else {
@@ -36,11 +39,14 @@ private enum WorkerCommand {
 
 private enum WorkerError: LocalizedError {
     case usage(String)
+    case shardSmokeMismatch
 
     var errorDescription: String? {
         switch self {
         case .usage(let message):
-            return "\(message)\nusage: mlx-worker [health | capabilities | generate <prompt>]"
+            return "\(message)\nusage: mlx-worker [health | capabilities | shard-smoke | generate <prompt>]"
+        case .shardSmokeMismatch:
+            return "shard-smoke output did not match the single-range reference"
         }
     }
 }
@@ -71,6 +77,14 @@ struct MLXWorker {
                 mlxCacheMemoryBytes: Memory.cacheMemory
             )
             let data = try JSONEncoder().encode(capabilities)
+            print(String(decoding: data, as: UTF8.self))
+
+        case .shardSmoke:
+            let result = Gemma3ShardSmoke.run()
+            guard result.matchesSingleRange else {
+                throw WorkerError.shardSmokeMismatch
+            }
+            let data = try JSONEncoder().encode(result)
             print(String(decoding: data, as: UTF8.self))
 
         case .generate(let prompt):
