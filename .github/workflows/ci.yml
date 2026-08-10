@@ -33,3 +33,6 @@ jobs:
           swift run --skip-build MLXWorker health
           swift run --skip-build MLXWorker capabilities
           swift run --skip-build MLXWorker shard-smoke
+          boundary="$RUNNER_TEMP/mlx-swarm-boundary.json"
+          swift run --skip-build MLXWorker shard-produce "$boundary"
+          swift run --skip-build MLXWorker shard-finish "$boundary"

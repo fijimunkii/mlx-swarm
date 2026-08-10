@@ -10,6 +10,8 @@ private enum WorkerCommand {
     case health
     case capabilities
     case shardSmoke
+    case shardProduce(path: String)
+    case shardFinish(path: String)
     case generate(prompt: String)
 
     init(arguments: [String]) throws {
@@ -25,6 +27,16 @@ private enum WorkerCommand {
             self = .capabilities
         case "shard-smoke":
             self = .shardSmoke
+        case "shard-produce":
+            guard arguments.count == 2 else {
+                throw WorkerError.usage("shard-produce requires an output path")
+            }
+            self = .shardProduce(path: arguments[1])
+        case "shard-finish":
+            guard arguments.count == 2 else {
+                throw WorkerError.usage("shard-finish requires an input path")
+            }
+            self = .shardFinish(path: arguments[1])
         case "generate":
             let prompt = arguments.dropFirst().joined(separator: " ")
             guard !prompt.isEmpty else {
@@ -39,14 +51,14 @@ private enum WorkerCommand {
 
 private enum WorkerError: LocalizedError {
     case usage(String)
-    case shardSmokeMismatch
+    case shardMismatch
 
     var errorDescription: String? {
         switch self {
         case .usage(let message):
-            return "\(message)\nusage: mlx-worker [health | capabilities | shard-smoke | generate <prompt>]"
-        case .shardSmokeMismatch:
-            return "shard-smoke output did not match the single-range reference"
+            return "\(message)\nusage: mlx-worker [health | capabilities | shard-smoke | shard-produce <path> | shard-finish <path> | generate <prompt>]"
+        case .shardMismatch:
+            return "sharded output did not match the single-range reference"
         }
     }
 }
@@ -63,6 +75,7 @@ private struct WorkerCapabilities: Codable {
 struct MLXWorker {
     static func main() async throws {
         let command = try WorkerCommand(arguments: Array(CommandLine.arguments.dropFirst()))
+        let encoder = JSONEncoder()
 
         switch command {
         case .health:
@@ -76,16 +89,29 @@ struct MLXWorker {
                 mlxActiveMemoryBytes: Memory.activeMemory,
                 mlxCacheMemoryBytes: Memory.cacheMemory
             )
-            let data = try JSONEncoder().encode(capabilities)
-            print(String(decoding: data, as: UTF8.self))
+            print(String(decoding: try encoder.encode(capabilities), as: UTF8.self))
 
         case .shardSmoke:
             let result = Gemma3ShardSmoke.run()
             guard result.matchesSingleRange else {
-                throw WorkerError.shardSmokeMismatch
+                throw WorkerError.shardMismatch
             }
-            let data = try JSONEncoder().encode(result)
-            print(String(decoding: data, as: UTF8.self))
+            print(String(decoding: try encoder.encode(result), as: UTF8.self))
+
+        case .shardProduce(let path):
+            let result = try Gemma3ShardSmoke.produceBoundary(
+                to: URL(fileURLWithPath: path)
+            )
+            print(String(decoding: try encoder.encode(result), as: UTF8.self))
+
+        case .shardFinish(let path):
+            let result = try Gemma3ShardSmoke.finishBoundary(
+                from: URL(fileURLWithPath: path)
+            )
+            guard result.matchesSingleRange else {
+                throw WorkerError.shardMismatch
+            }
+            print(String(decoding: try encoder.encode(result), as: UTF8.self))
 
         case .generate(let prompt):
             let configuration = LLMRegistry.smolLM_135M_4bit
