@@ -52,7 +52,7 @@ struct MLXWorker {
             print("{\"status\":\"ok\",\"runtime\":\"mlx-swift\"}")
 
         case .generate(let prompt):
-            let configuration = LLMRegistry.gemma3_1B_qat_4bit
+            let configuration = LLMRegistry.smolLM_135M_4bit
             let model = try await #huggingFaceLoadModelContainer(
                 configuration: configuration
             )
