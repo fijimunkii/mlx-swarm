@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,17 +27,21 @@ type shardResult struct {
 }
 
 type networkSummary struct {
-	Peer                string  `json:"peer"`
-	BoundaryWireBytes   int     `json:"boundaryWireBytes"`
-	BoundaryTensorBytes int     `json:"boundaryTensorBytes"`
-	ProducerMillis      float64 `json:"producerMillis"`
-	NetworkMillis       float64 `json:"networkMillis"`
-	RemoteWorkerMicros  string  `json:"remoteWorkerMicros,omitempty"`
-	MatchesSingleRange  bool    `json:"matchesSingleRange"`
-	Model               string  `json:"model"`
-	Layers              int     `json:"layers"`
-	SplitLayer          int     `json:"splitLayer"`
-	BoundaryDType       string  `json:"boundaryDType"`
+	Peer                    string  `json:"peer"`
+	BoundaryWireBytes       int     `json:"boundaryWireBytes"`
+	BoundaryTensorBytes     int     `json:"boundaryTensorBytes"`
+	ProducerMillis          float64 `json:"producerMillis"`
+	NetworkMillis           float64 `json:"networkMillis"`
+	RemoteWorkerMicros      string  `json:"remoteWorkerMicros,omitempty"`
+	RemoteWorkerMillis      float64 `json:"remoteWorkerMillis"`
+	TransportOverheadMillis float64 `json:"transportOverheadMillis"`
+	TotalMillis             float64 `json:"totalMillis"`
+	WireEffectiveMBps       float64 `json:"wireEffectiveMBps"`
+	MatchesSingleRange      bool    `json:"matchesSingleRange"`
+	Model                   string  `json:"model"`
+	Layers                  int     `json:"layers"`
+	SplitLayer              int     `json:"splitLayer"`
+	BoundaryDType           string  `json:"boundaryDType"`
 }
 
 func main() {
@@ -85,18 +90,31 @@ func main() {
 		fatalf("remote sharded result did not match single-range reference")
 	}
 
+	producerMillis := millis(producer.Duration)
+	networkMillis := millis(networkDuration)
+	remoteWorkerMicros := resp.Header.Get("X-MLX-Swarm-Worker-Micros")
+	remoteWorkerMillis := microsHeaderMillis(remoteWorkerMicros)
+	transportOverheadMillis := networkMillis - remoteWorkerMillis
+	if transportOverheadMillis < 0 {
+		transportOverheadMillis = 0
+	}
+
 	summary := networkSummary{
-		Peer:                *peer,
-		BoundaryWireBytes:   len(producer.Output),
-		BoundaryTensorBytes: result.BoundaryBytes,
-		ProducerMillis:      millis(producer.Duration),
-		NetworkMillis:       millis(networkDuration),
-		RemoteWorkerMicros:  resp.Header.Get("X-MLX-Swarm-Worker-Micros"),
-		MatchesSingleRange:  result.MatchesSingleRange,
-		Model:               result.Model,
-		Layers:              result.Layers,
-		SplitLayer:          result.SplitLayer,
-		BoundaryDType:       result.BoundaryDType,
+		Peer:                    *peer,
+		BoundaryWireBytes:       len(producer.Output),
+		BoundaryTensorBytes:     result.BoundaryBytes,
+		ProducerMillis:          producerMillis,
+		NetworkMillis:           networkMillis,
+		RemoteWorkerMicros:      remoteWorkerMicros,
+		RemoteWorkerMillis:      remoteWorkerMillis,
+		TransportOverheadMillis: transportOverheadMillis,
+		TotalMillis:             producerMillis + networkMillis,
+		WireEffectiveMBps:       effectiveMBps(len(producer.Output), networkDuration),
+		MatchesSingleRange:      result.MatchesSingleRange,
+		Model:                   result.Model,
+		Layers:                  result.Layers,
+		SplitLayer:              result.SplitLayer,
+		BoundaryDType:           result.BoundaryDType,
 	}
 
 	encoded, err := json.Marshal(summary)
@@ -108,6 +126,25 @@ func main() {
 
 func millis(d time.Duration) float64 {
 	return float64(d.Microseconds()) / 1000.0
+}
+
+func microsHeaderMillis(value string) float64 {
+	if value == "" {
+		return 0
+	}
+	micros, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return float64(micros) / 1000.0
+}
+
+func effectiveMBps(bytes int, d time.Duration) float64 {
+	seconds := d.Seconds()
+	if seconds <= 0 {
+		return 0
+	}
+	return (float64(bytes) / 1_000_000.0) / seconds
 }
 
 func fatalf(format string, args ...any) {
