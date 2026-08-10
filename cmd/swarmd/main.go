@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -28,6 +29,8 @@ func main() {
 	if addr == "" {
 		addr = "127.0.0.1:8080"
 	}
+	exitAfterDebugShard := os.Getenv("SWARMD_EXIT_AFTER_DEBUG_SHARD") == "1"
+	debugShardComplete := make(chan struct{}, 1)
 
 	worker := workerproc.Client{Path: workerproc.DefaultPath()}
 	mux := http.NewServeMux()
@@ -73,6 +76,13 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-MLX-Swarm-Worker-Micros", strconv.FormatInt(result.Duration.Microseconds(), 10))
 		_, _ = w.Write(result.Output)
+
+		if exitAfterDebugShard {
+			select {
+			case debugShardComplete <- struct{}{}:
+			default:
+			}
+		}
 	})
 
 	server := &http.Server{
@@ -82,6 +92,17 @@ func main() {
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      2 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
+	}
+
+	if exitAfterDebugShard {
+		go func() {
+			<-debugShardComplete
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := server.Shutdown(ctx); err != nil {
+				log.Printf("debug one-shot shutdown: %v", err)
+			}
+		}()
 	}
 
 	log.Printf("swarmd listening on %s", addr)
