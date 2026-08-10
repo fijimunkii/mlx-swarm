@@ -53,7 +53,7 @@ swift run --skip-build MLXWorker health
 swift run --skip-build MLXWorker generate "Reply with exactly: swarm online"
 ```
 
-`generate` currently uses the MLX Swift LM registry entry for Gemma 3 1B QAT 4-bit and downloads/caches its Hugging Face assets on first use. This command is the single-worker reference path we will compare distributed execution against.
+`generate` currently uses MLX Swift LM's registered `mlx-community/SmolLM-135M-Instruct-4bit` model and downloads/caches its Hugging Face assets on first use. This tiny model is our fast single-worker reference path; larger Qwen/Gemma models will be used when we begin exercising layer-range sharding.
 
 ## First milestone
 
