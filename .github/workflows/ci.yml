@@ -23,6 +23,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - run: swift --version
       - name: Build MLX worker
         working-directory: worker/mlx
@@ -33,6 +36,5 @@ jobs:
           swift run --skip-build MLXWorker health
           swift run --skip-build MLXWorker capabilities
           swift run --skip-build MLXWorker shard-smoke
-          boundary="$RUNNER_TEMP/mlx-swarm-boundary.json"
-          swift run --skip-build MLXWorker shard-produce "$boundary"
-          swift run --skip-build MLXWorker shard-finish "$boundary"
+      - name: Relay shard across two worker processes with Go
+        run: go run ./cmd/swarm-local -worker worker/mlx/.build/debug/MLXWorker

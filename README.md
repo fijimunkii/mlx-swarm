@@ -57,18 +57,18 @@ swift run --skip-build MLXWorker generate "Reply with exactly: swarm online"
 
 `generate` uses MLX Swift LM's registered `mlx-community/SmolLM-135M-Instruct-4bit` model and downloads/caches its Hugging Face assets on first use.
 
-### Two-process shard proof
+### Go-relayed two-process shard proof
 
-The first true process-boundary test uses a deterministic tiny Gemma 3 model so it requires no checkpoint download. One worker process executes the first half and writes only a language-neutral tensor payload; a second independently initialized worker consumes it, runs the complementary layers, and checks the result against its own full-model reference.
+The first true process-boundary test uses a deterministic tiny Gemma 3 model so it requires no checkpoint download. Go launches one Swift worker process for layers 0–3, captures its language-neutral tensor payload, then launches a fresh Swift worker for layers 4–7 and forwards the payload over stdin. The second process checks the result against its own full-model reference.
 
 ```bash
-boundary="$(mktemp)"
-swift run --skip-build MLXWorker shard-produce "$boundary"
-swift run --skip-build MLXWorker shard-finish "$boundary"
-rm -f "$boundary"
+# From the repository root, after `cd worker/mlx && swift build && cd ../..`
+go run ./cmd/swarm-local -worker worker/mlx/.build/debug/MLXWorker
 ```
 
-The boundary payload is exactly the shape we expect to place on the swarm transport: `shape + dtype + contiguous bytes`.
+The relay payload is exactly the shape we expect to place on the swarm transport: `shape + dtype + contiguous bytes`. JSON/base64 framing is temporary; the WAN transport will carry the existing protobuf `Tensor` fields directly.
+
+The worker also keeps file-based `shard-produce` / `shard-finish` commands as a debugging aid, but the primary experiment does not share a file or MLX process state.
 
 ## First milestone
 
@@ -76,7 +76,7 @@ Prove a deterministic two-node pipeline using a small model:
 
 1. Establish a real single-worker MLX Swift LM reference path.
 2. Prove complementary layer ranges compose across separate worker processes.
-3. Replace the local file boundary with the swarm transport.
+3. Replace the local Go process relay with peer-to-peer swarm transport.
 4. Split a real checkpoint across two Apple-silicon Macs.
 5. Compare distributed logits against the single-node baseline.
 6. Record bytes transferred, p50/p95 stage latency, TTFT, and tokens/sec.
@@ -88,6 +88,7 @@ Only after correctness is established do we add hedged execution, dynamic placem
 
 ```text
 cmd/swarmd/              Go daemon
+cmd/swarm-local/         local two-worker orchestration/benchmark
 internal/                Go control-plane packages
 proto/                   language-neutral protocol definitions
 worker/mlx/              Swift MLX worker
@@ -97,4 +98,4 @@ ROADMAP.md                staged experimental plan
 
 ## Status
 
-M1/M2 boundary proof in progress: the worker can serialize a hidden state between independent OS processes. The next step is replacing the temporary file handoff with the Go swarm transport.
+M2 process-boundary proof: Go can relay a serialized hidden state between two independently initialized Swift/MLX worker processes. The next step is moving the same tensor payload over the Go swarm network between two machines.

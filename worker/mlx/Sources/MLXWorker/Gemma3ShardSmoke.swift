@@ -73,38 +73,41 @@ private enum TinyGemma3Fixture {
 
 enum Gemma3ShardSmoke {
     static func run() -> ShardSmokeResult {
-        let model = TinyGemma3Fixture.makeModel()
-        let inner = model.model
-        let splitLayer = inner.layers.count / 2
-        let reference = TinyGemma3Fixture.fullReference(inner)
-
-        var hidden = TinyGemma3Fixture.embeddedInput(inner)
-        for layer in inner.layers[..<splitLayer] {
-            hidden = layer(hidden, mask: TinyGemma3Fixture.mask, cache: nil)
-        }
-        eval(hidden)
-
-        let boundary = WireTensor(hidden)
-        hidden = boundary.materialize()
-
-        for layer in inner.layers[splitLayer...] {
-            hidden = layer(hidden, mask: TinyGemma3Fixture.mask, cache: nil)
-        }
-        eval(hidden)
-
-        let matches = allClose(reference, hidden, rtol: 1e-5, atol: 1e-5).item(Bool.self)
-        return result(
-            inner: inner,
-            splitLayer: splitLayer,
-            boundary: boundary,
-            output: hidden,
-            matches: matches
+        let (boundary, produce) = makeBoundary()
+        return try! finishBoundary(
+            from: JSONEncoder().encode(boundary),
+            expectedProduce: produce
         )
     }
 
     /// First OS process: initialize the deterministic model, execute the first
     /// half, and persist only the language-neutral tensor payload.
     static func produceBoundary(to url: URL) throws -> ShardProduceResult {
+        let (boundary, result) = makeBoundary()
+        try JSONEncoder().encode(boundary).write(to: url, options: .atomic)
+        return result
+    }
+
+    /// Produce exactly the byte payload that the Go relay / future WAN transport
+    /// forwards. JSON/base64 is temporary; the protobuf tensor message will carry
+    /// the same shape, dtype and raw data fields directly.
+    static func produceBoundaryPayload() throws -> Data {
+        let (boundary, _) = makeBoundary()
+        return try JSONEncoder().encode(boundary)
+    }
+
+    /// Second OS process: recreate the same deterministic model, consume the
+    /// serialized midpoint, execute the remaining layers, and compare against
+    /// a full reference computed entirely in this second process.
+    static func finishBoundary(from url: URL) throws -> ShardSmokeResult {
+        try finishBoundary(from: Data(contentsOf: url))
+    }
+
+    static func finishBoundary(from data: Data) throws -> ShardSmokeResult {
+        try finishBoundary(from: data, expectedProduce: nil)
+    }
+
+    private static func makeBoundary() -> (WireTensor, ShardProduceResult) {
         let model = TinyGemma3Fixture.makeModel()
         let inner = model.model
         let splitLayer = inner.layers.count / 2
@@ -116,9 +119,7 @@ enum Gemma3ShardSmoke {
         eval(hidden)
 
         let boundary = WireTensor(hidden)
-        try JSONEncoder().encode(boundary).write(to: url, options: .atomic)
-
-        return ShardProduceResult(
+        let result = ShardProduceResult(
             model: "gemma3-random-tiny",
             layers: inner.layers.count,
             splitLayer: splitLayer,
@@ -126,23 +127,26 @@ enum Gemma3ShardSmoke {
             boundaryDType: boundary.dtype.rawValue,
             boundaryShape: boundary.shape
         )
+        return (boundary, result)
     }
 
-    /// Second OS process: recreate the same deterministic model, consume the
-    /// serialized midpoint, execute the remaining layers, and compare against
-    /// a full reference computed entirely in this second process. Matching here
-    /// proves that the first process's weights and hidden state compose with the
-    /// second process's complementary layer range.
-    static func finishBoundary(from url: URL) throws -> ShardSmokeResult {
-        let boundary = try JSONDecoder().decode(
-            WireTensor.self,
-            from: Data(contentsOf: url)
-        )
-
+    private static func finishBoundary(
+        from data: Data,
+        expectedProduce: ShardProduceResult?
+    ) throws -> ShardSmokeResult {
+        let boundary = try JSONDecoder().decode(WireTensor.self, from: data)
         let model = TinyGemma3Fixture.makeModel()
         let inner = model.model
         let splitLayer = inner.layers.count / 2
         let reference = TinyGemma3Fixture.fullReference(inner)
+
+        // If run() supplied producer metadata, assert our in-process test still
+        // exercises the exact same split and payload shape as the process path.
+        if let expectedProduce {
+            precondition(expectedProduce.splitLayer == splitLayer)
+            precondition(expectedProduce.boundaryShape == boundary.shape)
+            precondition(expectedProduce.boundaryBytes == boundary.data.count)
+        }
 
         var hidden = boundary.materialize()
         for layer in inner.layers[splitLayer...] {

@@ -12,6 +12,8 @@ private enum WorkerCommand {
     case shardSmoke
     case shardProduce(path: String)
     case shardFinish(path: String)
+    case shardProduceStdio
+    case shardFinishStdio
     case generate(prompt: String)
 
     init(arguments: [String]) throws {
@@ -37,6 +39,10 @@ private enum WorkerCommand {
                 throw WorkerError.usage("shard-finish requires an input path")
             }
             self = .shardFinish(path: arguments[1])
+        case "shard-produce-stdio":
+            self = .shardProduceStdio
+        case "shard-finish-stdio":
+            self = .shardFinishStdio
         case "generate":
             let prompt = arguments.dropFirst().joined(separator: " ")
             guard !prompt.isEmpty else {
@@ -56,7 +62,7 @@ private enum WorkerError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .usage(let message):
-            return "\(message)\nusage: mlx-worker [health | capabilities | shard-smoke | shard-produce <path> | shard-finish <path> | generate <prompt>]"
+            return "\(message)\nusage: mlx-worker [health | capabilities | shard-smoke | shard-produce <path> | shard-finish <path> | shard-produce-stdio | shard-finish-stdio | generate <prompt>]"
         case .shardMismatch:
             return "sharded output did not match the single-range reference"
         }
@@ -108,10 +114,19 @@ struct MLXWorker {
             let result = try Gemma3ShardSmoke.finishBoundary(
                 from: URL(fileURLWithPath: path)
             )
-            guard result.matchesSingleRange else {
-                throw WorkerError.shardMismatch
-            }
-            print(String(decoding: try encoder.encode(result), as: UTF8.self))
+            try printShardResult(result, encoder: encoder)
+
+        case .shardProduceStdio:
+            // stdout is intentionally payload-only so the Go daemon can relay it
+            // byte-for-byte without parsing MLX-specific data.
+            FileHandle.standardOutput.write(
+                try Gemma3ShardSmoke.produceBoundaryPayload()
+            )
+
+        case .shardFinishStdio:
+            let payload = FileHandle.standardInput.readDataToEndOfFile()
+            let result = try Gemma3ShardSmoke.finishBoundary(from: payload)
+            try printShardResult(result, encoder: encoder)
 
         case .generate(let prompt):
             let configuration = LLMRegistry.smolLM_135M_4bit
@@ -123,5 +138,15 @@ struct MLXWorker {
             let response = try await session.respond(to: prompt)
             print(response)
         }
+    }
+
+    private static func printShardResult(
+        _ result: ShardSmokeResult,
+        encoder: JSONEncoder
+    ) throws {
+        guard result.matchesSingleRange else {
+            throw WorkerError.shardMismatch
+        }
+        print(String(decoding: try encoder.encode(result), as: UTF8.self))
     }
 }
