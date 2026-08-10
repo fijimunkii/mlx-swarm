@@ -1,0 +1,100 @@
+# Architecture
+
+## Goal
+
+Test whether a dynamic pool of heterogeneous consumer devices can provide useful distributed LLM inference over ordinary networks without treating every participant as a reliable cluster member.
+
+## Boundary: swarm vs. MLX
+
+`mlx-swarm` should add distributed-systems behavior, not duplicate the ML stack.
+
+### MLX is responsible for
+
+- arrays and lazy graph execution
+- Metal/CUDA kernels
+- quantized operations
+- attention and matrix operations
+- device memory management
+- model math exposed by MLX Swift / MLX Swift LM
+
+### The swarm is responsible for
+
+- peer discovery and membership
+- capability and latency profiling
+- model/shard placement
+- WAN transport
+- deadlines and cancellation
+- retries and hedged execution
+- replica selection
+- failure detection and recovery
+- topology-aware routing
+- public API and, later, trust/accounting
+
+## Processes
+
+Each participating machine initially runs two processes:
+
+1. `swarmd` (Go): network-facing daemon and scheduler agent.
+2. `mlx-worker` (Swift): local MLX execution service.
+
+A process boundary gives us crash isolation and lets future worker backends implement the same protocol without changing the control plane.
+
+## Execution model
+
+The first useful primitive is conceptually:
+
+```text
+Forward(model, shard, sequence, position, tensor) -> tensor
+```
+
+A shard is initially a contiguous transformer layer range. The worker owns weights and KV state for the shard while it is assigned.
+
+The coordinator transfers only execution inputs/outputs and metadata during steady-state inference; weights remain cached on workers.
+
+## Network model
+
+The global network is dynamic. A worker may disappear at any point. We therefore do not model the public swarm as one `mx.distributed.Group`.
+
+Stable local groups may later use MLX Ring/JACCL/NCCL internally, while the swarm treats each group as an execution island.
+
+```text
+             swarm protocol
+                  |
+      +-----------+-----------+
+      |                       |
+  MLX island A             worker B
+  Mac <-> Mac              RTX GPU
+   JACCL                    MLX CUDA
+```
+
+## Scheduling direction
+
+The scheduler should eventually optimize an execution plan against observed latency distributions rather than static GPU labels.
+
+Future policy example:
+
+```text
+execute shard 12
+  deadline: 25 ms
+  primary: worker-a
+  hedge after: 8 ms
+  replica: worker-b
+  accept first valid result
+```
+
+v0 does **not** implement this. It first measures the baseline needed to decide whether hedging is worthwhile.
+
+## Correctness rule
+
+A distributed execution path must match a single-worker reference within an explicitly defined numerical tolerance before its performance matters.
+
+## Non-goals for v0
+
+- cryptocurrency or payments
+- permissionless public discovery
+- malicious-worker verification
+- iPhone background workers
+- expert parallelism
+- coded computation
+- custom GPU kernels
+- replacing MLX/MLX Swift LM

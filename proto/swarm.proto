@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package mlxswarm.v1;
+
+option go_package = "github.com/fijimunkii/mlx-swarm/gen/swarm/v1;swarmv1";
+
+message DeviceInfo {
+  string backend = 1;       // mlx
+  string accelerator = 2;   // metal, cuda, cpu
+  string device_name = 3;
+  uint64 memory_bytes = 4;
+}
+
+message WorkerHello {
+  string worker_id = 1;
+  DeviceInfo device = 2;
+  repeated string capabilities = 3;
+}
+
+message Heartbeat {
+  string worker_id = 1;
+  uint64 unix_millis = 2;
+  uint64 available_memory_bytes = 3;
+}
+
+message Tensor {
+  repeated uint32 shape = 1;
+  string dtype = 2;
+  bytes data = 3;
+}
+
+message LoadShardRequest {
+  string model_id = 1;
+  string shard_id = 2;
+  uint32 layer_start = 3;
+  uint32 layer_end = 4;
+}
+
+message LoadShardResponse {
+  bool loaded = 1;
+  string error = 2;
+}
+
+message ForwardRequest {
+  string request_id = 1;
+  string model_id = 2;
+  string shard_id = 3;
+  string sequence_id = 4;
+  uint64 position = 5;
+  Tensor input = 6;
+  uint64 deadline_unix_millis = 7;
+}
+
+message ForwardResponse {
+  string request_id = 1;
+  Tensor output = 2;
+  uint64 compute_micros = 3;
+  string error = 4;
+}
