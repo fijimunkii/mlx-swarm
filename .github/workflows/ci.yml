@@ -25,4 +25,6 @@ jobs:
         run: swift build
       - name: Smoke test MLX worker
         working-directory: worker/mlx
-        run: swift run --skip-build MLXWorker health
+        run: |
+          swift run --skip-build MLXWorker health
+          swift run --skip-build MLXWorker capabilities
