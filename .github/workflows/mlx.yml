@@ -67,6 +67,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # Resolve/build before Tailscale modifies the macOS DNS resolver. SwiftPM
+      # needs ordinary github.com DNS while fetching mlx-swift-lm.
+      - name: Build MLX worker and Metal library
+        run: ./scripts/build-mlx-worker.sh
       - name: Connect receiver to Tailscale
         uses: tailscale/github-action@v4
         with:
@@ -74,8 +78,6 @@ jobs:
           audience: ${{ secrets.TS_AUDIENCE }}
           tags: tag:ci
           hostname: mlx-swarm-r-${{ github.run_id }}
-      - name: Build MLX worker and Metal library
-        run: ./scripts/build-mlx-worker.sh
       - name: Start one-shot shard receiver
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
@@ -99,14 +101,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Connect producer to Tailscale
-        uses: tailscale/github-action@v4
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          audience: ${{ secrets.TS_AUDIENCE }}
-          tags: tag:ci
-          hostname: mlx-swarm-p-${{ github.run_id }}
       - run: swift --version
+      # Keep all dependency resolution and local correctness work off the
+      # Tailscale-modified resolver; attach to the tailnet only for WAN relay.
       - name: Build MLX worker and Metal library
         run: ./scripts/build-mlx-worker.sh
       - name: Smoke test MLX worker
@@ -119,6 +116,13 @@ jobs:
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
           go run ./cmd/swarm-local -worker "$worker"
+      - name: Connect producer to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
+          hostname: mlx-swarm-p-${{ github.run_id }}
       - name: Discover receiver and relay shard across runners
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
