@@ -23,13 +23,22 @@ on:
       - 'go.mod'
       - '.github/workflows/mlx.yml'
 
+permissions:
+  contents: read
+  id-token: write
+
 concurrency:
   group: mlx-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  mlx-worker-macos:
+  # Fork PRs do not receive repository secrets. Keep a local MLX compiler and
+  # correctness check for those contributions without attaching them to the
+  # private tailnet.
+  mlx-worker-macos-fork:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -48,24 +57,105 @@ jobs:
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
           go run ./cmd/swarm-local -worker "$worker"
-      - name: Relay shard over loopback swarm network
+
+  mlx-receiver-macos:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Connect receiver to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
+          hostname: mlx-swarm-r-${{ github.run_id }}
+      - name: Build MLX worker and Metal library
+        run: ./scripts/build-mlx-worker.sh
+      - name: Start one-shot shard receiver
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
-          MLX_SWARM_WORKER="$worker" SWARMD_ADDR=127.0.0.1:18080 go run ./cmd/swarmd >"$RUNNER_TEMP/swarmd.log" 2>&1 &
-          swarmd_pid=$!
-          trap 'kill "$swarmd_pid" 2>/dev/null || true' EXIT
+          ts_ip="$(tailscale ip -4 | head -n 1)"
+          if [ -z "$ts_ip" ]; then
+            echo "Tailscale did not assign an IPv4 address" >&2
+            exit 1
+          fi
+          echo "receiver_tailscale_ip=$ts_ip"
+          MLX_SWARM_WORKER="$worker" \
+            SWARMD_ADDR="${ts_ip}:8080" \
+            SWARMD_EXIT_AFTER_DEBUG_SHARD=1 \
+            go run ./cmd/swarmd
 
-          ready=0
-          for _ in {1..30}; do
-            if curl -fsS http://127.0.0.1:18080/healthz >/dev/null; then
-              ready=1
+  mlx-producer-macos:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Connect producer to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
+          hostname: mlx-swarm-p-${{ github.run_id }}
+      - run: swift --version
+      - name: Build MLX worker and Metal library
+        run: ./scripts/build-mlx-worker.sh
+      - name: Smoke test MLX worker
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          "$worker" health
+          "$worker" capabilities
+          "$worker" shard-smoke
+      - name: Relay shard across two local worker processes with Go
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          go run ./cmd/swarm-local -worker "$worker"
+      - name: Discover receiver and relay shard across runners
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          peer_name="mlx-swarm-r-${GITHUB_RUN_ID}"
+          peer_ip=""
+
+          for _ in {1..120}; do
+            peer_ip="$(tailscale status --json | jq -r --arg name "$peer_name" '(.Peer // {})[] | select(.HostName == $name) | .TailscaleIPs[]? | select(contains(":") | not)' | head -n 1)"
+            if [ -n "$peer_ip" ]; then
               break
             fi
-            sleep 1
+            sleep 2
           done
-          if [ "$ready" -ne 1 ]; then
-            cat "$RUNNER_TEMP/swarmd.log"
+
+          if [ -z "$peer_ip" ]; then
+            echo "Could not discover Tailscale peer $peer_name" >&2
+            tailscale status
             exit 1
           fi
 
-          go run ./cmd/swarm-net -worker "$worker" -peer http://127.0.0.1:18080
+          echo "receiver_tailscale_ip=$peer_ip"
+          tailscale ping --timeout=10s "$peer_ip" || true
+
+          ready=0
+          for _ in {1..120}; do
+            if curl -fsS --connect-timeout 2 "http://${peer_ip}:8080/healthz" >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "Receiver was discovered but never became HTTP-ready" >&2
+            tailscale status
+            exit 1
+          fi
+
+          go run ./cmd/swarm-net \
+            -worker "$worker" \
+            -peer "http://${peer_ip}:8080"
