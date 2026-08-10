@@ -13,6 +13,8 @@ mkdir -p "$DERIVED_DATA"
     -scheme MLXWorker \
     -destination 'platform=macOS' \
     -derivedDataPath "$DERIVED_DATA" \
+    -skipPackagePluginValidation \
+    -skipMacroValidation \
     CODE_SIGNING_ALLOWED=NO
 )
 
