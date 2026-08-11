@@ -79,6 +79,50 @@ skipped, conflicting, unknown, and closed sequence positions, reports KV
 memory separately from weights and allocator cache, and proves that closing a
 sequence releases its KV state without unloading the shard.
 
+### Distributed text generation
+
+Generate text through two complementary cached shards with one command:
+
+```bash
+go run ./cmd/swarm-generate \
+  -worker "$worker" \
+  -model mlx-community/gemma-3-270m-it-4bit \
+  -prompt "Write a short story about two computers working together:" \
+  -max-tokens 32
+```
+
+The command resolves the checkpoint's registered adapter and layer count,
+tokenizes with that checkpoint's tokenizer, prefills both shards once, chooses
+each next token by deterministic greedy decoding, and returns JSON containing
+the prompt and generated token IDs, decoded text, model and shard plan,
+sequence ID, EOS/max stop reason, KV bytes, timings, and numerical tolerance.
+Add `-verify` to compare every distributed logit vector and greedy token with a
+separate full-checkpoint cached reference.
+
+Direct mode starts temporary local workers. To keep weights resident across
+separate command invocations, run `swarmd` on both Macs and address both
+persistent workers over the trusted-network API:
+
+```bash
+go run ./cmd/swarm-generate \
+  -producer http://127.0.0.1:8080 \
+  -peer http://MAC_B_LAN_IP:8080 \
+  -model mlx-community/gemma-3-270m-it-4bit \
+  -prompt "Write a short story about two computers working together:" \
+  -max-tokens 32
+```
+
+Stable model-derived shard IDs make later commands reuse matching loaded
+stages. Every request still receives a fresh sequence ID and closes its KV
+state on EOS, maximum length, cancellation, or failure. The deterministic
+generation smoke opens two sessions against the same retained workers and
+requires the complete 32-token distributed sequence to match the cached
+single-node path:
+
+```bash
+go run ./cmd/swarm-generate-smoke -worker "$worker"
+```
+
 The framed request contract is documented in
 [`docs/persistent-worker-protocol.md`](docs/persistent-worker-protocol.md).
 
@@ -107,6 +151,19 @@ On Mac A:
 
 ```bash
 ./scripts/build-mlx-worker.sh
+MLX_SWARM_WORKER="$PWD/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker" \
+SWARMD_ADDR=127.0.0.1:8080 \
+go run ./cmd/swarmd
+```
+
+Then, from another shell on Mac A:
+
+```bash
+go run ./cmd/swarm-generate \
+  -producer http://127.0.0.1:8080 \
+  -peer http://MAC_B_LAN_IP:8080 \
+  -prompt "Write a short story about two computers working together:" \
+  -max-tokens 32
 go run ./cmd/swarm-cache-smoke \
   -worker "$PWD/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker" \
   -peer http://MAC_B_LAN_IP:8080
@@ -114,12 +171,12 @@ go run ./cmd/swarm-net \
   -peer http://MAC_B_LAN_IP:8080
 ```
 
-The cached proof uses `swarmd`'s persistent worker API for prompt prefill and
-32 incremental decode steps per interleaved sequence. The one-shot result also
-records logical tensor bytes, encoded wire bytes, local producer time,
-network/remote time, final-logit correctness, and measured
-full/producer/consumer peak memory. The current 270M checkpoint produces a
-7,680-byte `bfloat16` boundary and logits shaped `[1, 6, 262144]`.
+The generation command uses `swarmd`'s persistent worker API for tokenizer,
+prompt prefill, greedy sampling, incremental decode, and detokenization. The
+cached and one-shot proofs also record logical tensor bytes, encoded wire
+bytes, local producer time, network/remote time, final-logit correctness, and
+measured full/producer/consumer peak memory. The current 270M checkpoint
+produces a 7,680-byte `bfloat16` boundary and logits shaped `[1, 6, 262144]`.
 
 The current boundary representation is `shape + dtype + contiguous bytes`. JSON/base64 framing is temporary; `proto/swarm.proto` already models the intended raw-byte tensor message.
 
@@ -143,6 +200,9 @@ cmd/swarm-local/         local two-worker orchestration
 cmd/swarm-net/           two-machine shard experiment client
 cmd/swarm-session-smoke/ persistent shard lifecycle and reuse proof
 cmd/swarm-cache-smoke/   cached prefill/decode and reference-logit proof
+cmd/swarm-generate/      prompt-to-text distributed greedy generation
+cmd/swarm-generate-smoke/ deterministic generation/reference/retention proof
+internal/generation/     reusable model planning and generation session
 internal/workerproc/     supervised local and HTTP persistent-worker clients
 proto/                   language-neutral protocol definitions
 worker/mlx/              Swift MLX worker
@@ -156,7 +216,8 @@ ROADMAP.md                staged experimental plan
 
 ## Status
 
-The M2 real-checkpoint pipeline, persistent shard lifecycle, and per-sequence
-KV-cached prefill/decode are implemented and enforced in paired macOS CI
-runners. Remaining M2 work is statistically useful latency/throughput
-measurement; see [ROADMAP.md](ROADMAP.md).
+The M2 real-checkpoint pipeline now produces tokenizer-backed text through
+per-sequence KV-cached prefill/decode, with exact greedy-token parity enforced
+between paired macOS CI runners and a cached full-model reference. Remaining
+M2 work is statistically useful latency/throughput measurement; see
+[ROADMAP.md](ROADMAP.md).

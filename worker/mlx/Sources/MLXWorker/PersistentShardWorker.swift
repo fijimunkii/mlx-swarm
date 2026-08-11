@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import MLX
+import Tokenizers
 
 struct PersistentWorkerRequest: Codable {
     let requestID: String
@@ -9,6 +10,8 @@ struct PersistentWorkerRequest: Codable {
     let shard: PersistentShardRequest?
     let sequence: PersistentSequenceRequest?
     let forward: PersistentForwardRequest?
+    let model: PersistentModelRequest?
+    let text: PersistentTextRequest?
 }
 
 private struct PersistentWorkerEnvelope: Decodable {
@@ -41,6 +44,18 @@ struct PersistentForwardRequest: Codable {
     let input: WireTensor
 }
 
+struct PersistentModelRequest: Codable {
+    let modelID: String
+}
+
+struct PersistentTextRequest: Codable {
+    let modelID: String
+    let text: String?
+    let tokenIDs: [Int32]?
+    let addSpecialTokens: Bool?
+    let skipSpecialTokens: Bool?
+}
+
 struct PersistentWorkerResponse: Codable {
     let requestID: String
     let ok: Bool
@@ -68,8 +83,23 @@ struct PersistentWorkerResult: Codable {
     var status: String?
     var shard: PersistentShardSnapshot?
     var forward: PersistentForwardResult?
+    var model: PersistentModelResult?
+    var text: PersistentTextResult?
     var state: PersistentWorkerState?
     var shutdown: Bool?
+}
+
+struct PersistentModelResult: Codable {
+    let modelID: String
+    let modelType: String
+    let layerCount: Int
+}
+
+struct PersistentTextResult: Codable {
+    let modelID: String
+    let tokenIDs: [Int32]?
+    let text: String?
+    let eosTokenID: Int32?
 }
 
 struct PersistentForwardResult: Codable {
@@ -241,6 +271,7 @@ private final class PersistentLoadedShard {
 final class PersistentShardService {
     private let configuration: CheckpointShardRuntimeConfiguration
     private var shards = [String: PersistentLoadedShard]()
+    private var tokenizers = [String: any Tokenizer]()
     private var loadCount = 0
     private var forwardCount = 0
 
@@ -256,6 +287,24 @@ final class PersistentShardService {
         switch request.command {
         case "health":
             return PersistentWorkerResult(status: "ok")
+
+        case "modelInfo":
+            guard let model = request.model else {
+                throw PersistentWorkerError.invalidRequest("modelInfo payload is missing")
+            }
+            return PersistentWorkerResult(model: try await modelInfo(model))
+
+        case "tokenize":
+            guard let text = request.text else {
+                throw PersistentWorkerError.invalidRequest("tokenize payload is missing")
+            }
+            return PersistentWorkerResult(text: try await tokenize(text))
+
+        case "detokenize":
+            guard let text = request.text else {
+                throw PersistentWorkerError.invalidRequest("detokenize payload is missing")
+            }
+            return PersistentWorkerResult(text: try await detokenize(text))
 
         case "loadShard":
             guard let load = request.loadShard else {
@@ -303,12 +352,109 @@ final class PersistentShardService {
 
         case "shutdown":
             shards.removeAll()
+            tokenizers.removeAll()
             Memory.clearCache()
             return PersistentWorkerResult(state: state(), shutdown: true)
 
         default:
             throw PersistentWorkerError.invalidRequest("unknown command \(request.command)")
         }
+    }
+
+    private func modelInfo(_ request: PersistentModelRequest) async throws -> PersistentModelResult {
+        guard !request.modelID.isEmpty else {
+            throw PersistentWorkerError.invalidRequest("modelID is empty")
+        }
+        let checkpoint = try await CheckpointShardRuntime.resolveCheckpoint(modelID: request.modelID)
+        let adapter = try configuration.adapterRegistry.adapter(for: checkpoint.modelType)
+        return PersistentModelResult(
+            modelID: request.modelID,
+            modelType: checkpoint.modelType,
+            layerCount: try adapter.layerCount(checkpoint: checkpoint)
+        )
+    }
+
+    private func tokenize(_ request: PersistentTextRequest) async throws -> PersistentTextResult {
+        guard !request.modelID.isEmpty else {
+            throw PersistentWorkerError.invalidRequest("modelID is empty")
+        }
+        guard let text = request.text else {
+            throw PersistentWorkerError.invalidRequest("tokenize text is missing")
+        }
+        guard request.tokenIDs == nil else {
+            throw PersistentWorkerError.invalidRequest("tokenize tokenIDs must be omitted")
+        }
+        try requireLoadedInputModel(request.modelID)
+        let tokenizer = try await tokenizer(modelID: request.modelID)
+        let encoded = tokenizer.encode(
+            text: text,
+            addSpecialTokens: request.addSpecialTokens ?? true
+        )
+        let tokenIDs = try int32Tokens(encoded)
+        return PersistentTextResult(
+            modelID: request.modelID,
+            tokenIDs: tokenIDs,
+            text: nil,
+            eosTokenID: try int32Token(tokenizer.eosTokenId)
+        )
+    }
+
+    private func detokenize(_ request: PersistentTextRequest) async throws -> PersistentTextResult {
+        guard !request.modelID.isEmpty else {
+            throw PersistentWorkerError.invalidRequest("modelID is empty")
+        }
+        guard request.text == nil else {
+            throw PersistentWorkerError.invalidRequest("detokenize text must be omitted")
+        }
+        guard let tokenIDs = request.tokenIDs else {
+            throw PersistentWorkerError.invalidRequest("detokenize tokenIDs are missing")
+        }
+        try requireLoadedInputModel(request.modelID)
+        let tokenizer = try await tokenizer(modelID: request.modelID)
+        return PersistentTextResult(
+            modelID: request.modelID,
+            tokenIDs: nil,
+            text: tokenizer.decode(
+                tokens: tokenIDs.map(Int.init),
+                skipSpecialTokens: request.skipSpecialTokens ?? true
+            ),
+            eosTokenID: try int32Token(tokenizer.eosTokenId)
+        )
+    }
+
+    private func tokenizer(modelID: String) async throws -> any Tokenizer {
+        if let tokenizer = tokenizers[modelID] {
+            return tokenizer
+        }
+        let checkpoint = try await CheckpointShardRuntime.resolveCheckpoint(modelID: modelID)
+        let tokenizer = try await AutoTokenizer.from(modelFolder: checkpoint.directory)
+        tokenizers[modelID] = tokenizer
+        return tokenizer
+    }
+
+    private func requireLoadedInputModel(_ modelID: String) throws {
+        guard shards.values.contains(where: { $0.modelID == modelID && $0.ownsInput }) else {
+            throw PersistentWorkerError.invalidRequest(
+                "model \(modelID) has no loaded input-owning shard"
+            )
+        }
+    }
+
+    private func int32Tokens(_ tokens: [Int]) throws -> [Int32] {
+        try tokens.map { token in
+            guard let value = Int32(exactly: token), value >= 0 else {
+                throw PersistentWorkerError.invalidRequest("token ID \(token) is outside int32")
+            }
+            return value
+        }
+    }
+
+    private func int32Token(_ token: Int?) throws -> Int32? {
+        guard let token else { return nil }
+        guard let value = Int32(exactly: token), value >= 0 else {
+            throw PersistentWorkerError.invalidRequest("token ID \(token) is outside int32")
+        }
+        return value
     }
 
     private func loadShard(
@@ -360,13 +506,18 @@ final class PersistentShardService {
     }
 
     private func unloadShard(_ shardID: String) throws {
-        guard let openSequenceCount = shards[shardID]?.sequences.count else {
+        guard let openSequenceCount = shards[shardID]?.sequences.count,
+              let modelID = shards[shardID]?.modelID
+        else {
             throw PersistentWorkerError.shardNotFound(shardID)
         }
         guard openSequenceCount == 0 else {
             throw PersistentWorkerError.shardHasOpenSequences(shardID, openSequenceCount)
         }
         shards.removeValue(forKey: shardID)
+        if !shards.values.contains(where: { $0.modelID == modelID }) {
+            tokenizers.removeValue(forKey: modelID)
+        }
         Memory.clearCache()
     }
 

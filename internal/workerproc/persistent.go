@@ -30,6 +30,8 @@ type PersistentRequest struct {
 	Shard     *PersistentShardRequest     `json:"shard,omitempty"`
 	Sequence  *PersistentSequenceRequest  `json:"sequence,omitempty"`
 	Forward   *PersistentForwardRequest   `json:"forward,omitempty"`
+	Model     *PersistentModelRequest     `json:"model,omitempty"`
+	Text      *PersistentTextRequest      `json:"text,omitempty"`
 }
 
 type PersistentLoadShardRequest struct {
@@ -58,6 +60,18 @@ type PersistentForwardRequest struct {
 	Input      WireTensor `json:"input"`
 }
 
+type PersistentModelRequest struct {
+	ModelID string `json:"modelID"`
+}
+
+type PersistentTextRequest struct {
+	ModelID           string  `json:"modelID"`
+	Text              *string `json:"text,omitempty"`
+	TokenIDs          []int32 `json:"tokenIDs,omitempty"`
+	AddSpecialTokens  *bool   `json:"addSpecialTokens,omitempty"`
+	SkipSpecialTokens *bool   `json:"skipSpecialTokens,omitempty"`
+}
+
 type WireTensor struct {
 	Shape []int  `json:"shape"`
 	DType string `json:"dtype"`
@@ -75,8 +89,23 @@ type PersistentWorkerResult struct {
 	Status   string                   `json:"status,omitempty"`
 	Shard    *PersistentShardSnapshot `json:"shard,omitempty"`
 	Forward  *PersistentForwardResult `json:"forward,omitempty"`
+	Model    *PersistentModelResult   `json:"model,omitempty"`
+	Text     *PersistentTextResult    `json:"text,omitempty"`
 	State    *PersistentWorkerState   `json:"state,omitempty"`
 	Shutdown bool                     `json:"shutdown,omitempty"`
+}
+
+type PersistentModelResult struct {
+	ModelID    string `json:"modelID"`
+	ModelType  string `json:"modelType"`
+	LayerCount int    `json:"layerCount"`
+}
+
+type PersistentTextResult struct {
+	ModelID    string  `json:"modelID"`
+	TokenIDs   []int32 `json:"tokenIDs,omitempty"`
+	Text       *string `json:"text,omitempty"`
+	EOSTokenID *int32  `json:"eosTokenID,omitempty"`
 }
 
 type PersistentForwardResult struct {

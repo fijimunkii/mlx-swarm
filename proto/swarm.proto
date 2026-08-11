@@ -52,6 +52,40 @@ message SequenceRequest {
   string sequence_id = 2;
 }
 
+message ModelInfoRequest {
+  string model_id = 1;
+}
+
+message ModelInfoResponse {
+  string model_id = 1;
+  string model_type = 2;
+  uint32 layer_count = 3;
+  string error = 4;
+}
+
+message TokenizeRequest {
+  string model_id = 1;
+  string text = 2;
+  bool add_special_tokens = 3;
+}
+
+message TokenizeResponse {
+  repeated int32 token_ids = 1;
+  optional int32 eos_token_id = 2;
+  string error = 3;
+}
+
+message DetokenizeRequest {
+  string model_id = 1;
+  repeated int32 token_ids = 2;
+  bool skip_special_tokens = 3;
+}
+
+message DetokenizeResponse {
+  string text = 1;
+  string error = 2;
+}
+
 enum InferenceOperation {
   INFERENCE_OPERATION_UNSPECIFIED = 0;
   INFERENCE_OPERATION_FORWARD = 1;

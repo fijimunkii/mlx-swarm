@@ -1,0 +1,233 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/fijimunkii/mlx-swarm/internal/generation"
+	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
+)
+
+const (
+	defaultModelID = "mlx-community/gemma-3-270m-it-4bit"
+	proofPrompt    = "Write a short story about two computers working together:"
+)
+
+type managedCaller struct {
+	caller workerproc.PersistentCaller
+	direct *workerproc.PersistentClient
+}
+
+type smokeSummary struct {
+	Model                     string `json:"model"`
+	ModelType                 string `json:"modelType"`
+	Distributed               bool   `json:"distributed"`
+	Prompt                    string `json:"prompt"`
+	GeneratedTokenCount       int    `json:"generatedTokenCount"`
+	GeneratedText             string `json:"generatedText"`
+	StopReason                string `json:"stopReason"`
+	GreedyTokenIDsMatch       bool   `json:"greedyTokenIDsMatch"`
+	RepeatedRequestValidated  bool   `json:"repeatedRequestValidated"`
+	SequenceTeardownValidated bool   `json:"sequenceTeardownValidated"`
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	worker := flag.String("worker", workerproc.DefaultPath(), "path to the built MLXWorker executable")
+	peer := flag.String("peer", "", "optional consumer swarmd base URL")
+	model := flag.String("model", defaultModelID, "checkpoint model ID")
+	steps := flag.Int("steps", 32, "number of generated tokens required by the proof")
+	rtol := flag.Float64("rtol", 1e-4, "relative reference-logit tolerance")
+	atol := flag.Float64("atol", 1e-4, "absolute reference-logit tolerance")
+	timeout := flag.Duration("timeout", 10*time.Minute, "overall proof timeout")
+	flag.Parse()
+	if *steps < 32 {
+		return errors.New("-steps must be at least 32")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	producer, err := openCaller(*worker, "")
+	if err != nil {
+		return fmt.Errorf("producer: %w", err)
+	}
+	defer producer.close()
+	consumer, err := openCaller(*worker, *peer)
+	if err != nil {
+		return fmt.Errorf("consumer: %w", err)
+	}
+	defer consumer.close()
+	reference, err := openCaller(*worker, "")
+	if err != nil {
+		return fmt.Errorf("reference: %w", err)
+	}
+	defer reference.close()
+
+	session, err := generation.NewSession(
+		ctx,
+		producer.caller,
+		consumer.caller,
+		reference.caller,
+		generation.SessionConfig{Model: *model, RTol: *rtol, ATol: *atol},
+	)
+	if err != nil {
+		return err
+	}
+	loadedBefore, err := loadCounts(ctx, producer.caller, consumer.caller, reference.caller)
+	if err != nil {
+		return err
+	}
+
+	proof, err := session.Generate(ctx, generation.Request{
+		Prompt: proofPrompt, MaxTokens: *steps, SequenceID: "generation-proof",
+	})
+	if err != nil {
+		return err
+	}
+	if len(proof.GeneratedTokenIDs) != *steps || proof.StopReason != "max_tokens" {
+		return fmt.Errorf(
+			"proof generated %d tokens and stopped on %s; want %d maximum-length tokens",
+			len(proof.GeneratedTokenIDs), proof.StopReason, *steps,
+		)
+	}
+	if proof.Verification == nil || !proof.Verification.GreedyTokenIDsMatch ||
+		proof.Verification.ComparedTokens != *steps {
+		return errors.New("distributed greedy tokens did not match the cached reference")
+	}
+	if err := requireNoSequenceState(ctx, producer.caller, consumer.caller, reference.caller); err != nil {
+		return err
+	}
+
+	repeatedSession, err := generation.NewSession(
+		ctx,
+		producer.caller,
+		consumer.caller,
+		reference.caller,
+		generation.SessionConfig{Model: *model, RTol: *rtol, ATol: *atol},
+	)
+	if err != nil {
+		return fmt.Errorf("prepare repeated generation session: %w", err)
+	}
+	repeated, err := repeatedSession.Generate(ctx, generation.Request{
+		Prompt: "Continue this phrase: distributed systems", MaxTokens: 1,
+		SequenceID: "generation-repeat-proof",
+	})
+	if err != nil {
+		return fmt.Errorf("repeated generation request: %w", err)
+	}
+	if len(repeated.GeneratedTokenIDs) != 1 || repeated.Verification == nil ||
+		!repeated.Verification.GreedyTokenIDsMatch {
+		return errors.New("repeated generation request did not produce one verified token")
+	}
+	loadedAfter, err := loadCounts(ctx, producer.caller, consumer.caller, reference.caller)
+	if err != nil {
+		return err
+	}
+	if loadedAfter != loadedBefore {
+		return fmt.Errorf("repeated request reloaded a shard: before=%v after=%v", loadedBefore, loadedAfter)
+	}
+	if err := requireNoSequenceState(ctx, producer.caller, consumer.caller, reference.caller); err != nil {
+		return err
+	}
+
+	summary := smokeSummary{
+		Model: *model, ModelType: proof.ModelType, Distributed: *peer != "",
+		Prompt: proofPrompt, GeneratedTokenCount: len(proof.GeneratedTokenIDs),
+		GeneratedText: proof.Text, StopReason: proof.StopReason,
+		GreedyTokenIDsMatch:      proof.Verification.GreedyTokenIDsMatch,
+		RepeatedRequestValidated: true, SequenceTeardownValidated: true,
+	}
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(encoded))
+	return nil
+}
+
+func openCaller(worker string, endpoint string) (*managedCaller, error) {
+	if endpoint != "" {
+		client, err := workerproc.NewHTTPPersistentClient(endpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+		return &managedCaller{caller: client}, nil
+	}
+	client, err := workerproc.StartPersistent(worker)
+	if err != nil {
+		return nil, err
+	}
+	return &managedCaller{caller: client, direct: client}, nil
+}
+
+func (caller *managedCaller) close() {
+	if caller == nil || caller.direct == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := caller.direct.Shutdown(ctx); err == nil {
+		return
+	}
+	_ = caller.direct.Kill()
+	_ = caller.direct.Wait(ctx)
+}
+
+func loadCounts(
+	ctx context.Context,
+	callers ...workerproc.PersistentCaller,
+) ([3]int, error) {
+	var counts [3]int
+	for index, caller := range callers {
+		state, err := workerState(ctx, caller)
+		if err != nil {
+			return counts, err
+		}
+		counts[index] = state.LoadCount
+	}
+	return counts, nil
+}
+
+func requireNoSequenceState(
+	ctx context.Context,
+	callers ...workerproc.PersistentCaller,
+) error {
+	for index, caller := range callers {
+		state, err := workerState(ctx, caller)
+		if err != nil {
+			return err
+		}
+		if state.KVCacheBytes != 0 || state.RetainedBytes != 0 {
+			return fmt.Errorf(
+				"caller %d retained sequence state: kv=%d retained=%d",
+				index, state.KVCacheBytes, state.RetainedBytes,
+			)
+		}
+	}
+	return nil
+}
+
+func workerState(
+	ctx context.Context,
+	caller workerproc.PersistentCaller,
+) (*workerproc.PersistentWorkerState, error) {
+	response, err := caller.Call(ctx, workerproc.PersistentRequest{Command: "state"})
+	if err != nil {
+		return nil, err
+	}
+	if response.Result == nil || response.Result.State == nil {
+		return nil, errors.New("state returned no worker snapshot")
+	}
+	return response.Result.State, nil
+}
