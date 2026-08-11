@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fijimunkii/mlx-swarm/internal/smoke"
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
 
@@ -69,30 +69,14 @@ func run() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	var client workerproc.PersistentCaller
-	var directClient *workerproc.PersistentClient
-	cleanShutdown := false
-	if *peer == "" {
-		var err error
-		directClient, err = workerproc.StartPersistent(*worker)
-		if err != nil {
-			return fmt.Errorf("start persistent worker: %w", err)
-		}
-		client = directClient
-		defer func() {
-			if !cleanShutdown {
-				terminatePersistentClient(directClient)
-			}
-		}()
-	} else {
-		var err error
-		client, err = workerproc.NewHTTPPersistentClient(*peer, nil)
-		if err != nil {
-			return fmt.Errorf("configure swarmd client: %w", err)
-		}
+	workerClient, err := workerproc.OpenPersistentTarget(*worker, *peer)
+	if err != nil {
+		return fmt.Errorf("open persistent worker: %w", err)
 	}
+	defer workerClient.Cleanup()
+	client := workerClient.Caller
 
-	if _, err := call(ctx, client, workerproc.PersistentRequest{Command: "health"}); err != nil {
+	if _, err := smoke.Call(ctx, client, workerproc.PersistentRequest{Command: "health"}); err != nil {
 		return err
 	}
 	canceledContext, cancelRequest := context.WithCancel(ctx)
@@ -105,10 +89,10 @@ func run() error {
 	if !cancellationReported {
 		return fmt.Errorf("canceled request returned %v", cancellationErr)
 	}
-	if _, err := call(ctx, client, workerproc.PersistentRequest{Command: "health"}); err != nil {
+	if _, err := smoke.Call(ctx, client, workerproc.PersistentRequest{Command: "health"}); err != nil {
 		return err
 	}
-	loaded, err := call(ctx, client, workerproc.PersistentRequest{
+	loaded, err := smoke.Call(ctx, client, workerproc.PersistentRequest{
 		Command: "loadShard",
 		LoadShard: &workerproc.PersistentLoadShardRequest{
 			ModelID:    *model,
@@ -126,19 +110,17 @@ func run() error {
 		return errors.New("loadShard returned no shard snapshot")
 	}
 
-	for _, sequenceID := range []string{sequenceA, sequenceB} {
-		if _, err := call(ctx, client, workerproc.PersistentRequest{
-			Command: "openSequence",
-			Sequence: &workerproc.PersistentSequenceRequest{
-				ShardID:    *shardID,
-				SequenceID: sequenceID,
-			},
-		}); err != nil {
-			return err
-		}
+	sequences, err := workerproc.OpenSequences(ctx, []workerproc.SequenceTarget{
+		{Name: "session worker", Caller: client, ShardID: *shardID},
+	}, sequenceA, sequenceB)
+	if sequences != nil {
+		defer func() { _ = sequences.Cleanup() }()
+	}
+	if err != nil {
+		return err
 	}
 
-	tokens := tokenTensor([]int32{1, 2, 3, 4, 5, 6})
+	tokens := smoke.TokenTensor([]int32{1, 2, 3, 4, 5, 6})
 	var expectedDigest [sha256.Size]byte
 	var boundaryBytes int
 	var afterForward workerproc.StageMemory
@@ -148,7 +130,7 @@ func run() error {
 		if index%2 == 1 {
 			sequenceID = sequenceB
 		}
-		response, err := call(ctx, client, workerproc.PersistentRequest{
+		response, err := smoke.Call(ctx, client, workerproc.PersistentRequest{
 			Command: "forward",
 			Forward: &workerproc.PersistentForwardRequest{
 				ShardID:    *shardID,
@@ -235,14 +217,14 @@ func run() error {
 		workerproc.WireTensor{Shape: []int{1, 1, 1}, DType: "int32", Data: make([]byte, 4)},
 		"token tensor shape must have batch size 1 and 2 positive dimensions",
 	) && validateTensor(
-		tokenTensor([]int32{-1}),
+		smoke.TokenTensor([]int32{-1}),
 		"token ID -1 is outside vocabulary size",
 	)
-	if _, err := call(ctx, client, workerproc.PersistentRequest{Command: "health"}); err != nil {
+	if _, err := smoke.Call(ctx, client, workerproc.PersistentRequest{Command: "health"}); err != nil {
 		return fmt.Errorf("health after malformed tensor: %w", err)
 	}
 
-	stateResponse, err := call(ctx, client, workerproc.PersistentRequest{Command: "state"})
+	stateResponse, err := smoke.Call(ctx, client, workerproc.PersistentRequest{Command: "state"})
 	if err != nil {
 		return err
 	}
@@ -264,18 +246,10 @@ func run() error {
 		return errors.New("persistent worker validation or identifier isolation failed")
 	}
 
-	for _, sequenceID := range []string{sequenceA, sequenceB} {
-		if _, err := call(ctx, client, workerproc.PersistentRequest{
-			Command: "closeSequence",
-			Sequence: &workerproc.PersistentSequenceRequest{
-				ShardID:    *shardID,
-				SequenceID: sequenceID,
-			},
-		}); err != nil {
-			return err
-		}
+	if err := sequences.Close(ctx); err != nil {
+		return err
 	}
-	unloaded, err := call(ctx, client, workerproc.PersistentRequest{
+	unloaded, err := smoke.Call(ctx, client, workerproc.PersistentRequest{
 		Command: "unloadShard",
 		Shard:   &workerproc.PersistentShardRequest{ShardID: *shardID},
 	})
@@ -290,15 +264,14 @@ func run() error {
 	if afterUnloadActive > 1<<20 || afterUnloadCache > 1<<20 {
 		return fmt.Errorf("unload retained MLX memory: active=%d cache=%d", afterUnloadActive, afterUnloadCache)
 	}
-	if directClient != nil {
-		if err := directClient.Shutdown(ctx); err != nil {
+	if workerClient.IsDirect() {
+		if err := workerClient.Shutdown(ctx); err != nil {
 			return fmt.Errorf("clean shutdown: %w", err)
 		}
-		cleanShutdown = true
 	}
 
 	var crashReported *bool
-	if directClient != nil {
+	if workerClient.IsDirect() {
 		proved := proveCrashReported(ctx, *worker)
 		if !proved {
 			return errors.New("killed worker did not return a bounded error")
@@ -335,30 +308,6 @@ func run() error {
 	}
 	fmt.Println(string(encoded))
 	return nil
-}
-
-func call(
-	ctx context.Context,
-	client workerproc.PersistentCaller,
-	request workerproc.PersistentRequest,
-) (workerproc.PersistentResponse, error) {
-	response, err := client.Call(ctx, request)
-	if err != nil {
-		return workerproc.PersistentResponse{}, fmt.Errorf("%s: %w", request.Command, err)
-	}
-	return response, nil
-}
-
-func tokenTensor(tokens []int32) workerproc.WireTensor {
-	data := make([]byte, len(tokens)*4)
-	for index, token := range tokens {
-		binary.LittleEndian.PutUint32(data[index*4:], uint32(token))
-	}
-	return workerproc.WireTensor{
-		Shape: []int{1, len(tokens)},
-		DType: "int32",
-		Data:  data,
-	}
 }
 
 func proveCrashReported(ctx context.Context, worker string) bool {

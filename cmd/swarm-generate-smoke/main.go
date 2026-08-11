@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fijimunkii/mlx-swarm/internal/generation"
+	"github.com/fijimunkii/mlx-swarm/internal/smoke"
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
 
@@ -17,11 +18,6 @@ const (
 	defaultModelID = "mlx-community/gemma-3-270m-it-4bit"
 	proofPrompt    = "Write a short story about two computers working together:"
 )
-
-type managedCaller struct {
-	caller workerproc.PersistentCaller
-	direct *workerproc.PersistentClient
-}
 
 type smokeSummary struct {
 	Model                     string `json:"model"`
@@ -58,33 +54,33 @@ func run() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	producer, err := openCaller(*worker, "")
+	producer, err := workerproc.OpenPersistentTarget(*worker, "")
 	if err != nil {
 		return fmt.Errorf("producer: %w", err)
 	}
-	defer producer.close()
-	consumer, err := openCaller(*worker, *peer)
+	defer producer.Cleanup()
+	consumer, err := workerproc.OpenPersistentTarget(*worker, *peer)
 	if err != nil {
 		return fmt.Errorf("consumer: %w", err)
 	}
-	defer consumer.close()
-	reference, err := openCaller(*worker, "")
+	defer consumer.Cleanup()
+	reference, err := workerproc.OpenPersistentTarget(*worker, "")
 	if err != nil {
 		return fmt.Errorf("reference: %w", err)
 	}
-	defer reference.close()
+	defer reference.Cleanup()
 
 	session, err := generation.NewSession(
 		ctx,
-		producer.caller,
-		consumer.caller,
-		reference.caller,
+		producer.Caller,
+		consumer.Caller,
+		reference.Caller,
 		generation.SessionConfig{Model: *model, RTol: *rtol, ATol: *atol},
 	)
 	if err != nil {
 		return err
 	}
-	loadedBefore, err := loadCounts(ctx, producer.caller, consumer.caller, reference.caller)
+	loadedBefore, err := loadCounts(ctx, producer.Caller, consumer.Caller, reference.Caller)
 	if err != nil {
 		return err
 	}
@@ -105,15 +101,15 @@ func run() error {
 		proof.Verification.ComparedTokens != *steps {
 		return errors.New("distributed greedy tokens did not match the cached reference")
 	}
-	if err := requireNoSequenceState(ctx, producer.caller, consumer.caller, reference.caller); err != nil {
+	if err := smoke.RequireNoSequenceState(ctx, producer.Caller, consumer.Caller, reference.Caller); err != nil {
 		return err
 	}
 
 	repeatedSession, err := generation.NewSession(
 		ctx,
-		producer.caller,
-		consumer.caller,
-		reference.caller,
+		producer.Caller,
+		consumer.Caller,
+		reference.Caller,
 		generation.SessionConfig{Model: *model, RTol: *rtol, ATol: *atol},
 	)
 	if err != nil {
@@ -130,14 +126,14 @@ func run() error {
 		!repeated.Verification.GreedyTokenIDsMatch {
 		return errors.New("repeated generation request did not produce one verified token")
 	}
-	loadedAfter, err := loadCounts(ctx, producer.caller, consumer.caller, reference.caller)
+	loadedAfter, err := loadCounts(ctx, producer.Caller, consumer.Caller, reference.Caller)
 	if err != nil {
 		return err
 	}
 	if loadedAfter != loadedBefore {
 		return fmt.Errorf("repeated request reloaded a shard: before=%v after=%v", loadedBefore, loadedAfter)
 	}
-	if err := requireNoSequenceState(ctx, producer.caller, consumer.caller, reference.caller); err != nil {
+	if err := smoke.RequireNoSequenceState(ctx, producer.Caller, consumer.Caller, reference.Caller); err != nil {
 		return err
 	}
 
@@ -156,78 +152,17 @@ func run() error {
 	return nil
 }
 
-func openCaller(worker string, endpoint string) (*managedCaller, error) {
-	if endpoint != "" {
-		client, err := workerproc.NewHTTPPersistentClient(endpoint, nil)
-		if err != nil {
-			return nil, err
-		}
-		return &managedCaller{caller: client}, nil
-	}
-	client, err := workerproc.StartPersistent(worker)
-	if err != nil {
-		return nil, err
-	}
-	return &managedCaller{caller: client, direct: client}, nil
-}
-
-func (caller *managedCaller) close() {
-	if caller == nil || caller.direct == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := caller.direct.Shutdown(ctx); err == nil {
-		return
-	}
-	_ = caller.direct.Kill()
-	_ = caller.direct.Wait(ctx)
-}
-
 func loadCounts(
 	ctx context.Context,
 	callers ...workerproc.PersistentCaller,
 ) ([3]int, error) {
 	var counts [3]int
 	for index, caller := range callers {
-		state, err := workerState(ctx, caller)
+		state, err := smoke.State(ctx, caller)
 		if err != nil {
 			return counts, err
 		}
 		counts[index] = state.LoadCount
 	}
 	return counts, nil
-}
-
-func requireNoSequenceState(
-	ctx context.Context,
-	callers ...workerproc.PersistentCaller,
-) error {
-	for index, caller := range callers {
-		state, err := workerState(ctx, caller)
-		if err != nil {
-			return err
-		}
-		if state.KVCacheBytes != 0 || state.RetainedBytes != 0 {
-			return fmt.Errorf(
-				"caller %d retained sequence state: kv=%d retained=%d",
-				index, state.KVCacheBytes, state.RetainedBytes,
-			)
-		}
-	}
-	return nil
-}
-
-func workerState(
-	ctx context.Context,
-	caller workerproc.PersistentCaller,
-) (*workerproc.PersistentWorkerState, error) {
-	response, err := caller.Call(ctx, workerproc.PersistentRequest{Command: "state"})
-	if err != nil {
-		return nil, err
-	}
-	if response.Result == nil || response.Result.State == nil {
-		return nil, errors.New("state returned no worker snapshot")
-	}
-	return response.Result.State, nil
 }
