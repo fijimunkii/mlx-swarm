@@ -292,7 +292,13 @@ func (c *PersistentClient) Kill() error {
 	if c.cmd.Process == nil {
 		return errors.New("persistent worker has no process")
 	}
-	return c.cmd.Process.Kill()
+	if err := syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	return nil
 }
 
 func (c *PersistentClient) Wait(ctx context.Context) error {
@@ -339,7 +345,7 @@ func (c *PersistentClient) readLoop(stdout io.Reader) {
 }
 
 func (c *PersistentClient) failRead(readErr error) {
-	killErr := c.cmd.Process.Kill()
+	killErr := c.Kill()
 	if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
 		_ = c.stdin.Close()
 		c.finish(fmt.Errorf("%w; kill persistent worker: %v", readErr, killErr))

@@ -132,7 +132,7 @@ func TestPersistentClientRejectsUnmatchedResponseID(t *testing.T) {
 	worker := writeWorkerScript(t, `#!/bin/sh
 read request
 printf '%s\n' '{"requestID":"unknown","ok":true,"result":{"status":"ok"}}'
-sleep 10
+while read ignored; do :; done
 `)
 	client, err := StartPersistent(worker)
 	if err != nil {
@@ -153,7 +153,7 @@ func TestPersistentClientKillsWorkerBeforeReportingMalformedResponse(t *testing.
 	worker := writeWorkerScript(t, `#!/bin/sh
 read request
 printf '%s\n' 'not-json'
-sleep 10
+while read ignored; do :; done
 `)
 	client, err := StartPersistent(worker)
 	if err != nil {
