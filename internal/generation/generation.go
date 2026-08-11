@@ -806,7 +806,7 @@ func infer(
 		return nil, workerproc.ErrInferenceDeadlineRequired
 	}
 	response, err := call(ctx, caller, workerproc.PersistentRequest{
-		Command: command, DeadlineUnixMillis: deadline.UnixMilli(),
+		Command: command, DeadlineUnixMillis: workerproc.WireDeadlineUnixMillis(deadline),
 		Forward: &workerproc.PersistentForwardRequest{
 			ShardID: shardID, SequenceID: sequenceID, Position: position,
 			InputKind: inputKind, Input: input,

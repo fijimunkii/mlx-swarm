@@ -42,7 +42,7 @@ func TestRequestContextAllowsUndeadlinedControlRequest(t *testing.T) {
 	}
 }
 
-func TestRequestContextAlignsCallerDeadlineToWirePrecision(t *testing.T) {
+func TestRequestContextPreservesCallerDeadlineAndRoundsUpWirePrecision(t *testing.T) {
 	parentDeadline := time.Now().Add(time.Second).Truncate(time.Millisecond).Add(750 * time.Microsecond)
 	parent, cancelParent := context.WithDeadline(context.Background(), parentDeadline)
 	defer cancelParent()
@@ -52,9 +52,21 @@ func TestRequestContextAlignsCallerDeadlineToWirePrecision(t *testing.T) {
 	}
 	defer cancel()
 	deadline, ok := ctx.Deadline()
-	want := time.UnixMilli(parentDeadline.UnixMilli())
-	if !ok || !deadline.Equal(want) || request.DeadlineUnixMillis != want.UnixMilli() {
-		t.Fatalf("deadline = %v, request=%d, want %v", deadline, request.DeadlineUnixMillis, want)
+	wantWire := parentDeadline.UnixMilli() + 1
+	if !ok || !deadline.Equal(parentDeadline) || request.DeadlineUnixMillis != wantWire {
+		t.Fatalf(
+			"deadline = %v, request=%d, want local=%v wire=%d",
+			deadline, request.DeadlineUnixMillis, parentDeadline, wantWire,
+		)
+	}
+}
+
+func TestWireDeadlineUnixMillisDoesNotShortenOneMillisecondTimeout(t *testing.T) {
+	started := time.Now().Truncate(time.Millisecond).Add(999 * time.Microsecond)
+	deadline := started.Add(time.Millisecond)
+	wire := time.UnixMilli(WireDeadlineUnixMillis(deadline))
+	if wire.Before(deadline) || wire.Sub(started) < time.Millisecond {
+		t.Fatalf("wire deadline %v shortened timeout from %v to %v", wire, started, deadline)
 	}
 }
 

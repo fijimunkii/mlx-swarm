@@ -32,6 +32,9 @@ earlier of this wire deadline and its caller context, writes that effective
 deadline into the forwarded frame, and rejects inference with no deadline. The
 Swift worker checks it immediately before and after execution. Other commands
 may use a caller-context deadline but do not require one in the wire envelope.
+Go retains an exact caller deadline locally and rounds only its serialized
+millisecond representation upward, preventing the wire conversion from
+shortening the requested timeout. An explicit wire deadline remains exact.
 
 The supported commands are:
 

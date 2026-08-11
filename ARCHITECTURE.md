@@ -104,6 +104,9 @@ fresh timeout for each stage call; `swarmd` preserves the earlier of the
 caller's context deadline and the wire deadline. The Swift worker checks the
 absolute deadline immediately before and after inference so a queued request
 cannot begin after its budget and a late result cannot be reported as timely.
+Context-derived wire deadlines round up to millisecond precision while Go
+retains the exact local deadline, so serialization cannot shorten the caller's
+budget.
 
 MLX inference is not synchronously cancelable once a kernel is running. If an
 inference context expires, the Go process client kills that worker to discard
