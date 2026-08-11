@@ -92,6 +92,84 @@ done
 	}
 }
 
+func TestPersistentClientGeneratedIDSkipsCallerReservedID(t *testing.T) {
+	worker := writeWorkerScript(t, `#!/bin/sh
+read first
+sleep 0.1
+printf '%s\n' '{"requestID":"request-1","ok":true,"result":{"status":"ok"}}'
+read second
+printf '%s\n' '{"requestID":"request-2","ok":true,"result":{"status":"ok"}}'
+`)
+	client, err := StartPersistent(worker)
+	if err != nil {
+		t.Fatalf("StartPersistent: %v", err)
+	}
+	defer func() {
+		_ = client.Kill()
+		waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = client.Wait(waitCtx)
+	}()
+
+	canceledCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = client.Call(canceledCtx, PersistentRequest{RequestID: "request-1", Command: "health"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("reserved Call error = %v, want deadline exceeded", err)
+	}
+	callCtx, cancelCall := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelCall()
+	response, err := client.Call(callCtx, PersistentRequest{Command: "health"})
+	if err != nil {
+		t.Fatalf("generated-ID Call: %v", err)
+	}
+	if response.RequestID != "request-2" {
+		t.Fatalf("generated request ID = %q, want request-2", response.RequestID)
+	}
+}
+
+func TestPersistentClientRejectsUnmatchedResponseID(t *testing.T) {
+	worker := writeWorkerScript(t, `#!/bin/sh
+read request
+printf '%s\n' '{"requestID":"unknown","ok":true,"result":{"status":"ok"}}'
+sleep 10
+`)
+	client, err := StartPersistent(worker)
+	if err != nil {
+		t.Fatalf("StartPersistent: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = client.Call(ctx, PersistentRequest{Command: "health"})
+	if err == nil || !strings.Contains(err.Error(), "unmatched request ID") {
+		t.Fatalf("Call error = %v, want unmatched request ID", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Call reached deadline instead of bounded protocol error: %v", err)
+	}
+}
+
+func TestPersistentClientKillsWorkerBeforeReportingMalformedResponse(t *testing.T) {
+	worker := writeWorkerScript(t, `#!/bin/sh
+read request
+printf '%s\n' 'not-json'
+sleep 10
+`)
+	client, err := StartPersistent(worker)
+	if err != nil {
+		t.Fatalf("StartPersistent: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = client.Call(ctx, PersistentRequest{Command: "health"})
+	if err == nil || !strings.Contains(err.Error(), "decode persistent worker response") {
+		t.Fatalf("Call error = %v, want decode error", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Call reached deadline instead of bounded read error: %v", err)
+	}
+}
+
 func TestCappedTailBufferBoundsAndMarksStderr(t *testing.T) {
 	var buffer cappedTailBuffer
 	if _, err := buffer.Write([]byte("discarded-prefix")); err != nil {

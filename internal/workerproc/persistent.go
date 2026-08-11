@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -223,8 +224,14 @@ func (c *PersistentClient) Call(
 	default:
 	}
 	if request.RequestID == "" {
-		c.nextID++
-		request.RequestID = fmt.Sprintf("request-%d", c.nextID)
+		for {
+			c.nextID++
+			candidate := fmt.Sprintf("request-%d", c.nextID)
+			if _, exists := c.pending[candidate]; !exists {
+				request.RequestID = candidate
+				break
+			}
+		}
 	}
 	if _, exists := c.pending[request.RequestID]; exists {
 		c.mu.Unlock()
@@ -303,27 +310,43 @@ func (c *PersistentClient) readLoop(stdout io.Reader) {
 	for scanner.Scan() {
 		var response PersistentResponse
 		if err := json.Unmarshal(scanner.Bytes(), &response); err != nil {
-			c.finish(fmt.Errorf("decode persistent worker response: %w", err))
-			_ = c.cmd.Process.Kill()
-			_ = c.cmd.Wait()
+			c.failRead(fmt.Errorf("decode persistent worker response: %w", err))
 			return
 		}
 		c.mu.Lock()
-		pending := c.pending[response.RequestID]
-		delete(c.pending, response.RequestID)
-		c.mu.Unlock()
-		if pending != nil {
-			pending <- response
+		pending, exists := c.pending[response.RequestID]
+		if exists {
+			delete(c.pending, response.RequestID)
 		}
+		c.mu.Unlock()
+		if !exists {
+			c.failRead(fmt.Errorf(
+				"persistent worker returned unmatched request ID %q",
+				response.RequestID,
+			))
+			return
+		}
+		pending <- response
 	}
 
 	scanErr := scanner.Err()
-	waitErr := c.cmd.Wait()
 	if scanErr != nil {
-		c.finish(fmt.Errorf("read persistent worker response: %w", scanErr))
+		c.failRead(fmt.Errorf("read persistent worker response: %w", scanErr))
 		return
 	}
+	waitErr := c.cmd.Wait()
 	c.finish(waitErr)
+}
+
+func (c *PersistentClient) failRead(readErr error) {
+	killErr := c.cmd.Process.Kill()
+	if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+		_ = c.stdin.Close()
+		c.finish(fmt.Errorf("%w; kill persistent worker: %v", readErr, killErr))
+		return
+	}
+	_ = c.cmd.Wait()
+	c.finish(readErr)
 }
 
 func (c *PersistentClient) finish(err error) {

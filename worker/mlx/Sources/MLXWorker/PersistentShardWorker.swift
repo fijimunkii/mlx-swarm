@@ -10,6 +10,10 @@ struct PersistentWorkerRequest: Codable {
     let forward: PersistentForwardRequest?
 }
 
+private struct PersistentWorkerEnvelope: Decodable {
+    let requestID: String
+}
+
 struct PersistentLoadShardRequest: Codable {
     let modelID: String
     let shardID: String
@@ -392,12 +396,15 @@ enum PersistentShardWorker {
             var requestID = "unknown"
             var shouldShutdown = false
             let response: PersistentWorkerResponse
+            let data = Data(line.utf8)
+            if let envelope = try? decoder.decode(PersistentWorkerEnvelope.self, from: data) {
+                requestID = envelope.requestID
+            }
             do {
                 let request = try decoder.decode(
                     PersistentWorkerRequest.self,
-                    from: Data(line.utf8)
+                    from: data
                 )
-                requestID = request.requestID
                 let result = try await service.handle(request)
                 shouldShutdown = result.shutdown == true
                 response = .success(requestID: requestID, result: result)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -28,6 +29,13 @@ type errorResponse struct {
 }
 
 func main() {
+	if err := run(); err != nil {
+		log.Printf("swarmd: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	addr := os.Getenv("SWARMD_ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:8080"
@@ -38,16 +46,15 @@ func main() {
 	worker := workerproc.Client{Path: workerproc.DefaultPath()}
 	persistentWorker, err := workerproc.StartPersistent(worker.Path)
 	if err != nil {
-		log.Fatalf("start persistent MLX worker: %v", err)
+		return fmt.Errorf("start persistent MLX worker: %w", err)
 	}
+	defer shutdownPersistentWorker(persistentWorker)
 	startupContext, cancelStartup := context.WithTimeout(context.Background(), 10*time.Second)
 	_, err = persistentWorker.Call(startupContext, workerproc.PersistentRequest{Command: "health"})
 	cancelStartup()
 	if err != nil {
-		_ = persistentWorker.Kill()
-		log.Fatalf("persistent MLX worker health: %v", err)
+		return fmt.Errorf("persistent MLX worker health: %w", err)
 	}
-	defer shutdownPersistentWorker(persistentWorker)
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -128,35 +135,37 @@ func main() {
 	)
 	defer stopSignals()
 	serverStopped := make(chan struct{})
+	shutdownComplete := make(chan struct{})
+	var debugShutdown <-chan struct{}
+	if exitAfterDebugShard {
+		debugShutdown = debugShardComplete
+	}
 	go func() {
+		defer close(shutdownComplete)
+		shutdownReason := ""
 		select {
 		case <-signalContext.Done():
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := server.Shutdown(ctx); err != nil {
-				log.Printf("signal shutdown: %v", err)
-			}
+			shutdownReason = "signal"
+		case <-debugShutdown:
+			shutdownReason = "debug one-shot"
 		case <-serverStopped:
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("%s shutdown: %v", shutdownReason, err)
 		}
 	}()
-
-	if exitAfterDebugShard {
-		go func() {
-			<-debugShardComplete
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := server.Shutdown(ctx); err != nil {
-				log.Printf("debug one-shot shutdown: %v", err)
-			}
-		}()
-	}
 
 	log.Printf("swarmd listening on %s", addr)
 	serveErr := server.ListenAndServe()
 	close(serverStopped)
+	<-shutdownComplete
 	if serveErr != nil && serveErr != http.ErrServerClosed {
-		log.Printf("swarmd serve: %v", serveErr)
+		return fmt.Errorf("serve: %w", serveErr)
 	}
+	return nil
 }
 
 func forwardPersistentRequest(

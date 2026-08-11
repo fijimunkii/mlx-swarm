@@ -45,6 +45,13 @@ type summary struct {
 }
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	worker := flag.String("worker", workerproc.DefaultPath(), "path to the built MLXWorker executable")
 	peer := flag.String("peer", "", "optional swarmd base URL; lifecycle requests use its persistent worker")
 	model := flag.String("model", defaultModelID, "real checkpoint model ID")
@@ -55,7 +62,7 @@ func main() {
 	timeout := flag.Duration("timeout", 2*time.Minute, "overall smoke timeout")
 	flag.Parse()
 	if *forwards < 100 {
-		fatalf("forwards must be at least 100")
+		return errors.New("forwards must be at least 100")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -67,23 +74,25 @@ func main() {
 		var err error
 		directClient, err = workerproc.StartPersistent(*worker)
 		if err != nil {
-			fatalf("start persistent worker: %v", err)
+			return fmt.Errorf("start persistent worker: %w", err)
 		}
 		client = directClient
 		defer func() {
 			if !cleanShutdown {
-				_ = directClient.Kill()
+				terminatePersistentClient(directClient)
 			}
 		}()
 	} else {
 		var err error
 		client, err = workerproc.NewHTTPPersistentClient(*peer, nil)
 		if err != nil {
-			fatalf("configure swarmd client: %v", err)
+			return fmt.Errorf("configure swarmd client: %w", err)
 		}
 	}
 
-	mustCall(ctx, client, workerproc.PersistentRequest{Command: "health"})
+	if _, err := call(ctx, client, workerproc.PersistentRequest{Command: "health"}); err != nil {
+		return err
+	}
 	canceledContext, cancelRequest := context.WithCancel(ctx)
 	cancelRequest()
 	_, cancellationErr := client.Call(
@@ -92,10 +101,12 @@ func main() {
 	)
 	cancellationReported := errors.Is(cancellationErr, context.Canceled)
 	if !cancellationReported {
-		fatalf("canceled request returned %v", cancellationErr)
+		return fmt.Errorf("canceled request returned %v", cancellationErr)
 	}
-	mustCall(ctx, client, workerproc.PersistentRequest{Command: "health"})
-	loaded := mustCall(ctx, client, workerproc.PersistentRequest{
+	if _, err := call(ctx, client, workerproc.PersistentRequest{Command: "health"}); err != nil {
+		return err
+	}
+	loaded, err := call(ctx, client, workerproc.PersistentRequest{
 		Command: "loadShard",
 		LoadShard: &workerproc.PersistentLoadShardRequest{
 			ModelID:    *model,
@@ -106,18 +117,23 @@ func main() {
 			OwnsOutput: false,
 		},
 	})
+	if err != nil {
+		return err
+	}
 	if loaded.Result == nil || loaded.Result.Shard == nil {
-		fatalf("loadShard returned no shard snapshot")
+		return errors.New("loadShard returned no shard snapshot")
 	}
 
 	for _, sequenceID := range []string{sequenceA, sequenceB} {
-		mustCall(ctx, client, workerproc.PersistentRequest{
+		if _, err := call(ctx, client, workerproc.PersistentRequest{
 			Command: "openSequence",
 			Sequence: &workerproc.PersistentSequenceRequest{
 				ShardID:    *shardID,
 				SequenceID: sequenceID,
 			},
-		})
+		}); err != nil {
+			return err
+		}
 	}
 
 	tokens := tokenTensor([]int32{1, 2, 3, 4, 5, 6})
@@ -130,7 +146,7 @@ func main() {
 		if index%2 == 1 {
 			sequenceID = sequenceB
 		}
-		response := mustCall(ctx, client, workerproc.PersistentRequest{
+		response, err := call(ctx, client, workerproc.PersistentRequest{
 			Command: "forward",
 			Forward: &workerproc.PersistentForwardRequest{
 				ShardID:    *shardID,
@@ -140,8 +156,11 @@ func main() {
 				Input:      tokens,
 			},
 		})
+		if err != nil {
+			return err
+		}
 		if response.Result == nil || response.Result.Forward == nil {
-			fatalf("forward %d returned no tensor", index)
+			return fmt.Errorf("forward %d returned no tensor", index)
 		}
 		forward := response.Result.Forward
 		digest := sha256.Sum256(forward.Output.Data)
@@ -191,56 +210,64 @@ func main() {
 	responseErr = nil
 	inputKindValidation := errors.As(inputKindErr, &responseErr)
 
-	stateResponse := mustCall(ctx, client, workerproc.PersistentRequest{Command: "state"})
+	stateResponse, err := call(ctx, client, workerproc.PersistentRequest{Command: "state"})
+	if err != nil {
+		return err
+	}
 	if stateResponse.Result == nil || stateResponse.Result.State == nil {
-		fatalf("state returned no snapshot")
+		return errors.New("state returned no snapshot")
 	}
 	state := stateResponse.Result.State
 	if len(state.LoadedShards) != 1 {
-		fatalf("expected one loaded shard, got %d", len(state.LoadedShards))
+		return fmt.Errorf("expected one loaded shard, got %d", len(state.LoadedShards))
 	}
 	shard := state.LoadedShards[0]
 	if state.LoadCount != 1 || state.ForwardCount != *forwards || shard.ForwardCount != *forwards {
-		fatalf("unexpected reuse counters: loads=%d forwards=%d shardForwards=%d", state.LoadCount, state.ForwardCount, shard.ForwardCount)
+		return fmt.Errorf("unexpected reuse counters: loads=%d forwards=%d shardForwards=%d", state.LoadCount, state.ForwardCount, shard.ForwardCount)
 	}
 	if shard.OpenSequenceCount != 2 {
-		fatalf("expected two open sequences, got %d", shard.OpenSequenceCount)
+		return fmt.Errorf("expected two open sequences, got %d", shard.OpenSequenceCount)
 	}
 	if !outputsStable || !sequenceIsolation || !shardIsolation || !inputKindValidation {
-		fatalf("persistent worker output or identifier isolation failed")
+		return errors.New("persistent worker output or identifier isolation failed")
 	}
 
 	for _, sequenceID := range []string{sequenceA, sequenceB} {
-		mustCall(ctx, client, workerproc.PersistentRequest{
+		if _, err := call(ctx, client, workerproc.PersistentRequest{
 			Command: "closeSequence",
 			Sequence: &workerproc.PersistentSequenceRequest{
 				ShardID:    *shardID,
 				SequenceID: sequenceID,
 			},
-		})
+		}); err != nil {
+			return err
+		}
 	}
-	unloaded := mustCall(ctx, client, workerproc.PersistentRequest{
+	unloaded, err := call(ctx, client, workerproc.PersistentRequest{
 		Command: "unloadShard",
 		Shard:   &workerproc.PersistentShardRequest{ShardID: *shardID},
 	})
+	if err != nil {
+		return err
+	}
 	if unloaded.Result == nil || unloaded.Result.State == nil || len(unloaded.Result.State.LoadedShards) != 0 {
-		fatalf("unload did not clear the shard")
+		return errors.New("unload did not clear the shard")
 	}
 	afterUnloadActive := unloaded.Result.State.Memory.ActiveBytes
 	afterUnloadCache := unloaded.Result.State.Memory.CacheBytes
 	if afterUnloadActive > 1<<20 || afterUnloadCache > 1<<20 {
-		fatalf("unload retained MLX memory: active=%d cache=%d", afterUnloadActive, afterUnloadCache)
+		return fmt.Errorf("unload retained MLX memory: active=%d cache=%d", afterUnloadActive, afterUnloadCache)
 	}
 	if directClient != nil {
 		if err := directClient.Shutdown(ctx); err != nil {
-			fatalf("clean shutdown: %v", err)
+			return fmt.Errorf("clean shutdown: %w", err)
 		}
 		cleanShutdown = true
 	}
 
 	crashReported := proveCrashReported(ctx, *worker)
 	if !crashReported {
-		fatalf("killed worker did not return a bounded error")
+		return errors.New("killed worker did not return a bounded error")
 	}
 
 	result := summary{
@@ -267,21 +294,22 @@ func main() {
 	}
 	encoded, err := json.Marshal(result)
 	if err != nil {
-		fatalf("encode result: %v", err)
+		return fmt.Errorf("encode result: %w", err)
 	}
 	fmt.Println(string(encoded))
+	return nil
 }
 
-func mustCall(
+func call(
 	ctx context.Context,
 	client workerproc.PersistentCaller,
 	request workerproc.PersistentRequest,
-) workerproc.PersistentResponse {
+) (workerproc.PersistentResponse, error) {
 	response, err := client.Call(ctx, request)
 	if err != nil {
-		fatalf("%s: %v", request.Command, err)
+		return workerproc.PersistentResponse{}, fmt.Errorf("%s: %w", request.Command, err)
 	}
-	return response
+	return response, nil
 }
 
 func tokenTensor(tokens []int32) workerproc.WireTensor {
@@ -301,8 +329,8 @@ func proveCrashReported(ctx context.Context, worker string) bool {
 	if err != nil {
 		return false
 	}
+	defer terminatePersistentClient(client)
 	if _, err := client.Call(ctx, workerproc.PersistentRequest{Command: "health"}); err != nil {
-		_ = client.Kill()
 		return false
 	}
 	if err := client.Kill(); err != nil {
@@ -324,7 +352,9 @@ func isContextError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
-	os.Exit(1)
+func terminatePersistentClient(client *workerproc.PersistentClient) {
+	_ = client.Kill()
+	reapContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = client.Wait(reapContext)
 }
