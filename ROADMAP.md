@@ -46,16 +46,23 @@ Current correctness proof (`mlx-community/gemma-3-270m-it-4bit`):
 
 ## M3 — chaos harness
 
-- [ ] inject latency and jitter
+- [x] inject latency and jitter
 - [ ] throttle bandwidth
-- [ ] pause/kill worker processes
-- [ ] disconnect/reconnect a peer
-- [ ] record recovery behavior and failed-token rate
+- [x] pause/kill worker processes
+- [x] disconnect/reconnect a peer
+- [x] record recovery behavior and failed-token rate
+
+Current failure proof:
+
+- every `forward`, `prefill`, and `decode` carries an absolute deadline; the Go coordinator applies a fresh per-call timeout and the Swift worker rejects missing or expired deadlines before and after inference
+- a timed-out non-preemptible MLX call kills its worker instead of preserving ambiguous KV state; `swarmd` starts a clean worker without replaying the failed mutation, and a fresh session reloads its shards
+- the deterministic, model-free harness injects process pause, process kill, long delay, bounded jitter, and a loopback HTTP disconnect without using the public network
+- pause, kill, delay, and disconnect fail the active sequence with its shard, phase, position, and last accepted token; every scenario proves bounded termination, released sequence state, worker reuse for a new sequence, and a machine-readable failed-token rate in CI
 
 ## M4 — fault-tolerant scheduler
 
 - [ ] worker health scoring
-- [ ] request deadlines
+- [x] request deadlines
 - [ ] replicas
 - [ ] delayed hedged execution
 - [ ] first-valid-result selection

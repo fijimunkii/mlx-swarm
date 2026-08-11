@@ -38,7 +38,7 @@ func TestPersistentWriteLoopDiscardsCanceledRequestBeforeWrite(t *testing.T) {
 	client.writes <- persistentWrite{
 		ctx: ctx, requestID: "canceled", payload: []byte("late open\n"), result: result,
 	}
-	if err := <-result; !errors.Is(err, context.Canceled) {
+	if err := <-result; !errors.Is(err, context.Canceled) || !isNotDispatched(err) {
 		t.Fatalf("write result = %v, want context canceled", err)
 	}
 	client.mu.Lock()
@@ -190,7 +190,7 @@ printf '%s\n' '{"requestID":"request-2","ok":true,"result":{"status":"ok"}}'
 	}
 }
 
-func TestPersistentClientCancellationDoesNotWaitForBlockedWrite(t *testing.T) {
+func TestPersistentClientKillsInferenceWorkerAfterDeadline(t *testing.T) {
 	worker := writeWorkerScript(t, `#!/bin/sh
 read request
 printf '%s\n' '{"requestID":"ready","ok":true,"result":{"status":"ok"}}'
@@ -238,15 +238,43 @@ while :; do :; done
 		t.Fatalf("blocked write cancellation took %v", elapsed)
 	}
 
-	queueCtx, cancelQueue := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	started = time.Now()
-	_, err = client.Call(queueCtx, PersistentRequest{RequestID: "blocked-queue", Command: "health"})
-	cancelQueue()
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("queued write error = %v, want deadline exceeded", err)
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelWait()
+	if waitErr := client.Wait(waitCtx); waitErr == nil || errors.Is(waitErr, context.DeadlineExceeded) {
+		t.Fatalf("timed-out inference worker wait error = %v", waitErr)
 	}
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-		t.Fatalf("queued write cancellation took %v", elapsed)
+}
+
+func TestPersistentClientDoesNotKillInferenceThatWasNeverDispatched(t *testing.T) {
+	worker := writeWorkerScript(t, `#!/bin/sh
+while read request; do
+  printf '%s\n' '{"requestID":"request-1","ok":true,"result":{"status":"ok"}}'
+done
+`)
+	client, err := StartPersistent(worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = client.Kill()
+		waitContext, cancelWait := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancelWait()
+		_ = client.Wait(waitContext)
+	}()
+
+	expiredContext, cancelExpired := context.WithCancel(context.Background())
+	cancelExpired()
+	_, err = client.Call(expiredContext, PersistentRequest{
+		Command: "decode", DeadlineUnixMillis: time.Now().Add(time.Second).UnixMilli(),
+	})
+	if !errors.Is(err, context.Canceled) || !isNotDispatched(err) {
+		t.Fatalf("expired inference error = %v", err)
+	}
+
+	healthContext, cancelHealth := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelHealth()
+	if _, err := client.Call(healthContext, PersistentRequest{Command: "health"}); err != nil {
+		t.Fatalf("health after undispatched inference: %v", err)
 	}
 }
 

@@ -17,4 +17,34 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test ./...
+      - name: Test
+        run: go test ./...
+      - name: Record bounded worker-failure characterization
+        id: failure-characterization
+        run: |
+          failure_path="$RUNNER_TEMP/mlx-swarm-failure-characterization.json"
+          go run ./cmd/swarm-failure-smoke > "$failure_path"
+          jq -e '
+            .schemaVersion == "1" and
+            .allTerminatedBounded and
+            .allCleanupReleased and
+            .allRecoveryReady and
+            ([.scenarios[].name] | sort) == ["delay", "disconnect", "jitter", "kill", "pause"]
+          ' "$failure_path" >/dev/null
+          printf 'failure_path=%s\n' "$failure_path" >> "$GITHUB_OUTPUT"
+          {
+            echo '## Bounded worker-failure characterization'
+            echo
+            printf 'Per-forward deadline: %s ms; scenario bound: %s ms; failed-token rate: %.3f\n\n' \
+              "$(jq -r '.forwardDeadlineMillis' "$failure_path")" \
+              "$(jq -r '.scenarioBoundMillis' "$failure_path")" \
+              "$(jq -r '.failedTokenRate' "$failure_path")"
+            echo '| Scenario | Failure expected/observed | Termination | Restarts | Cleanup | Recovery |'
+            echo '|---|---:|---:|---:|---:|---:|'
+            jq -r '.scenarios[] | "| \(.name) | \(.expectedFailure)/\(.observedFailure) | \(.terminatedInMillis) ms | \(.workerRestarts) | \(.cleanupReleased) | \(.recoveryReady) |"' "$failure_path"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload worker-failure characterization
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlx-swarm-failure-characterization-${{ github.run_id }}
+          path: ${{ steps.failure-characterization.outputs.failure_path }}

@@ -96,6 +96,35 @@ IDs isolate and bound KV state. A local reference worker is optional in normal
 use and mandatory in the deterministic CI proof, where every distributed
 logit vector must be within tolerance and every greedy token must match.
 
+## Deadlines and bounded recovery
+
+Every cache-mutating or diagnostic inference request (`forward`, `prefill`, or
+`decode`) must carry `deadlineUnixMillis`. The generation coordinator creates a
+fresh timeout for each stage call; `swarmd` preserves the earlier of the
+caller's context deadline and the wire deadline. The Swift worker checks the
+absolute deadline immediately before and after inference so a queued request
+cannot begin after its budget and a late result cannot be reported as timely.
+Context-derived wire deadlines round up to millisecond precision while Go
+retains the exact local deadline, so serialization cannot shorten the caller's
+budget.
+
+MLX inference is not synchronously cancelable once a kernel is running. If an
+inference context expires, the Go process client kills that worker to discard
+any possibly mutated KV state. The supervisor reaps and replaces a crashed,
+disconnected, or timed-out worker before returning the triggering error.
+Mutating requests are never retried: the active sequence fails, cleanup treats
+state lost with the process as released, and a later session reloads its shards
+and opens a fresh sequence. Health and state probes may be retried after a
+restart because they do not mutate model or cache state. `/healthz` exposes the
+worker restart count.
+
+Generation errors retain the partial result and identify the sequence, shard,
+phase, operation, position, and last accepted token. A deterministic fault
+harness drives protocol-compatible child processes through pause, kill, delay,
+jitter, and loopback HTTP-disconnect scenarios. CI requires every fault to
+terminate within its bound, release sequence/KV state, and admit a clean next
+sequence, then records the failed-token rate as a JSON artifact.
+
 ## Network model
 
 The global network is dynamic. A worker may disappear at any point. We therefore do not model the public swarm as one `mx.distributed.Group`.

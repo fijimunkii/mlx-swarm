@@ -23,15 +23,32 @@ const (
 
 var errPersistentWorkerStopped = errors.New("persistent worker is stopped")
 
+type requestNotDispatchedError struct {
+	err error
+}
+
+func (err *requestNotDispatchedError) Error() string { return err.err.Error() }
+func (err *requestNotDispatchedError) Unwrap() error { return err.err }
+
+func notDispatched(err error) error {
+	return &requestNotDispatchedError{err: err}
+}
+
+func isNotDispatched(err error) bool {
+	var target *requestNotDispatchedError
+	return errors.As(err, &target)
+}
+
 type PersistentRequest struct {
-	RequestID string                      `json:"requestID"`
-	Command   string                      `json:"command"`
-	LoadShard *PersistentLoadShardRequest `json:"loadShard,omitempty"`
-	Shard     *PersistentShardRequest     `json:"shard,omitempty"`
-	Sequence  *PersistentSequenceRequest  `json:"sequence,omitempty"`
-	Forward   *PersistentForwardRequest   `json:"forward,omitempty"`
-	Model     *PersistentModelRequest     `json:"model,omitempty"`
-	Text      *PersistentTextRequest      `json:"text,omitempty"`
+	RequestID          string                      `json:"requestID"`
+	Command            string                      `json:"command"`
+	DeadlineUnixMillis int64                       `json:"deadlineUnixMillis,omitempty"`
+	LoadShard          *PersistentLoadShardRequest `json:"loadShard,omitempty"`
+	Shard              *PersistentShardRequest     `json:"shard,omitempty"`
+	Sequence           *PersistentSequenceRequest  `json:"sequence,omitempty"`
+	Forward            *PersistentForwardRequest   `json:"forward,omitempty"`
+	Model              *PersistentModelRequest     `json:"model,omitempty"`
+	Text               *PersistentTextRequest      `json:"text,omitempty"`
 }
 
 type PersistentLoadShardRequest struct {
@@ -223,13 +240,21 @@ type persistentWrite struct {
 	requestID string
 	payload   []byte
 	result    chan error
+	started   chan struct{}
 }
 
 func StartPersistent(path string) (*PersistentClient, error) {
+	return StartPersistentCommand(path, "serve-stdio")
+}
+
+// StartPersistentCommand starts a framed worker using explicit arguments.
+// Production callers use StartPersistent; deterministic fault harnesses use
+// this entry point to run a protocol-compatible child mode from their binary.
+func StartPersistentCommand(path string, args ...string) (*PersistentClient, error) {
 	if path == "" {
 		path = DefaultPath()
 	}
-	cmd := exec.Command(path, "serve-stdio")
+	cmd := exec.Command(path, args...)
 	// Keep terminal/service signals scoped to swarmd so it can ask the worker
 	// to release MLX state and acknowledge shutdown instead of dying in parallel.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -267,8 +292,18 @@ func (c *PersistentClient) Call(
 		return PersistentResponse{}, errors.New("persistent worker command is empty")
 	}
 	if err := ctx.Err(); err != nil {
+		return PersistentResponse{}, notDispatched(err)
+	}
+	callContext, cancel, prepared, err := RequestContext(ctx, request)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return PersistentResponse{}, notDispatched(err)
+		}
 		return PersistentResponse{}, err
 	}
+	defer cancel()
+	ctx = callContext
+	request = prepared
 
 	c.mu.Lock()
 	select {
@@ -303,13 +338,15 @@ func (c *PersistentClient) Call(
 	payload = append(payload, '\n')
 
 	writeResult := make(chan error, 1)
+	writeStarted := make(chan struct{})
 	select {
 	case c.writes <- persistentWrite{
-		ctx: ctx, requestID: request.RequestID, payload: payload, result: writeResult,
+		ctx: ctx, requestID: request.RequestID, payload: payload,
+		result: writeResult, started: writeStarted,
 	}:
 	case <-ctx.Done():
 		c.removePending(request.RequestID)
-		return PersistentResponse{}, ctx.Err()
+		return PersistentResponse{}, notDispatched(ctx.Err())
 	case <-c.done:
 		return PersistentResponse{}, c.callError()
 	}
@@ -320,23 +357,50 @@ func (c *PersistentClient) Call(
 			return PersistentResponse{}, fmt.Errorf("write persistent worker request: %w", err)
 		}
 	case <-ctx.Done():
-		return PersistentResponse{}, ctx.Err()
+		select {
+		case err := <-writeResult:
+			if err != nil {
+				return PersistentResponse{}, fmt.Errorf("write persistent worker request: %w", err)
+			}
+			c.abortTimedOutInference(request)
+			return PersistentResponse{}, ctx.Err()
+		case <-writeStarted:
+			c.abortTimedOutInference(request)
+			return PersistentResponse{}, ctx.Err()
+		case <-c.done:
+			return PersistentResponse{}, c.callError()
+		}
 	case <-c.done:
 		return PersistentResponse{}, c.callError()
 	}
 
 	select {
 	case result := <-response:
+		if err := contextCompletionError(ctx); err != nil {
+			c.abortTimedOutInference(request)
+			return PersistentResponse{}, err
+		}
 		return checkedResponse(result)
 	case <-ctx.Done():
+		c.abortTimedOutInference(request)
 		return PersistentResponse{}, ctx.Err()
 	case <-c.done:
 		select {
 		case result := <-response:
+			if err := contextCompletionError(ctx); err != nil {
+				c.abortTimedOutInference(request)
+				return PersistentResponse{}, err
+			}
 			return checkedResponse(result)
 		default:
 			return PersistentResponse{}, c.callError()
 		}
+	}
+}
+
+func (c *PersistentClient) abortTimedOutInference(request PersistentRequest) {
+	if isInferenceCommand(request.Command) {
+		_ = c.Kill()
 	}
 }
 
@@ -349,8 +413,11 @@ func (c *PersistentClient) writeLoop() {
 			// the worker becomes writable again.
 			if err := write.ctx.Err(); err != nil {
 				c.removePending(write.requestID)
-				write.result <- err
+				write.result <- notDispatched(err)
 				continue
+			}
+			if write.started != nil {
+				close(write.started)
 			}
 			written, err := c.stdin.Write(write.payload)
 			if err == nil && written != len(write.payload) {

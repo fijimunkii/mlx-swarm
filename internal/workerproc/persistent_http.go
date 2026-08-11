@@ -54,9 +54,16 @@ func (c *HTTPPersistentClient) Call(
 	if request.Command == "" {
 		return PersistentResponse{}, fmt.Errorf("persistent worker command is empty")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := contextCompletionError(ctx); err != nil {
 		return PersistentResponse{}, err
 	}
+	callContext, cancel, prepared, err := RequestContext(ctx, request)
+	if err != nil {
+		return PersistentResponse{}, err
+	}
+	defer cancel()
+	ctx = callContext
+	request = prepared
 	if request.RequestID == "" {
 		c.mu.Lock()
 		c.nextID++
@@ -85,6 +92,9 @@ func (c *HTTPPersistentClient) Call(
 	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, maxPersistentResponseBytes+1))
 	if err != nil {
 		return PersistentResponse{}, fmt.Errorf("read swarmd persistent worker response: %w", err)
+	}
+	if err := contextCompletionError(ctx); err != nil {
+		return PersistentResponse{}, err
 	}
 	if len(body) > maxPersistentResponseBytes {
 		return PersistentResponse{}, fmt.Errorf("swarmd persistent worker response exceeds %d bytes", maxPersistentResponseBytes)

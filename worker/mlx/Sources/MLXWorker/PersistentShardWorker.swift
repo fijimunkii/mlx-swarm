@@ -6,6 +6,7 @@ import Tokenizers
 struct PersistentWorkerRequest: Codable {
     let requestID: String
     let command: String
+    let deadlineUnixMillis: Int64?
     let loadShard: PersistentLoadShardRequest?
     let shard: PersistentShardRequest?
     let sequence: PersistentSequenceRequest?
@@ -160,6 +161,8 @@ private enum PersistentWorkerError: LocalizedError {
     case cachePositionMismatch(String, String, got: Int, expected: Int)
     case sequenceLengthLimit(String, String, got: Int, maximum: Int)
     case retainedByteBudget(got: Int, maximum: Int)
+    case inferenceDeadlineRequired(String)
+    case inferenceDeadlineExceeded(String, deadline: Int64, now: Int64)
     case unsupportedInputKind(String)
     case inputKindMismatch(String, got: String, expected: String)
 
@@ -193,6 +196,10 @@ private enum PersistentWorkerError: LocalizedError {
             return "sequence \(sequenceID) on shard \(shardID) would reach position \(got); maximum is \(maximum)"
         case .retainedByteBudget(let got, let maximum):
             return "retained sequence state would use \(got) bytes; budget is \(maximum)"
+        case .inferenceDeadlineRequired(let operation):
+            return "\(operation) request requires deadlineUnixMillis"
+        case .inferenceDeadlineExceeded(let operation, let deadline, let now):
+            return "\(operation) request deadline \(deadline) expired at \(now)"
         case .unsupportedInputKind(let kind):
             return "unsupported forward input kind \(kind)"
         case .inputKindMismatch(let shardID, let got, let expected):
@@ -350,15 +357,19 @@ final class PersistentShardService {
             guard let forward = request.forward else {
                 throw PersistentWorkerError.invalidRequest("forward payload is missing")
             }
-            return PersistentWorkerResult(forward: try forwardRequest(forward, operation: "forward"))
+            try requireActiveDeadline(request.deadlineUnixMillis, operation: request.command)
+            let result = try forwardRequest(forward, operation: "forward")
+            try requireActiveDeadline(request.deadlineUnixMillis, operation: request.command)
+            return PersistentWorkerResult(forward: result)
 
         case "prefill", "decode":
             guard let forward = request.forward else {
                 throw PersistentWorkerError.invalidRequest("\(request.command) payload is missing")
             }
-            return PersistentWorkerResult(
-                forward: try forwardRequest(forward, operation: request.command)
-            )
+            try requireActiveDeadline(request.deadlineUnixMillis, operation: request.command)
+            let result = try forwardRequest(forward, operation: request.command)
+            try requireActiveDeadline(request.deadlineUnixMillis, operation: request.command)
+            return PersistentWorkerResult(forward: result)
 
         case "state":
             return PersistentWorkerResult(state: state())
@@ -372,6 +383,23 @@ final class PersistentShardService {
 
         default:
             throw PersistentWorkerError.invalidRequest("unknown command \(request.command)")
+        }
+    }
+
+    private func requireActiveDeadline(
+        _ deadlineUnixMillis: Int64?,
+        operation: String
+    ) throws {
+        guard let deadlineUnixMillis else {
+            throw PersistentWorkerError.inferenceDeadlineRequired(operation)
+        }
+        let now = Int64((Date().timeIntervalSince1970 * 1_000).rounded(.down))
+        guard now < deadlineUnixMillis else {
+            throw PersistentWorkerError.inferenceDeadlineExceeded(
+                operation,
+                deadline: deadlineUnixMillis,
+                now: now
+            )
         }
     }
 
