@@ -82,9 +82,12 @@ type PersistentWorkerResult struct {
 type PersistentForwardResult struct {
 	ShardID       string      `json:"shardID"`
 	SequenceID    string      `json:"sequenceID"`
+	Operation     string      `json:"operation"`
 	Position      uint64      `json:"position"`
+	NextPosition  uint64      `json:"nextPosition"`
 	Output        WireTensor  `json:"output"`
 	ComputeMicros uint64      `json:"computeMicros"`
+	KVCacheBytes  int         `json:"kvCacheBytes"`
 	Memory        StageMemory `json:"memory"`
 }
 
@@ -99,6 +102,7 @@ type PersistentShardSnapshot struct {
 	WeightKeyCount    int         `json:"weightKeyCount"`
 	OpenSequenceCount int         `json:"openSequenceCount"`
 	ForwardCount      int         `json:"forwardCount"`
+	KVCacheBytes      int         `json:"kvCacheBytes"`
 	LoadedMemory      StageMemory `json:"loadedMemory"`
 }
 
@@ -106,6 +110,7 @@ type PersistentWorkerState struct {
 	LoadedShards []PersistentShardSnapshot `json:"loadedShards"`
 	LoadCount    int                       `json:"loadCount"`
 	ForwardCount int                       `json:"forwardCount"`
+	KVCacheBytes int                       `json:"kvCacheBytes"`
 	Memory       StageMemory               `json:"memory"`
 }
 

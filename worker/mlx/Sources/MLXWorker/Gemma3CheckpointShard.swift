@@ -4,11 +4,29 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
+private final class Gemma3CheckpointSequenceCache: CheckpointShardSequenceCache {
+    let layers: [KVCache]
+
+    init(layers: [KVCache]) {
+        self.layers = layers
+    }
+
+    var position: Int {
+        layers.first?.offset ?? 0
+    }
+
+    var memoryBytes: Int {
+        layers.flatMap(\.state).reduce(0) { $0 + $1.nbytes }
+    }
+}
+
 private final class Gemma3CheckpointStage: CheckpointShardStage {
     let embedding: Embedding?
     let layers: [Gemma3TransformerBlock]
+    let cachePrototypes: [KVCache]
     let finalNorm: (any UnaryLayer)?
     let lmHead: (any UnaryLayer)?
+    let referenceModel: Gemma3TextModel?
     let hiddenSize: Int
     let vocabularySize: Int
     let weightKeyCount: Int
@@ -16,16 +34,20 @@ private final class Gemma3CheckpointStage: CheckpointShardStage {
     init(
         embedding: Embedding?,
         layers: [Gemma3TransformerBlock],
+        cachePrototypes: [KVCache],
         finalNorm: (any UnaryLayer)?,
         lmHead: (any UnaryLayer)?,
+        referenceModel: Gemma3TextModel? = nil,
         hiddenSize: Int,
         vocabularySize: Int,
         weightKeyCount: Int
     ) {
         self.embedding = embedding
         self.layers = layers
+        self.cachePrototypes = cachePrototypes
         self.finalNorm = finalNorm
         self.lmHead = lmHead
+        self.referenceModel = referenceModel
         self.hiddenSize = hiddenSize
         self.vocabularySize = vocabularySize
         self.weightKeyCount = weightKeyCount
@@ -42,7 +64,20 @@ private final class Gemma3CheckpointStage: CheckpointShardStage {
         )
     }
 
+    func makeSequenceCache() -> any CheckpointShardSequenceCache {
+        if let referenceModel {
+            return Gemma3CheckpointSequenceCache(layers: referenceModel.newCache())
+        }
+        let caches = cachePrototypes.map { $0.copy() }
+        return Gemma3CheckpointSequenceCache(layers: caches)
+    }
+
     func forward(tokens: MLXArray) throws -> MLXArray {
+        if let referenceModel {
+            let output = referenceModel(tokens)
+            eval(output)
+            return output
+        }
         guard let embedding else {
             throw CheckpointShardError.missingInputModule("model.embed_tokens")
         }
@@ -61,6 +96,104 @@ private final class Gemma3CheckpointStage: CheckpointShardStage {
         }
         eval(hidden)
         return hidden
+    }
+
+    func prefill(
+        tokens: MLXArray,
+        cache: any CheckpointShardSequenceCache
+    ) throws -> MLXArray {
+        try cachedForward(tokens: tokens, cache: cache)
+    }
+
+    func prefill(
+        hidden: MLXArray,
+        cache: any CheckpointShardSequenceCache
+    ) throws -> MLXArray {
+        try cachedForward(hidden: hidden, cache: cache)
+    }
+
+    func decode(
+        tokens: MLXArray,
+        cache: any CheckpointShardSequenceCache
+    ) throws -> MLXArray {
+        try cachedForward(tokens: tokens, cache: cache)
+    }
+
+    func decode(
+        hidden: MLXArray,
+        cache: any CheckpointShardSequenceCache
+    ) throws -> MLXArray {
+        try cachedForward(hidden: hidden, cache: cache)
+    }
+
+    private func cachedForward(
+        tokens: MLXArray,
+        cache: any CheckpointShardSequenceCache
+    ) throws -> MLXArray {
+        let cache = try gemmaCache(cache)
+        if let referenceModel {
+            let output = referenceModel(tokens, cache: cache.layers)
+            eval(output)
+            return output
+        }
+        guard let embedding else {
+            throw CheckpointShardError.missingInputModule("model.embed_tokens")
+        }
+        let embedded = embedding(tokens)
+        let scale = MLXArray(sqrt(Float(hiddenSize)), dtype: .bfloat16)
+        return try cachedForward(
+            hidden: embedded * scale.asType(embedded.dtype),
+            cache: cache
+        )
+    }
+
+    private func cachedForward(
+        hidden input: MLXArray,
+        cache sequenceCache: any CheckpointShardSequenceCache
+    ) throws -> MLXArray {
+        try cachedForward(hidden: input, cache: gemmaCache(sequenceCache))
+    }
+
+    private func cachedForward(
+        hidden input: MLXArray,
+        cache sequenceCache: Gemma3CheckpointSequenceCache
+    ) throws -> MLXArray {
+        guard referenceModel == nil else {
+            throw CheckpointShardError.invalidSequenceCache(
+                "a full-checkpoint reference accepts token input only"
+            )
+        }
+        guard sequenceCache.layers.count == layers.count else {
+            throw CheckpointShardError.invalidSequenceCache(
+                "expected \(layers.count) layer caches, got \(sequenceCache.layers.count)"
+            )
+        }
+        var hidden = input
+        for (localIndex, layer) in layers.enumerated() {
+            let cache = sequenceCache.layers[localIndex]
+            let mask = createAttentionMask(
+                h: hidden,
+                cache: cache,
+                windowSize: cache.maxSize
+            )
+            hidden = layer(hidden, mask: mask, cache: cache)
+        }
+        if let finalNorm, let lmHead {
+            hidden = lmHead(finalNorm(hidden))
+        }
+        eval(hidden)
+        return hidden
+    }
+
+    private func gemmaCache(
+        _ cache: any CheckpointShardSequenceCache
+    ) throws -> Gemma3CheckpointSequenceCache {
+        guard let cache = cache as? Gemma3CheckpointSequenceCache else {
+            throw CheckpointShardError.invalidSequenceCache(
+                "Gemma stage received \(String(describing: type(of: cache)))"
+            )
+        }
+        return cache
     }
 }
 
@@ -126,6 +259,32 @@ struct Gemma3CheckpointShardAdapter: CheckpointShardAdapter {
         }
         guard !request.ownsOutput || range.upperBound == inner.layers.count else {
             throw CheckpointShardError.invalidBoundary("Gemma output owner must end at the final layer")
+        }
+
+        // A full input/output range is used as the correctness oracle. Keep it
+        // on the upstream model call path so distributed cached logits are not
+        // compared against the same custom stage implementation.
+        if request.ownsInput,
+           request.ownsOutput,
+           range == 0 ..< inner.layers.count
+        {
+            try loadWeights(
+                modelDirectory: checkpoint.directory,
+                model: model,
+                perLayerQuantization: baseConfig.perLayerQuantization
+            )
+            eval(model)
+            return Gemma3CheckpointStage(
+                embedding: inner.embedTokens,
+                layers: inner.layers,
+                cachePrototypes: [],
+                finalNorm: nil,
+                lmHead: nil,
+                referenceModel: model,
+                hiddenSize: inner.config.hiddenSize,
+                vocabularySize: inner.embedTokens.weight.shape[0],
+                weightKeyCount: model.parameters().flattened().count
+            )
         }
 
         let selection = CheckpointWeightSelection(
@@ -220,6 +379,7 @@ struct Gemma3CheckpointShardAdapter: CheckpointShardAdapter {
         let stage = Gemma3CheckpointStage(
             embedding: request.ownsInput ? inner.embedTokens : nil,
             layers: Array(inner.layers[range]),
+            cachePrototypes: Array(model.newCache()[range]),
             finalNorm: finalNorm,
             lmHead: lmHead,
             hiddenSize: inner.config.hiddenSize,

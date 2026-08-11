@@ -233,7 +233,7 @@ func run() error {
 		"token tensor dtype must be int32",
 	) && validateTensor(
 		workerproc.WireTensor{Shape: []int{1, 1, 1}, DType: "int32", Data: make([]byte, 4)},
-		"token tensor shape must have 2 positive dimensions",
+		"token tensor shape must have batch size 1 and 2 positive dimensions",
 	) && validateTensor(
 		tokenTensor([]int32{-1}),
 		"token ID -1 is outside vocabulary size",

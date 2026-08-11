@@ -19,7 +19,7 @@
 - [x] load complementary contiguous layer ranges from a real checkpoint
 - [x] retain assigned shards in supervised workers across repeated forwards
 - [x] send hidden state from worker A to worker B
-- [ ] preserve per-shard KV cache
+- [x] preserve per-shard KV cache
 - [x] compare final logits with single-node inference at an explicit tolerance
 - [ ] measure p50/p95 latency, TTFT, and tokens/sec (single-run transfer/timing metrics exist)
 
@@ -32,6 +32,9 @@ Current correctness proof (`mlx-community/gemma-3-270m-it-4bit`):
 - paired macOS CI runners exercise the boundary over Tailscale and require both correctness and memory proofs
 - checkpoint orchestration and filtered loading are architecture-neutral; `model_type` selects a registered adapter, with Gemma 3 as the first validated family
 - `swarmd` supervises a long-lived worker; CI loads one real shard once, reuses it for 100 forwards across two sequence IDs, then proves unload, shutdown, and crash behavior
+- each shard owns adapter-defined KV caches keyed by shard and sequence; CI prefills two interleaved prompts once and reuses both shard caches for 32 decode steps per sequence
+- every distributed cached step matches the upstream full-checkpoint cached path at `rtol=atol=1e-4`; stale, skipped, conflicting, unknown, and closed sequence positions fail deterministically
+- KV memory is reported separately from resident weights and allocator cache; sequence teardown returns KV accounting to zero while the shard remains loaded
 
 ## M3 — chaos harness
 

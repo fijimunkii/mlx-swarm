@@ -65,6 +65,20 @@ HTTP `-peer` mode does not claim control of or crash-test the remote process.
 Its default checkpoint is the current CI fixture; the protocol and loader
 select arbitrary registered model-family adapters by checkpoint `model_type`.
 
+Run the incremental cache proof locally with three independently retained
+workers (producer shard, consumer shard, and upstream full-model reference):
+
+```bash
+go run ./cmd/swarm-cache-smoke -worker "$worker"
+```
+
+It prefills two interleaved sequences once, decodes 32 tokens per sequence,
+and compares every distributed final-logit vector with the normal
+full-checkpoint cached path at `rtol=atol=1e-4`. It also rejects stale,
+skipped, conflicting, unknown, and closed sequence positions, reports KV
+memory separately from weights and allocator cache, and proves that closing a
+sequence releases its KV state without unloading the shard.
+
 The framed request contract is documented in
 [`docs/persistent-worker-protocol.md`](docs/persistent-worker-protocol.md).
 
@@ -93,11 +107,19 @@ On Mac A:
 
 ```bash
 ./scripts/build-mlx-worker.sh
+go run ./cmd/swarm-cache-smoke \
+  -worker "$PWD/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker" \
+  -peer http://MAC_B_LAN_IP:8080
 go run ./cmd/swarm-net \
   -peer http://MAC_B_LAN_IP:8080
 ```
 
-The result records logical tensor bytes, encoded wire bytes, local producer time, network/remote time, final-logit correctness, and measured full/producer/consumer peak memory. The current 270M checkpoint produces a 7,680-byte `bfloat16` boundary and logits shaped `[1, 6, 262144]`.
+The cached proof uses `swarmd`'s persistent worker API for prompt prefill and
+32 incremental decode steps per interleaved sequence. The one-shot result also
+records logical tensor bytes, encoded wire bytes, local producer time,
+network/remote time, final-logit correctness, and measured
+full/producer/consumer peak memory. The current 270M checkpoint produces a
+7,680-byte `bfloat16` boundary and logits shaped `[1, 6, 262144]`.
 
 The current boundary representation is `shape + dtype + contiguous bytes`. JSON/base64 framing is temporary; `proto/swarm.proto` already models the intended raw-byte tensor message.
 
@@ -120,6 +142,7 @@ cmd/swarmd/              Go daemon / debug network receiver
 cmd/swarm-local/         local two-worker orchestration
 cmd/swarm-net/           two-machine shard experiment client
 cmd/swarm-session-smoke/ persistent shard lifecycle and reuse proof
+cmd/swarm-cache-smoke/   cached prefill/decode and reference-logit proof
 internal/workerproc/     supervised local and HTTP persistent-worker clients
 proto/                   language-neutral protocol definitions
 worker/mlx/              Swift MLX worker
@@ -133,4 +156,7 @@ ROADMAP.md                staged experimental plan
 
 ## Status
 
-The M2 real-checkpoint pipeline and persistent shard lifecycle are implemented and enforced in paired macOS CI runners. Remaining M2 work is decode-time KV-cache ownership and statistically useful latency/throughput measurement; see [ROADMAP.md](ROADMAP.md).
+The M2 real-checkpoint pipeline, persistent shard lifecycle, and per-sequence
+KV-cached prefill/decode are implemented and enforced in paired macOS CI
+runners. Remaining M2 work is statistically useful latency/throughput
+measurement; see [ROADMAP.md](ROADMAP.md).
