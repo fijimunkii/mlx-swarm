@@ -215,8 +215,10 @@ type PersistentClient struct {
 }
 
 type persistentWrite struct {
-	payload []byte
-	result  chan error
+	ctx       context.Context
+	requestID string
+	payload   []byte
+	result    chan error
 }
 
 func StartPersistent(path string) (*PersistentClient, error) {
@@ -298,7 +300,9 @@ func (c *PersistentClient) Call(
 
 	writeResult := make(chan error, 1)
 	select {
-	case c.writes <- persistentWrite{payload: payload, result: writeResult}:
+	case c.writes <- persistentWrite{
+		ctx: ctx, requestID: request.RequestID, payload: payload, result: writeResult,
+	}:
 	case <-ctx.Done():
 		c.removePending(request.RequestID)
 		return PersistentResponse{}, ctx.Err()
@@ -336,6 +340,14 @@ func (c *PersistentClient) writeLoop() {
 	for {
 		select {
 		case write := <-c.writes:
+			// A later request may already be queued after the caller stops
+			// waiting. Never let this canceled write overtake that request when
+			// the worker becomes writable again.
+			if err := write.ctx.Err(); err != nil {
+				c.removePending(write.requestID)
+				write.result <- err
+				continue
+			}
 			written, err := c.stdin.Write(write.payload)
 			if err == nil && written != len(write.payload) {
 				err = io.ErrShortWrite
