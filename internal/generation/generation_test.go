@@ -79,6 +79,20 @@ func TestCancellationClosesOpenedSequences(t *testing.T) {
 	assertNoFakeSequences(t, producer, consumer, reference)
 }
 
+func TestOpenResponseFailureClosesAttemptedSequence(t *testing.T) {
+	producer, consumer, reference := fakeSwarm([]int32{3})
+	consumer.openErr = context.DeadlineExceeded
+	session := newFakeSession(t, producer, consumer, reference)
+
+	_, err := session.Generate(context.Background(), Request{
+		Prompt: "hello", MaxTokens: 1, SequenceID: "ambiguous-open",
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected ambiguous open error, got %v", err)
+	}
+	assertNoFakeSequences(t, producer, consumer, reference)
+}
+
 func TestGreedyTokenUsesFinalPositionAndLowestTie(t *testing.T) {
 	tensor := float32Tensor([]int{1, 2, 4}, []float32{
 		99, 0, 0, 0,
@@ -140,6 +154,7 @@ type fakeWorker struct {
 	loadCount   int
 	logitIndex  int
 	tokenizeErr error
+	openErr     error
 	blockDecode bool
 }
 
@@ -190,6 +205,9 @@ func (worker *fakeWorker) Call(
 		result.Text = &workerproc.PersistentTextResult{ModelID: request.Text.ModelID, Text: &text}
 	case "openSequence":
 		worker.sequences[request.Sequence.SequenceID] = true
+		if worker.openErr != nil {
+			return workerproc.PersistentResponse{}, worker.openErr
+		}
 	case "closeSequence":
 		delete(worker.sequences, request.Sequence.SequenceID)
 	case "prefill", "decode":

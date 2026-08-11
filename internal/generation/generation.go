@@ -225,10 +225,13 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 		}
 	}()
 	for _, target := range targets {
+		// Once an open is attempted its outcome can be ambiguous: the worker may
+		// apply the mutation after the caller's context expires but before the
+		// response is observed. Conservatively close every attempted target.
+		opened = append(opened, target)
 		if err := sequenceCommand(ctx, target.caller, "openSequence", target.shardID, request.SequenceID); err != nil {
 			return result, fmt.Errorf("open %s sequence: %w", target.name, err)
 		}
-		opened = append(opened, target)
 	}
 
 	prompt := tokenTensor(tokenized.TokenIDs)
