@@ -3,6 +3,7 @@ package generation
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"math"
 	"sync"
@@ -132,6 +133,52 @@ func TestGreedyTokenUsesFinalPositionAndLowestTie(t *testing.T) {
 	}
 	if token != 1 {
 		t.Fatalf("greedy token = %d, want lowest tied index 1", token)
+	}
+}
+
+func TestCompareFinalLogitsReportsFiniteDifferenceFromZero(t *testing.T) {
+	got := float32Tensor([]int{1, 1, 1}, []float32{math.MaxFloat32})
+	want := float32Tensor([]int{1, 1, 1}, []float32{0})
+	absolute, relative, err := compareFinalLogits(got, want, 0, math.MaxFloat64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.IsNaN(absolute) || math.IsInf(absolute, 0) ||
+		math.IsNaN(relative) || math.IsInf(relative, 0) {
+		t.Fatalf("non-finite differences: absolute=%g relative=%g", absolute, relative)
+	}
+	if _, err := json.Marshal(Verification{
+		MaxAbsoluteDifference: absolute,
+		MaxRelativeDifference: relative,
+	}); err != nil {
+		t.Fatalf("marshal finite verification metrics: %v", err)
+	}
+}
+
+func TestNewSessionRejectsNonFiniteTolerances(t *testing.T) {
+	producer, consumer, _ := fakeSwarm([]int32{3})
+	for _, test := range []struct {
+		name string
+		rtol float64
+		atol float64
+	}{
+		{name: "NaN rtol", rtol: math.NaN()},
+		{name: "infinite rtol", rtol: math.Inf(1)},
+		{name: "NaN atol", atol: math.NaN()},
+		{name: "infinite atol", atol: math.Inf(1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := NewSession(
+				context.Background(),
+				producer,
+				consumer,
+				nil,
+				SessionConfig{Model: "test/model", RTol: test.rtol, ATol: test.atol},
+			)
+			if err == nil {
+				t.Fatal("expected non-finite tolerance error")
+			}
+		})
 	}
 }
 

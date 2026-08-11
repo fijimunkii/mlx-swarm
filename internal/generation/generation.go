@@ -103,8 +103,10 @@ func NewSession(
 	if config.Model == "" {
 		return nil, errors.New("model is required")
 	}
-	if config.RTol < 0 || config.ATol < 0 {
-		return nil, errors.New("numeric tolerances must be non-negative")
+	if config.RTol < 0 || config.ATol < 0 ||
+		math.IsNaN(config.RTol) || math.IsNaN(config.ATol) ||
+		math.IsInf(config.RTol, 0) || math.IsInf(config.ATol, 0) {
+		return nil, errors.New("numeric tolerances must be finite and non-negative")
 	}
 
 	producerModel, err := modelInfo(ctx, producer, config.Model)

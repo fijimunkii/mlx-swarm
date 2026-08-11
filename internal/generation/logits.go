@@ -79,7 +79,10 @@ func compareFinalLogits(
 			return 0, 0, fmt.Errorf("non-matching infinity at vocabulary index %d", index)
 		}
 		absolute := math.Abs(actual - expected)
-		relative := absolute / math.Max(math.Abs(expected), math.SmallestNonzeroFloat64)
+		// Logits are at most float32 precision, so its smallest representable
+		// nonzero magnitude keeps the zero-reference diagnostic finite without
+		// changing relative errors for any representable nonzero reference.
+		relative := absolute / math.Max(math.Abs(expected), math.SmallestNonzeroFloat32)
 		maxAbsolute = math.Max(maxAbsolute, absolute)
 		maxRelative = math.Max(maxRelative, relative)
 		if absolute > atol+rtol*math.Abs(expected) {
