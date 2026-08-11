@@ -90,25 +90,25 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	producer, err := smoke.OpenWorker(*worker, "")
+	producer, err := workerproc.OpenPersistentTarget(*worker, "")
 	if err != nil {
 		return fmt.Errorf("start producer worker: %w", err)
 	}
 	defer producer.Cleanup()
 
-	reference, err := smoke.OpenWorker(*worker, "")
+	reference, err := workerproc.OpenPersistentTarget(*worker, "")
 	if err != nil {
 		return fmt.Errorf("start reference worker: %w", err)
 	}
 	defer reference.Cleanup()
 
-	consumer, err := smoke.OpenWorker(*worker, *peer)
+	consumer, err := workerproc.OpenPersistentTarget(*worker, *peer)
 	if err != nil {
 		return fmt.Errorf("open consumer worker: %w", err)
 	}
 	defer consumer.Cleanup()
 
-	for name, client := range map[string]*smoke.Worker{
+	for name, client := range map[string]*workerproc.PersistentTarget{
 		"producer":  producer,
 		"consumer":  consumer,
 		"reference": reference,
@@ -153,20 +153,20 @@ func run() error {
 		{id: sequenceA, prompt: []int32{1, 2, 3, 4, 5, 6}, tokenAdd: 32},
 		{id: sequenceB, prompt: []int32{11, 12, 13, 14}, tokenAdd: 96},
 	}
-	targets := []smoke.SequenceTarget{
+	targets := []workerproc.SequenceTarget{
 		{Name: "producer", Caller: producer.Caller, ShardID: producerShard},
 		{Name: "consumer", Caller: consumer.Caller, ShardID: consumerShard},
 		{Name: "reference", Caller: reference.Caller, ShardID: referenceShard},
 	}
-	sequences, err := smoke.OpenSequences(ctx, targets, sequenceA, sequenceB)
+	sequences, err := workerproc.OpenSequences(ctx, targets, sequenceA, sequenceB)
 	if sequences != nil {
-		defer sequences.Cleanup()
+		defer func() { _ = sequences.Cleanup() }()
 	}
 	if err != nil {
 		return err
 	}
 
-	var logitMetrics tensorcheck.Metrics
+	var logitMetrics tensorcheck.LogitMetrics
 	var lastBoundary workerproc.WireTensor
 	mutationReplayValidated := true
 	for _, plan := range plans {
@@ -404,7 +404,7 @@ func run() error {
 		}
 	}
 
-	for _, client := range []*smoke.Worker{producer, consumer, reference} {
+	for _, client := range []*workerproc.PersistentTarget{producer, consumer, reference} {
 		if err := client.Shutdown(ctx); err != nil {
 			return fmt.Errorf("shutdown worker: %w", err)
 		}
@@ -547,16 +547,14 @@ func proveResourceLimits(
 	consumer workerproc.PersistentCaller,
 	plan *sequencePlan,
 ) (bool, error) {
-	producerTarget := smoke.SequenceTarget{Caller: producer, ShardID: producerShard}
-	consumerTarget := smoke.SequenceTarget{Caller: consumer, ShardID: consumerShard}
 	const cacheBudgetSequence = "cache-kv-budget"
-	if err := smoke.SequenceCommand(ctx, producerTarget, "openSequence", cacheBudgetSequence); err != nil {
+	if err := sequenceCommand(ctx, producer, "openSequence", producerShard, cacheBudgetSequence); err != nil {
 		return false, err
 	}
 	cacheBudgetOpen := true
 	defer func() {
 		if cacheBudgetOpen {
-			_ = smoke.SequenceCommand(ctx, producerTarget, "closeSequence", cacheBudgetSequence)
+			_ = sequenceCommand(ctx, producer, "closeSequence", producerShard, cacheBudgetSequence)
 		}
 	}()
 
@@ -592,19 +590,19 @@ func proveResourceLimits(
 		producerAfter.RetainedBytes != producerBefore.RetainedBytes {
 		return false, errors.New("rotating-cache budget rejection mutated worker state")
 	}
-	if err := smoke.SequenceCommand(ctx, producerTarget, "closeSequence", cacheBudgetSequence); err != nil {
+	if err := sequenceCommand(ctx, producer, "closeSequence", producerShard, cacheBudgetSequence); err != nil {
 		return false, err
 	}
 	cacheBudgetOpen = false
 
 	const budgetSequence = "cache-resource-budget"
-	if err := smoke.SequenceCommand(ctx, consumerTarget, "openSequence", budgetSequence); err != nil {
+	if err := sequenceCommand(ctx, consumer, "openSequence", consumerShard, budgetSequence); err != nil {
 		return false, err
 	}
 	budgetOpen := true
 	defer func() {
 		if budgetOpen {
-			_ = smoke.SequenceCommand(ctx, consumerTarget, "closeSequence", budgetSequence)
+			_ = sequenceCommand(ctx, consumer, "closeSequence", consumerShard, budgetSequence)
 		}
 	}()
 
@@ -652,7 +650,7 @@ func proveResourceLimits(
 		after.RetainedBytes != before.RetainedBytes {
 		return false, errors.New("retained-budget rejection mutated worker state")
 	}
-	if err := smoke.SequenceCommand(ctx, consumerTarget, "closeSequence", budgetSequence); err != nil {
+	if err := sequenceCommand(ctx, consumer, "closeSequence", consumerShard, budgetSequence); err != nil {
 		return false, err
 	}
 	budgetOpen = false
@@ -676,12 +674,12 @@ func proveResourceLimits(
 	extraIDs := make([]string, 0, extraCount)
 	defer func() {
 		for _, sequenceID := range extraIDs {
-			_ = smoke.SequenceCommand(ctx, consumerTarget, "closeSequence", sequenceID)
+			_ = sequenceCommand(ctx, consumer, "closeSequence", consumerShard, sequenceID)
 		}
 	}()
 	for index := 0; index < extraCount; index++ {
 		sequenceID := fmt.Sprintf("cache-sequence-limit-%d", index)
-		if err := smoke.SequenceCommand(ctx, consumerTarget, "openSequence", sequenceID); err != nil {
+		if err := sequenceCommand(ctx, consumer, "openSequence", consumerShard, sequenceID); err != nil {
 			return false, err
 		}
 		extraIDs = append(extraIDs, sequenceID)
@@ -695,7 +693,7 @@ func proveResourceLimits(
 		return false, errors.New("open sequence limit was not enforced")
 	}
 	for _, sequenceID := range extraIDs {
-		if err := smoke.SequenceCommand(ctx, consumerTarget, "closeSequence", sequenceID); err != nil {
+		if err := sequenceCommand(ctx, consumer, "closeSequence", consumerShard, sequenceID); err != nil {
 			return false, err
 		}
 	}
@@ -713,6 +711,22 @@ func shardState(
 		}
 	}
 	return nil, fmt.Errorf("state did not contain shard %s", shardID)
+}
+
+func sequenceCommand(
+	ctx context.Context,
+	caller workerproc.PersistentCaller,
+	command string,
+	shardID string,
+	sequenceID string,
+) error {
+	_, err := smoke.Call(ctx, caller, workerproc.PersistentRequest{
+		Command: command,
+		Sequence: &workerproc.PersistentSequenceRequest{
+			ShardID: shardID, SequenceID: sequenceID,
+		},
+	})
+	return err
 }
 
 func inputKind(shardID string) string {

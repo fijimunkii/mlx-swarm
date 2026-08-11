@@ -22,7 +22,7 @@ func TestCompareFinalLogitsUsesLastPosition(t *testing.T) {
 }
 
 func TestMetricsAccumulatesComparisons(t *testing.T) {
-	var metrics Metrics
+	var metrics LogitMetrics
 	want := float32Tensor([]int{1, 1, 2}, []float32{1, 2})
 	for _, values := range [][]float32{{1.01, 2}, {1, 2.02}} {
 		if err := metrics.Compare(
@@ -89,8 +89,8 @@ func TestFloat16(t *testing.T) {
 		0x7c00: float32(math.Inf(1)),
 	}
 	for bits, want := range tests {
-		if got := Float16(bits); got != want {
-			t.Errorf("Float16(%#x) = %g, want %g", bits, got, want)
+		if got := float16(bits); got != want {
+			t.Errorf("float16(%#x) = %g, want %g", bits, got, want)
 		}
 	}
 }

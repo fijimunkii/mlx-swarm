@@ -1,12 +1,10 @@
-package smoke
+package workerproc
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"testing"
-
-	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
 
 type sequenceCaller struct {
@@ -15,13 +13,12 @@ type sequenceCaller struct {
 	failOpen           string
 	applyBeforeFailure bool
 	definitiveFailure  bool
-	closeCalls         []string
 }
 
 func (caller *sequenceCaller) Call(
 	_ context.Context,
-	request workerproc.PersistentRequest,
-) (workerproc.PersistentResponse, error) {
+	request PersistentRequest,
+) (PersistentResponse, error) {
 	key := request.Sequence.ShardID + "/" + request.Sequence.SequenceID
 	switch request.Command {
 	case "openSequence":
@@ -31,27 +28,38 @@ func (caller *sequenceCaller) Call(
 				caller.owners[key] = request.Sequence.OwnerID
 			}
 			if caller.definitiveFailure {
-				return workerproc.PersistentResponse{}, &workerproc.WorkerResponseError{
+				return PersistentResponse{}, &WorkerResponseError{
 					RequestID: "test", Message: "sequence is already open",
 				}
 			}
-			return workerproc.PersistentResponse{}, errors.New("injected open failure")
+			return PersistentResponse{}, errors.New("injected open failure")
 		}
 		caller.open[key] = true
 		caller.owners[key] = request.Sequence.OwnerID
 	case "closeSequence":
+		owner, exists := caller.owners[key]
+		if !exists {
+			return PersistentResponse{}, &WorkerResponseError{
+				RequestID: "test", Message: "sequence is not open on shard",
+			}
+		}
+		if request.Sequence.OwnerID != owner {
+			return PersistentResponse{}, &WorkerResponseError{
+				RequestID: "test", Message: "sequence is owned by another request",
+			}
+		}
 		delete(caller.open, key)
 		delete(caller.owners, key)
-		caller.closeCalls = append(caller.closeCalls, key)
 	default:
-		return workerproc.PersistentResponse{}, fmt.Errorf("unexpected command %q", request.Command)
+		return PersistentResponse{}, fmt.Errorf("unexpected command %q", request.Command)
 	}
-	return workerproc.PersistentResponse{OK: true}, nil
+	return PersistentResponse{OK: true}, nil
 }
 
 func TestOpenSequencesRollsBackPartialMatrix(t *testing.T) {
-	first := &sequenceCaller{open: make(map[string]bool), owners: make(map[string]string)}
-	second := &sequenceCaller{open: make(map[string]bool), owners: make(map[string]string), failOpen: "consumer/b"}
+	first := newSequenceCaller()
+	second := newSequenceCaller()
+	second.failOpen = "consumer/b"
 	targets := []SequenceTarget{
 		{Name: "producer", Caller: first, ShardID: "producer"},
 		{Name: "consumer", Caller: second, ShardID: "consumer"},
@@ -66,10 +74,9 @@ func TestOpenSequencesRollsBackPartialMatrix(t *testing.T) {
 }
 
 func TestOpenSequencesTracksAmbiguousOpenForRollback(t *testing.T) {
-	caller := &sequenceCaller{
-		open: make(map[string]bool), owners: make(map[string]string),
-		failOpen: "producer/a", applyBeforeFailure: true,
-	}
+	caller := newSequenceCaller()
+	caller.failOpen = "producer/a"
+	caller.applyBeforeFailure = true
 	if _, err := OpenSequences(context.Background(), []SequenceTarget{
 		{Caller: caller, ShardID: "producer"},
 	}, "a"); err == nil {
@@ -81,12 +88,12 @@ func TestOpenSequencesTracksAmbiguousOpenForRollback(t *testing.T) {
 }
 
 func TestOpenSequencesDoesNotCloseDefinitivelyRejectedOpen(t *testing.T) {
-	first := &sequenceCaller{open: make(map[string]bool), owners: make(map[string]string)}
-	second := &sequenceCaller{
-		open:     map[string]bool{"consumer/a": true},
-		owners:   map[string]string{"consumer/a": "another-owner"},
-		failOpen: "consumer/a", definitiveFailure: true,
-	}
+	first := newSequenceCaller()
+	second := newSequenceCaller()
+	second.open["consumer/a"] = true
+	second.owners["consumer/a"] = "another-owner"
+	second.failOpen = "consumer/a"
+	second.definitiveFailure = true
 	if _, err := OpenSequences(context.Background(), []SequenceTarget{
 		{Caller: first, ShardID: "producer"},
 		{Caller: second, ShardID: "consumer"},
@@ -99,8 +106,8 @@ func TestOpenSequencesDoesNotCloseDefinitivelyRejectedOpen(t *testing.T) {
 }
 
 func TestOpenSequencesAssignsOnePrivateOwner(t *testing.T) {
-	first := &sequenceCaller{open: make(map[string]bool), owners: make(map[string]string)}
-	second := &sequenceCaller{open: make(map[string]bool), owners: make(map[string]string)}
+	first := newSequenceCaller()
+	second := newSequenceCaller()
 	set, err := OpenSequences(context.Background(), []SequenceTarget{
 		{Caller: first, ShardID: "producer"},
 		{Caller: second, ShardID: "consumer"},
@@ -108,7 +115,7 @@ func TestOpenSequencesAssignsOnePrivateOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer set.Cleanup()
+	defer func() { _ = set.Cleanup() }()
 	firstOwner := first.owners["producer/a"]
 	secondOwner := second.owners["consumer/a"]
 	if firstOwner == "" || firstOwner != secondOwner {
@@ -117,7 +124,7 @@ func TestOpenSequencesAssignsOnePrivateOwner(t *testing.T) {
 }
 
 func TestOpenSequencesValidatesConfigurationBeforeCallingWorkers(t *testing.T) {
-	caller := &sequenceCaller{open: make(map[string]bool), owners: make(map[string]string)}
+	caller := newSequenceCaller()
 	tests := []struct {
 		name    string
 		targets []SequenceTarget
@@ -142,8 +149,8 @@ func TestOpenSequencesValidatesConfigurationBeforeCallingWorkers(t *testing.T) {
 }
 
 func TestSequenceSetClosesOneSequenceAcrossTargets(t *testing.T) {
-	first := &sequenceCaller{open: make(map[string]bool), owners: make(map[string]string)}
-	second := &sequenceCaller{open: make(map[string]bool), owners: make(map[string]string)}
+	first := newSequenceCaller()
+	second := newSequenceCaller()
 	set, err := OpenSequences(context.Background(), []SequenceTarget{
 		{Caller: first, ShardID: "producer"},
 		{Caller: second, ShardID: "consumer"},
@@ -164,4 +171,8 @@ func TestSequenceSetClosesOneSequenceAcrossTargets(t *testing.T) {
 	if len(first.open) != 0 || len(second.open) != 0 {
 		t.Fatalf("close left sequences open: first=%v second=%v", first.open, second.open)
 	}
+}
+
+func newSequenceCaller() *sequenceCaller {
+	return &sequenceCaller{open: make(map[string]bool), owners: make(map[string]string)}
 }

@@ -17,11 +17,6 @@ import (
 
 const defaultModelID = "mlx-community/gemma-3-270m-it-4bit"
 
-type managedCaller struct {
-	caller workerproc.PersistentCaller
-	direct *workerproc.PersistentClient
-}
-
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -60,34 +55,34 @@ func run() error {
 	ctx, cancel := context.WithTimeout(signalContext, *timeout)
 	defer cancel()
 
-	producer, err := openCaller(*worker, *producerURL)
+	producer, err := workerproc.OpenPersistentTarget(*worker, *producerURL)
 	if err != nil {
 		return fmt.Errorf("producer: %w", err)
 	}
-	defer producer.close()
-	consumer, err := openCaller(*worker, *consumerURL)
+	defer producer.Cleanup()
+	consumer, err := workerproc.OpenPersistentTarget(*worker, *consumerURL)
 	if err != nil {
 		return fmt.Errorf("consumer: %w", err)
 	}
-	defer consumer.close()
+	defer consumer.Cleanup()
 
-	var reference *managedCaller
+	var reference *workerproc.PersistentTarget
 	if *verify {
-		reference, err = openCaller(*worker, "")
+		reference, err = workerproc.OpenPersistentTarget(*worker, "")
 		if err != nil {
 			return fmt.Errorf("reference: %w", err)
 		}
-		defer reference.close()
+		defer reference.Cleanup()
 	}
 	var referenceCaller workerproc.PersistentCaller
 	if reference != nil {
-		referenceCaller = reference.caller
+		referenceCaller = reference.Caller
 	}
 
 	session, err := generation.NewSession(
 		ctx,
-		producer.caller,
-		consumer.caller,
+		producer.Caller,
+		consumer.Caller,
 		referenceCaller,
 		generation.SessionConfig{Model: *model, RTol: *rtol, ATol: *atol},
 	)
@@ -106,32 +101,4 @@ func run() error {
 	}
 	fmt.Println(string(encoded))
 	return nil
-}
-
-func openCaller(worker string, endpoint string) (*managedCaller, error) {
-	if endpoint != "" {
-		client, err := workerproc.NewHTTPPersistentClient(endpoint, nil)
-		if err != nil {
-			return nil, err
-		}
-		return &managedCaller{caller: client}, nil
-	}
-	client, err := workerproc.StartPersistent(worker)
-	if err != nil {
-		return nil, err
-	}
-	return &managedCaller{caller: client, direct: client}, nil
-}
-
-func (caller *managedCaller) close() {
-	if caller == nil || caller.direct == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := caller.direct.Shutdown(ctx); err == nil {
-		return
-	}
-	_ = caller.direct.Kill()
-	_ = caller.direct.Wait(ctx)
 }

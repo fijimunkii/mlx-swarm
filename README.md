@@ -205,9 +205,9 @@ cmd/swarm-cache-smoke/   cached prefill/decode and reference-logit proof
 cmd/swarm-generate/      prompt-to-text distributed greedy generation
 cmd/swarm-generate-smoke/ deterministic generation/reference/retention proof
 internal/generation/     reusable model planning and generation session
-internal/smoke/          shared smoke worker and sequence orchestration
+internal/smoke/          shared smoke request and assertion helpers
 internal/tensorcheck/    reusable tensor decoding and reference comparison
-internal/workerproc/     supervised local and HTTP persistent-worker clients
+internal/workerproc/     persistent targets, transports, and sequence lifecycle
 proto/                   language-neutral protocol definitions
 worker/mlx/              Swift MLX worker
   CheckpointShardRuntime generic orchestration and adapter registry

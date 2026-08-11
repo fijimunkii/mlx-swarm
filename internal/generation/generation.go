@@ -15,8 +15,6 @@ import (
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
 
-const cleanupTimeout = 10 * time.Second
-
 type SessionConfig struct {
 	Model string
 	RTol  float64
@@ -193,11 +191,6 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 		}
 		request.SequenceID = sequenceID
 	}
-	ownerID, err := randomIdentifier("generation-owner-")
-	if err != nil {
-		return Result{}, err
-	}
-
 	result = Result{
 		Model: s.config.Model, ModelType: s.model.ModelType,
 		CheckpointFingerprint: s.model.CheckpointFingerprint, ShardPlan: s.plan,
@@ -218,38 +211,30 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 	result.PromptTokenIDs = tokenized.TokenIDs
 	result.EOSTokenID = tokenized.EOSTokenID
 
-	targets := []sequenceTarget{
-		{name: "producer", caller: s.producer, shardID: s.plan.Producer.ID},
-		{name: "consumer", caller: s.consumer, shardID: s.plan.Consumer.ID},
+	targets := []workerproc.SequenceTarget{
+		{Name: "producer", Caller: s.producer, ShardID: s.plan.Producer.ID},
+		{Name: "consumer", Caller: s.consumer, ShardID: s.plan.Consumer.ID},
 	}
 	if s.reference != nil {
-		targets = append(targets, sequenceTarget{name: "reference", caller: s.reference, shardID: s.referenceShard})
+		targets = append(targets, workerproc.SequenceTarget{
+			Name: "reference", Caller: s.reference, ShardID: s.referenceShard,
+		})
 	}
-	opened := make([]sequenceTarget, 0, len(targets))
-	defer func() {
-		cleanupErr := closeSequences(opened, request.SequenceID, ownerID)
-		if cleanupErr != nil {
-			if returnErr == nil {
-				returnErr = cleanupErr
-			} else {
-				returnErr = errors.Join(returnErr, cleanupErr)
+	sequences, err := workerproc.OpenSequences(ctx, targets, request.SequenceID)
+	if sequences != nil {
+		defer func() {
+			cleanupErr := sequences.Cleanup()
+			if cleanupErr != nil {
+				if returnErr == nil {
+					returnErr = cleanupErr
+				} else {
+					returnErr = errors.Join(returnErr, cleanupErr)
+				}
 			}
-		}
-	}()
-	for _, target := range targets {
-		err := sequenceCommand(
-			ctx, target.caller, "openSequence", target.shardID, request.SequenceID, ownerID,
-		)
-		var workerResponseErr *workerproc.WorkerResponseError
-		// Transport failures are ambiguous: the worker may apply the open after
-		// the caller stops waiting. A worker response is definitive, though, and
-		// must not let this request close a sequence it failed to create.
-		if err == nil || !errors.As(err, &workerResponseErr) {
-			opened = append(opened, target)
-		}
-		if err != nil {
-			return result, fmt.Errorf("open %s sequence: %w", target.name, err)
-		}
+		}()
+	}
+	if err != nil {
+		return result, fmt.Errorf("open generation sequences: %w", err)
 	}
 
 	prompt := tokenTensor(tokenized.TokenIDs)
@@ -376,27 +361,6 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 	}
 	result.Text = text
 	return result, nil
-}
-
-type sequenceTarget struct {
-	name    string
-	caller  workerproc.PersistentCaller
-	shardID string
-}
-
-func closeSequences(targets []sequenceTarget, sequenceID string, ownerID string) error {
-	var result error
-	for index := len(targets) - 1; index >= 0; index-- {
-		target := targets[index]
-		ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-		if err := sequenceCommand(
-			ctx, target.caller, "closeSequence", target.shardID, sequenceID, ownerID,
-		); err != nil {
-			result = errors.Join(result, fmt.Errorf("close %s sequence: %w", target.name, err))
-		}
-		cancel()
-	}
-	return result
 }
 
 func modelInfo(
@@ -568,23 +532,6 @@ func workerState(
 		return nil, errors.New("state returned no worker snapshot")
 	}
 	return response.Result.State, nil
-}
-
-func sequenceCommand(
-	ctx context.Context,
-	caller workerproc.PersistentCaller,
-	command string,
-	shardID string,
-	sequenceID string,
-	ownerID string,
-) error {
-	_, err := call(ctx, caller, workerproc.PersistentRequest{
-		Command: command,
-		Sequence: &workerproc.PersistentSequenceRequest{
-			ShardID: shardID, SequenceID: sequenceID, OwnerID: ownerID,
-		},
-	})
-	return err
 }
 
 func infer(

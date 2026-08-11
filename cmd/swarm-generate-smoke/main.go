@@ -54,17 +54,17 @@ func run() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	producer, err := smoke.OpenWorker(*worker, "")
+	producer, err := workerproc.OpenPersistentTarget(*worker, "")
 	if err != nil {
 		return fmt.Errorf("producer: %w", err)
 	}
 	defer producer.Cleanup()
-	consumer, err := smoke.OpenWorker(*worker, *peer)
+	consumer, err := workerproc.OpenPersistentTarget(*worker, *peer)
 	if err != nil {
 		return fmt.Errorf("consumer: %w", err)
 	}
 	defer consumer.Cleanup()
-	reference, err := smoke.OpenWorker(*worker, "")
+	reference, err := workerproc.OpenPersistentTarget(*worker, "")
 	if err != nil {
 		return fmt.Errorf("reference: %w", err)
 	}

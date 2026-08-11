@@ -16,8 +16,8 @@ type Difference struct {
 	Relative float64
 }
 
-// Metrics accumulates final-logit comparison results across a smoke proof.
-type Metrics struct {
+// LogitMetrics accumulates final-logit comparison results across a proof.
+type LogitMetrics struct {
 	Comparisons           int
 	MaxAbsoluteDifference float64
 	MaxRelativeDifference float64
@@ -90,7 +90,7 @@ func CompareFinalLogits(
 }
 
 // Compare checks one final-logit pair and incorporates its differences.
-func (metrics *Metrics) Compare(
+func (metrics *LogitMetrics) Compare(
 	got workerproc.WireTensor,
 	want workerproc.WireTensor,
 	rtol float64,
@@ -130,7 +130,7 @@ func FinalValues(tensor workerproc.WireTensor, count int) ([]float64, error) {
 			bits := uint32(binary.LittleEndian.Uint16(data[offset:])) << 16
 			values[index] = float64(math.Float32frombits(bits))
 		case "float16":
-			values[index] = float64(Float16(binary.LittleEndian.Uint16(data[offset:])))
+			values[index] = float64(float16(binary.LittleEndian.Uint16(data[offset:])))
 		case "float32":
 			values[index] = float64(math.Float32frombits(binary.LittleEndian.Uint32(data[offset:])))
 		}
@@ -138,8 +138,7 @@ func FinalValues(tensor workerproc.WireTensor, count int) ([]float64, error) {
 	return values, nil
 }
 
-// Float16 decodes one IEEE 754 binary16 value.
-func Float16(bits uint16) float32 {
+func float16(bits uint16) float32 {
 	sign := 1.0
 	if bits&0x8000 != 0 {
 		sign = -1

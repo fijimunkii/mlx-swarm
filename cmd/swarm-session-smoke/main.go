@@ -69,7 +69,7 @@ func run() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	workerClient, err := smoke.OpenWorker(*worker, *peer)
+	workerClient, err := workerproc.OpenPersistentTarget(*worker, *peer)
 	if err != nil {
 		return fmt.Errorf("open persistent worker: %w", err)
 	}
@@ -110,11 +110,11 @@ func run() error {
 		return errors.New("loadShard returned no shard snapshot")
 	}
 
-	sequences, err := smoke.OpenSequences(ctx, []smoke.SequenceTarget{
+	sequences, err := workerproc.OpenSequences(ctx, []workerproc.SequenceTarget{
 		{Name: "session worker", Caller: client, ShardID: *shardID},
 	}, sequenceA, sequenceB)
 	if sequences != nil {
-		defer sequences.Cleanup()
+		defer func() { _ = sequences.Cleanup() }()
 	}
 	if err != nil {
 		return err

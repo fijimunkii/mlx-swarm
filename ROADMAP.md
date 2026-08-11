@@ -40,7 +40,7 @@ Current correctness proof (`mlx-community/gemma-3-270m-it-4bit`):
 - the Go generation session discovers the model's layer count, caches complementary shard assignments, tokenizes through the checkpoint tokenizer, and stops greedy decode on EOS or a configured maximum
 - generation requires identical resolved-checkpoint fingerprints across producer, consumer, and reference workers; private sequence owners make ambiguous cleanup safe under caller-supplied ID collisions
 - local and paired-macOS proofs generate 32 tokens whose complete greedy token sequence matches a cached full-checkpoint reference; a second request reuses the loaded shards and both requests release their sequence caches
-- smoke proofs share bounded worker cleanup, rollback-safe multi-shard sequence orchestration, and accumulated final-logit comparison metrics so later experiments add only proof-specific behavior
+- generation and smoke proofs share bounded worker cleanup and rollback-safe multi-shard sequence orchestration; smoke proofs also share request assertions and accumulated final-logit comparison metrics so later experiments add only proof-specific behavior
 
 ## M3 — chaos harness
 
