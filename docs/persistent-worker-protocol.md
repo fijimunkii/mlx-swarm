@@ -33,10 +33,12 @@ The supported commands are:
 | `health` | none | Proves the child is responsive. |
 | `loadShard` | `loadShard` | Resolves `modelID`, selects its registered `model_type` adapter, loads the requested layer range, and retains it under `shardID`. |
 | `unloadShard` | `shard` | Releases a shard after all of its sequences are closed and clears the MLX cache. |
-| `openSequence` | `sequence` | Registers `sequenceID` under one loaded `shardID`. |
-| `closeSequence` | `sequence` | Removes that sequence registration and its future shard-local state. |
-| `forward` | `forward` | Runs the retained stage from token IDs or an upstream hidden tensor. |
-| `state` | none | Reports loaded ranges, adapter/model type, sequence and reuse counts, and MLX memory. |
+| `openSequence` | `sequence` | Registers `sequenceID` under one loaded `shardID` and creates the adapter-defined per-layer cache objects. |
+| `closeSequence` | `sequence` | Removes that sequence and releases its shard-local KV state without unloading weights. |
+| `forward` | `forward` | Runs a retained stage without mutating sequence cache; retained for diagnostics and the stateless reuse proof. |
+| `prefill` | `forward` | Runs a prompt exactly once at position zero and populates every owned layer cache. |
+| `decode` | `forward` | Runs exactly one new position at the sequence's expected next position and reuses every owned layer cache. |
+| `state` | none | Reports loaded ranges, adapter/model type, sequence and reuse counts, KV bytes, and MLX allocator memory. |
 | `shutdown` | none | Releases all shards, clears the MLX cache, acknowledges shutdown, and exits cleanly. Only the supervising daemon sends it. |
 
 Layer ranges use `[layerStart, layerEnd)`. `ownsInput` declares that the stage
@@ -44,7 +46,39 @@ owns the model input embedding; `ownsOutput` declares that it owns the final
 normalization and output head. `inputKind` is `tokens` for an input-owning stage
 or `hidden` for an intermediate stage. A forward also carries `shardID`,
 `sequenceID`, and `position`; the worker rejects an unknown shard or a sequence
-that was not opened on that shard.
+that was not opened on that shard. Token and hidden tensors represent one
+logical sequence and therefore require batch size one.
+
+`prefill` requires position zero and may carry one or more prompt positions.
+It is rejected after a sequence has already been prefilled. `decode` requires a
+single input position and must equal the next position established by prefill
+and prior decodes. Stale and skipped positions are rejected before inference,
+as are decode-before-prefill and requests for unknown or closed sequences. The
+response echoes the operation and input position, reports `nextPosition`, and
+includes that sequence's logical `kvCacheBytes`.
+
+The most recently completed `prefill` or `decode` on each sequence is
+retry-safe. Repeating the same operation, position, input kind, shape, dtype,
+and tensor bytes returns the retained result without running inference again or
+advancing the cache. This content-based replay also works when a transport
+retry uses a new `requestID`. A stale request with different input remains an
+error. Advancing to the next position replaces the retained replay result.
+
+Admission is bounded before cache-mutating inference. Each architecture adapter
+reports its maximum context and conservatively estimates cache and output bytes;
+the worker rejects a mutation whose aggregate retained KV plus replay result
+would exceed the configured worker budget. It also caps open sequences per
+shard (16 in the current composition root), including empty sequences. State
+snapshots expose `retainedBytes`, `retainedByteBudget`, and each shard's
+`maxOpenSequenceCount` so the coordinator can observe these limits.
+
+The worker obtains cache objects from the selected architecture adapter. The
+Gemma 3 adapter uses rotating caches for sliding-window layers and standard
+caches for global-attention layers, including when a shard begins in the
+middle of the model. State snapshots expose logical KV bytes separately from
+resident weight/load memory and MLX's allocator cache. Closing sequences drops
+their cache arrays and clears released allocator blocks; the loaded stage and
+its weights remain available.
 
 Before constructing an MLX array, the worker rejects negative dimensions,
 shape multiplication overflow, and a byte count that does not exactly match

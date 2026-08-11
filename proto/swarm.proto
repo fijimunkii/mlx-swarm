@@ -52,6 +52,13 @@ message SequenceRequest {
   string sequence_id = 2;
 }
 
+enum InferenceOperation {
+  INFERENCE_OPERATION_UNSPECIFIED = 0;
+  INFERENCE_OPERATION_FORWARD = 1;
+  INFERENCE_OPERATION_PREFILL = 2;
+  INFERENCE_OPERATION_DECODE = 3;
+}
+
 message ForwardRequest {
   string request_id = 1;
   string model_id = 2;
@@ -61,6 +68,7 @@ message ForwardRequest {
   Tensor input = 6;
   uint64 deadline_unix_millis = 7;
   string input_kind = 8; // tokens or hidden
+  InferenceOperation operation = 9;
 }
 
 message ForwardResponse {
@@ -68,6 +76,8 @@ message ForwardResponse {
   Tensor output = 2;
   uint64 compute_micros = 3;
   string error = 4;
+  uint64 next_position = 5;
+  uint64 kv_cache_memory_bytes = 6;
 }
 
 message ShardState {
@@ -84,6 +94,7 @@ message ShardState {
   uint64 active_memory_bytes = 11;
   uint64 cache_memory_bytes = 12;
   uint64 peak_memory_bytes = 13;
+  uint64 kv_cache_memory_bytes = 14;
 }
 
 message WorkerStateResponse {
@@ -93,4 +104,5 @@ message WorkerStateResponse {
   uint64 active_memory_bytes = 4;
   uint64 cache_memory_bytes = 5;
   uint64 peak_memory_bytes = 6;
+  uint64 kv_cache_memory_bytes = 7;
 }

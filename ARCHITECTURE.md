@@ -58,15 +58,22 @@ Inside the Swift worker, checkpoint sharding has three boundaries:
 The first useful primitive is conceptually:
 
 ```text
-Forward(model, shard, sequence, position, tensor) -> tensor
+Prefill(model, shard, sequence, position=0, tensor) -> tensor
+Decode(model, shard, sequence, next_position, tensor) -> tensor
 ```
 
 A shard is initially a contiguous transformer layer range. The worker owns its
-weights while it is assigned and validates that each forward's sequence ID was
-opened on that shard. Sequence registration is implemented; shard-local KV
-state is the next execution-layer milestone.
+weights while it is assigned. Opening a sequence creates an adapter-owned cache
+with the correct concrete type for every layer in that shard. The worker keys
+that cache by `(shardID, sequenceID)`, enforces contiguous positions, and drops
+only the sequence cache on close. Model-family adapters implement cached
+prefill/decode and attention-mask semantics behind an opaque cache interface;
+the Go control plane never handles cache tensors.
 
-The coordinator transfers only execution inputs/outputs and metadata during steady-state inference; weights remain cached on workers.
+The coordinator transfers only execution inputs/outputs and metadata during
+steady-state inference; weights and KV state remain cached on workers. A
+stateless `forward` operation remains as a diagnostic primitive, but generation
+uses explicit `prefill` and `decode` operations.
 
 ## Network model
 

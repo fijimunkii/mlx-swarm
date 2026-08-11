@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import MLX
 
 struct PersistentWorkerRequest: Codable {
@@ -74,9 +75,12 @@ struct PersistentWorkerResult: Codable {
 struct PersistentForwardResult: Codable {
     let shardID: String
     let sequenceID: String
+    let operation: String
     let position: UInt64
+    let nextPosition: UInt64
     let output: WireTensor
     let computeMicros: UInt64
+    let kvCacheBytes: Int
     let memory: StageMemory
 }
 
@@ -90,7 +94,10 @@ struct PersistentShardSnapshot: Codable {
     let ownsOutput: Bool
     let weightKeyCount: Int
     let openSequenceCount: Int
+    let maxOpenSequenceCount: Int
     let forwardCount: Int
+    let kvCacheBytes: Int
+    let retainedBytes: Int
     let loadedMemory: StageMemory
 }
 
@@ -98,6 +105,9 @@ struct PersistentWorkerState: Codable {
     let loadedShards: [PersistentShardSnapshot]
     let loadCount: Int
     let forwardCount: Int
+    let kvCacheBytes: Int
+    let retainedBytes: Int
+    let retainedByteBudget: Int
     let memory: StageMemory
 }
 
@@ -107,7 +117,14 @@ private enum PersistentWorkerError: LocalizedError {
     case shardNotFound(String)
     case shardHasOpenSequences(String, Int)
     case sequenceAlreadyOpen(String, String)
+    case openSequenceLimit(String, Int)
     case sequenceNotFound(String, String)
+    case sequenceAlreadyPrefilled(String, String)
+    case sequenceNotPrefilled(String, String)
+    case invalidPosition(String, String, got: UInt64, expected: UInt64)
+    case cachePositionMismatch(String, String, got: Int, expected: Int)
+    case sequenceLengthLimit(String, String, got: Int, maximum: Int)
+    case retainedByteBudget(got: Int, maximum: Int)
     case unsupportedInputKind(String)
     case inputKindMismatch(String, got: String, expected: String)
 
@@ -123,13 +140,71 @@ private enum PersistentWorkerError: LocalizedError {
             return "shard \(shardID) has \(count) open sequences"
         case .sequenceAlreadyOpen(let shardID, let sequenceID):
             return "sequence \(sequenceID) is already open on shard \(shardID)"
+        case .openSequenceLimit(let shardID, let maximum):
+            return "shard \(shardID) reached its open sequence limit of \(maximum)"
         case .sequenceNotFound(let shardID, let sequenceID):
             return "sequence \(sequenceID) is not open on shard \(shardID)"
+        case .sequenceAlreadyPrefilled(let shardID, let sequenceID):
+            return "sequence \(sequenceID) is already prefilled on shard \(shardID)"
+        case .sequenceNotPrefilled(let shardID, let sequenceID):
+            return "sequence \(sequenceID) is not prefilled on shard \(shardID)"
+        case .invalidPosition(let shardID, let sequenceID, let got, let expected):
+            return "sequence \(sequenceID) on shard \(shardID) received position \(got); expected \(expected)"
+        case .cachePositionMismatch(let shardID, let sequenceID, let got, let expected):
+            return "sequence \(sequenceID) on shard \(shardID) cache is at position \(got); expected \(expected)"
+        case .sequenceLengthLimit(let shardID, let sequenceID, let got, let maximum):
+            return "sequence \(sequenceID) on shard \(shardID) would reach position \(got); maximum is \(maximum)"
+        case .retainedByteBudget(let got, let maximum):
+            return "retained sequence state would use \(got) bytes; budget is \(maximum)"
         case .unsupportedInputKind(let kind):
             return "unsupported forward input kind \(kind)"
         case .inputKindMismatch(let shardID, let got, let expected):
             return "shard \(shardID) requires input kind \(expected), got \(got)"
         }
+    }
+}
+
+private final class PersistentSequenceState {
+    let cache: any CheckpointShardSequenceCache
+    var nextPosition = 0
+    var prefilled = false
+    var completedMutation: PersistentCompletedMutation?
+
+    init(cache: any CheckpointShardSequenceCache) {
+        self.cache = cache
+    }
+}
+
+private struct PersistentCompletedMutation {
+    let operation: String
+    let position: UInt64
+    let inputKind: String
+    let inputShape: [Int]
+    let inputDType: WireTensor.ElementType
+    let inputDigest: Data
+    let result: PersistentForwardResult
+
+    init(
+        operation: String,
+        request: PersistentForwardRequest,
+        result: PersistentForwardResult
+    ) {
+        self.operation = operation
+        self.position = request.position
+        self.inputKind = request.inputKind
+        self.inputShape = request.input.shape
+        self.inputDType = request.input.dtype
+        self.inputDigest = Data(SHA256.hash(data: request.input.data))
+        self.result = result
+    }
+
+    func matches(operation: String, request: PersistentForwardRequest) -> Bool {
+        self.operation == operation
+            && position == request.position
+            && inputKind == request.inputKind
+            && inputShape == request.input.shape
+            && inputDType == request.input.dtype
+            && inputDigest == Data(SHA256.hash(data: request.input.data))
     }
 }
 
@@ -141,7 +216,7 @@ private final class PersistentLoadedShard {
     let ownsOutput: Bool
     let stage: any CheckpointShardStage
     let loadedMemory: StageMemory
-    var sequenceIDs = Set<String>()
+    var sequences = [String: PersistentSequenceState]()
     var forwardCount = 0
 
     init(
@@ -213,7 +288,15 @@ final class PersistentShardService {
             guard let forward = request.forward else {
                 throw PersistentWorkerError.invalidRequest("forward payload is missing")
             }
-            return PersistentWorkerResult(forward: try forwardRequest(forward))
+            return PersistentWorkerResult(forward: try forwardRequest(forward, operation: "forward"))
+
+        case "prefill", "decode":
+            guard let forward = request.forward else {
+                throw PersistentWorkerError.invalidRequest("\(request.command) payload is missing")
+            }
+            return PersistentWorkerResult(
+                forward: try forwardRequest(forward, operation: request.command)
+            )
 
         case "state":
             return PersistentWorkerResult(state: state())
@@ -277,7 +360,7 @@ final class PersistentShardService {
     }
 
     private func unloadShard(_ shardID: String) throws {
-        guard let openSequenceCount = shards[shardID]?.sequenceIDs.count else {
+        guard let openSequenceCount = shards[shardID]?.sequences.count else {
             throw PersistentWorkerError.shardNotFound(shardID)
         }
         guard openSequenceCount == 0 else {
@@ -294,32 +377,49 @@ final class PersistentShardService {
         guard let shard = shards[request.shardID] else {
             throw PersistentWorkerError.shardNotFound(request.shardID)
         }
-        guard shard.sequenceIDs.insert(request.sequenceID).inserted else {
+        guard shard.sequences[request.sequenceID] == nil else {
             throw PersistentWorkerError.sequenceAlreadyOpen(request.shardID, request.sequenceID)
         }
+        guard shard.sequences.count < configuration.maxOpenSequencesPerShard else {
+            throw PersistentWorkerError.openSequenceLimit(
+                request.shardID,
+                configuration.maxOpenSequencesPerShard
+            )
+        }
+        shard.sequences[request.sequenceID] = PersistentSequenceState(
+            cache: shard.stage.makeSequenceCache()
+        )
     }
 
     private func closeSequence(_ request: PersistentSequenceRequest) throws {
         guard let shard = shards[request.shardID] else {
             throw PersistentWorkerError.shardNotFound(request.shardID)
         }
-        guard shard.sequenceIDs.remove(request.sequenceID) != nil else {
+        guard shard.sequences.removeValue(forKey: request.sequenceID) != nil else {
             throw PersistentWorkerError.sequenceNotFound(request.shardID, request.sequenceID)
         }
+        Memory.clearCache()
     }
 
     private func forwardRequest(
-        _ request: PersistentForwardRequest
+        _ request: PersistentForwardRequest,
+        operation: String
     ) throws -> PersistentForwardResult {
         guard let shard = shards[request.shardID] else {
             throw PersistentWorkerError.shardNotFound(request.shardID)
         }
-        guard shard.sequenceIDs.contains(request.sequenceID) else {
+        guard let sequence = shard.sequences[request.sequenceID] else {
             throw PersistentWorkerError.sequenceNotFound(request.shardID, request.sequenceID)
         }
+        if operation != "forward",
+           let completed = sequence.completedMutation,
+           completed.matches(operation: operation, request: request)
+        {
+            return completed.result
+        }
 
-        let start = DispatchTime.now().uptimeNanoseconds
-        let output: MLXArray
+        let input: MLXArray
+        let inputLength: Int
         switch request.inputKind {
         case "tokens":
             guard shard.ownsInput else {
@@ -330,7 +430,8 @@ final class PersistentShardService {
                 )
             }
             try validateTokenInput(request.input, metadata: shard.stage.inputMetadata)
-            output = try shard.stage.forward(tokens: request.input.materialize())
+            input = try request.input.materialize()
+            inputLength = request.input.shape[1]
         case "hidden":
             guard !shard.ownsInput else {
                 throw PersistentWorkerError.inputKindMismatch(
@@ -340,22 +441,186 @@ final class PersistentShardService {
                 )
             }
             try validateHiddenInput(request.input, metadata: shard.stage.inputMetadata)
-            output = try shard.stage.forward(hidden: request.input.materialize())
+            input = try request.input.materialize()
+            inputLength = request.input.shape[1]
         default:
             throw PersistentWorkerError.unsupportedInputKind(request.inputKind)
+        }
+
+        let start = DispatchTime.now().uptimeNanoseconds
+        let output: MLXArray
+        switch operation {
+        case "forward":
+            output = try request.inputKind == "tokens"
+                ? shard.stage.forward(tokens: input)
+                : shard.stage.forward(hidden: input)
+        case "prefill":
+            guard !sequence.prefilled else {
+                throw PersistentWorkerError.sequenceAlreadyPrefilled(
+                    request.shardID,
+                    request.sequenceID
+                )
+            }
+            try validatePosition(request, sequence: sequence, expected: 0)
+            try validateMutationBudget(
+                request: request,
+                shard: shard,
+                sequence: sequence,
+                inputLength: inputLength
+            )
+            output = try request.inputKind == "tokens"
+                ? shard.stage.prefill(tokens: input, cache: sequence.cache)
+                : shard.stage.prefill(hidden: input, cache: sequence.cache)
+            try advance(
+                request,
+                sequence: sequence,
+                inputLength: inputLength
+            )
+            sequence.prefilled = true
+        case "decode":
+            guard sequence.prefilled else {
+                throw PersistentWorkerError.sequenceNotPrefilled(
+                    request.shardID,
+                    request.sequenceID
+                )
+            }
+            guard inputLength == 1 else {
+                throw PersistentWorkerError.invalidRequest(
+                    "decode input must contain exactly one position, got \(inputLength)"
+                )
+            }
+            try validatePosition(
+                request,
+                sequence: sequence,
+                expected: sequence.nextPosition
+            )
+            try validateMutationBudget(
+                request: request,
+                shard: shard,
+                sequence: sequence,
+                inputLength: inputLength
+            )
+            output = try request.inputKind == "tokens"
+                ? shard.stage.decode(tokens: input, cache: sequence.cache)
+                : shard.stage.decode(hidden: input, cache: sequence.cache)
+            try advance(
+                request,
+                sequence: sequence,
+                inputLength: inputLength
+            )
+        default:
+            throw PersistentWorkerError.invalidRequest("unknown inference operation \(operation)")
         }
         let tensor = WireTensor(output)
         let elapsed = DispatchTime.now().uptimeNanoseconds - start
         shard.forwardCount += 1
         forwardCount += 1
-        return PersistentForwardResult(
+        let result = PersistentForwardResult(
             shardID: request.shardID,
             sequenceID: request.sequenceID,
+            operation: operation,
             position: request.position,
+            nextPosition: UInt64(sequence.nextPosition),
             output: tensor,
             computeMicros: elapsed / 1_000,
+            kvCacheBytes: sequence.cache.memoryBytes,
             memory: CheckpointMemory.snapshot()
         )
+        if operation == "prefill" || operation == "decode" {
+            sequence.completedMutation = PersistentCompletedMutation(
+                operation: operation,
+                request: request,
+                result: result
+            )
+        }
+        return result
+    }
+
+    private func validatePosition(
+        _ request: PersistentForwardRequest,
+        sequence: PersistentSequenceState,
+        expected: Int
+    ) throws {
+        guard request.position == UInt64(expected) else {
+            throw PersistentWorkerError.invalidPosition(
+                request.shardID,
+                request.sequenceID,
+                got: request.position,
+                expected: UInt64(expected)
+            )
+        }
+        guard sequence.cache.position == expected else {
+            throw PersistentWorkerError.cachePositionMismatch(
+                request.shardID,
+                request.sequenceID,
+                got: sequence.cache.position,
+                expected: expected
+            )
+        }
+    }
+
+    private func advance(
+        _ request: PersistentForwardRequest,
+        sequence: PersistentSequenceState,
+        inputLength: Int
+    ) throws {
+        let nextPosition = try projectedPosition(sequence: sequence, inputLength: inputLength)
+        guard sequence.cache.position == nextPosition else {
+            throw PersistentWorkerError.cachePositionMismatch(
+                request.shardID,
+                request.sequenceID,
+                got: sequence.cache.position,
+                expected: nextPosition
+            )
+        }
+        sequence.nextPosition = nextPosition
+    }
+
+    private func validateMutationBudget(
+        request: PersistentForwardRequest,
+        shard: PersistentLoadedShard,
+        sequence: PersistentSequenceState,
+        inputLength: Int
+    ) throws {
+        let nextPosition = try projectedPosition(sequence: sequence, inputLength: inputLength)
+        let maximum = shard.stage.inputMetadata.maximumSequenceLength
+        guard nextPosition <= maximum else {
+            throw PersistentWorkerError.sequenceLengthLimit(
+                request.shardID,
+                request.sequenceID,
+                got: nextPosition,
+                maximum: maximum
+            )
+        }
+
+        let currentSequenceBytes = retainedBytes(sequence: sequence)
+        let currentWorkerBytes = retainedBytes()
+        let estimatedCacheBytes = try sequence.cache.estimatedMemoryBytes(at: nextPosition)
+        let estimatedOutputBytes = try shard.stage.estimatedOutputBytes(inputLength: inputLength)
+        let (estimatedSequenceBytes, sequenceOverflow) = estimatedCacheBytes
+            .addingReportingOverflow(estimatedOutputBytes)
+        let workerWithoutSequence = max(0, currentWorkerBytes - currentSequenceBytes)
+        let (estimatedWorkerBytes, workerOverflow) = workerWithoutSequence
+            .addingReportingOverflow(estimatedSequenceBytes)
+        guard !sequenceOverflow, !workerOverflow,
+              estimatedWorkerBytes <= configuration.workerBudgetBytes
+        else {
+            throw PersistentWorkerError.retainedByteBudget(
+                got: sequenceOverflow || workerOverflow ? Int.max : estimatedWorkerBytes,
+                maximum: configuration.workerBudgetBytes
+            )
+        }
+    }
+
+    private func projectedPosition(
+        sequence: PersistentSequenceState,
+        inputLength: Int
+    ) throws -> Int {
+        let (nextPosition, overflow) = sequence.nextPosition.addingReportingOverflow(inputLength)
+        guard !overflow else {
+            throw PersistentWorkerError.invalidRequest("sequence position overflow")
+        }
+        return nextPosition
     }
 
     private func validateTokenInput(
@@ -369,10 +634,11 @@ final class PersistentShardService {
             )
         }
         guard input.shape.count == metadata.tokenRank,
-              input.shape.allSatisfy({ $0 > 0 })
+              input.shape.allSatisfy({ $0 > 0 }),
+              input.shape.first == 1
         else {
             throw PersistentWorkerError.invalidRequest(
-                "token tensor shape must have \(metadata.tokenRank) positive dimensions"
+                "token tensor shape must have batch size 1 and \(metadata.tokenRank) positive dimensions"
             )
         }
 
@@ -405,10 +671,11 @@ final class PersistentShardService {
         }
         guard input.shape.count == metadata.hiddenRank,
               input.shape.allSatisfy({ $0 > 0 }),
+              input.shape.first == 1,
               input.shape.last == metadata.hiddenSize
         else {
             throw PersistentWorkerError.invalidRequest(
-                "hidden tensor shape must have \(metadata.hiddenRank) positive dimensions and width \(metadata.hiddenSize)"
+                "hidden tensor shape must have batch size 1, \(metadata.hiddenRank) positive dimensions, and width \(metadata.hiddenSize)"
             )
         }
     }
@@ -419,6 +686,9 @@ final class PersistentShardService {
                 .sorted { $0.shardID < $1.shardID },
             loadCount: loadCount,
             forwardCount: forwardCount,
+            kvCacheBytes: shards.values.reduce(0) { $0 + cacheBytes(shard: $1) },
+            retainedBytes: retainedBytes(),
+            retainedByteBudget: configuration.workerBudgetBytes,
             memory: CheckpointMemory.snapshot()
         )
     }
@@ -436,10 +706,41 @@ final class PersistentShardService {
             ownsInput: shard.ownsInput,
             ownsOutput: shard.ownsOutput,
             weightKeyCount: shard.stage.weightKeyCount,
-            openSequenceCount: shard.sequenceIDs.count,
+            openSequenceCount: shard.sequences.count,
+            maxOpenSequenceCount: configuration.maxOpenSequencesPerShard,
             forwardCount: shard.forwardCount,
+            kvCacheBytes: cacheBytes(shard: shard),
+            retainedBytes: retainedBytes(shard: shard),
             loadedMemory: shard.loadedMemory
         )
+    }
+
+    private func cacheBytes(shard: PersistentLoadedShard) -> Int {
+        shard.sequences.values.reduce(0) { $0 + $1.cache.memoryBytes }
+    }
+
+    private func retainedBytes() -> Int {
+        shards.values.reduce(0) { total, shard in
+            saturatedAdd(total, retainedBytes(shard: shard))
+        }
+    }
+
+    private func retainedBytes(shard: PersistentLoadedShard) -> Int {
+        shard.sequences.values.reduce(0) { total, sequence in
+            saturatedAdd(total, retainedBytes(sequence: sequence))
+        }
+    }
+
+    private func retainedBytes(sequence: PersistentSequenceState) -> Int {
+        saturatedAdd(
+            sequence.cache.memoryBytes,
+            sequence.completedMutation?.result.output.data.count ?? 0
+        )
+    }
+
+    private func saturatedAdd(_ left: Int, _ right: Int) -> Int {
+        let (result, overflow) = left.addingReportingOverflow(right)
+        return overflow ? Int.max : result
     }
 }
 

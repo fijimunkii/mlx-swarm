@@ -10,6 +10,7 @@ on:
       - 'cmd/swarm-local/**'
       - 'cmd/swarm-net/**'
       - 'cmd/swarm-session-smoke/**'
+      - 'cmd/swarm-cache-smoke/**'
       - 'cmd/swarmd/**'
       - 'internal/workerproc/**'
       - 'go.mod'
@@ -21,6 +22,7 @@ on:
       - 'cmd/swarm-local/**'
       - 'cmd/swarm-net/**'
       - 'cmd/swarm-session-smoke/**'
+      - 'cmd/swarm-cache-smoke/**'
       - 'cmd/swarmd/**'
       - 'internal/workerproc/**'
       - 'go.mod'
@@ -80,6 +82,10 @@ jobs:
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
           go run ./cmd/swarm-session-smoke -worker "$worker"
+      - name: Prove cached prefill and decode locally
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          go run ./cmd/swarm-cache-smoke -worker "$worker"
 
   mlx-receiver-macos:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -179,6 +185,10 @@ jobs:
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
           go run ./cmd/swarm-session-smoke -worker "$worker"
+      - name: Prove cached prefill and decode locally
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          go run ./cmd/swarm-cache-smoke -worker "$worker"
       - name: Connect producer to Tailscale
         uses: tailscale/github-action@v4
         with:
@@ -186,7 +196,7 @@ jobs:
           audience: ${{ secrets.TS_AUDIENCE }}
           tags: tag:ci
           hostname: mlx-swarm-p-${{ github.run_id }}
-      - name: Discover receiver and relay shard across runners
+      - name: Discover receiver and exercise cached pipeline across runners
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
           peer_name="mlx-swarm-r-${GITHUB_RUN_ID}"
@@ -226,6 +236,24 @@ jobs:
           if [ "$ready" -ne 1 ]; then
             echo "Receiver was discovered but never became HTTP-ready" >&2
             tailscale status
+            exit 1
+          fi
+
+          cache_json="$(go run ./cmd/swarm-cache-smoke \
+            -worker "$worker" \
+            -peer "http://${peer_ip}:8080")"
+          printf '%s\n' "$cache_json"
+
+          if [ "$(printf '%s' "$cache_json" | jq -r '.allFinalLogitsMatch')" != "true" ]; then
+            echo "Cached distributed logits did not match the full-checkpoint cache" >&2
+            exit 1
+          fi
+          if [ "$(printf '%s' "$cache_json" | jq -r '.positionsValidated and .sequenceIsolationValidated')" != "true" ]; then
+            echo "Cached sequence position or isolation proof failed" >&2
+            exit 1
+          fi
+          if [ "$(printf '%s' "$cache_json" | jq -r '(.producerAfterTeardownBytes == 0) and (.consumerAfterTeardownBytes == 0) and (.referenceAfterTeardownBytes == 0)')" != "true" ]; then
+            echo "Sequence teardown retained KV cache memory" >&2
             exit 1
           fi
 
@@ -271,6 +299,10 @@ jobs:
             printf '| Logit tolerance | `rtol=%s, atol=%s` |\n' "$(printf '%s' "$network_json" | jq -r '.rtol')" "$(printf '%s' "$network_json" | jq -r '.atol')"
             printf '| Final-logit correctness | **%s** |\n' "$(printf '%s' "$network_json" | jq -r 'if .matchesFullCheckpoint then "MATCH" else "MISMATCH" end')"
             printf '| Memory proof | **%s** |\n' "$(printf '%s' "$network_json" | jq -r 'if .passesMemoryProof then "PASS" else "FAIL" end')"
+            printf '| Cached decode steps | %s × %s sequences |\n' "$(printf '%s' "$cache_json" | jq -r '.decodeStepsPerSequence')" "$(printf '%s' "$cache_json" | jq -r '.sequenceCount')"
+            printf '| Cached final-logit correctness | **%s** |\n' "$(printf '%s' "$cache_json" | jq -r 'if .allFinalLogitsMatch then "MATCH" else "MISMATCH" end')"
+            printf '| Producer / consumer KV cache | %.3f / %.3f MiB |\n' "$(printf '%s' "$cache_json" | jq -r '.producerKVCacheBytes / 1048576')" "$(printf '%s' "$cache_json" | jq -r '.consumerKVCacheBytes / 1048576')"
+            printf '| KV bytes after sequence teardown | %s / %s |\n' "$(printf '%s' "$cache_json" | jq -r '.producerAfterTeardownBytes')" "$(printf '%s' "$cache_json" | jq -r '.consumerAfterTeardownBytes')"
             echo
             echo "Route probe: \`$route_line\`"
           } >> "$GITHUB_STEP_SUMMARY"

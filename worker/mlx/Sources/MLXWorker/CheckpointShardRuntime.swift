@@ -60,13 +60,41 @@ struct CheckpointStageInputMetadata {
     let hiddenDTypes: Set<WireTensor.ElementType>
     let hiddenRank: Int
     let hiddenSize: Int
+    let maximumSequenceLength: Int
+}
+
+/// Adapter-owned, per-sequence incremental state. The worker can account for
+/// and lifecycle-manage it without knowing a model family's concrete cache
+/// representation.
+protocol CheckpointShardSequenceCache: AnyObject {
+    var position: Int { get }
+    var memoryBytes: Int { get }
+    func estimatedMemoryBytes(at position: Int) throws -> Int
 }
 
 protocol CheckpointShardStage: AnyObject {
     var weightKeyCount: Int { get }
     var inputMetadata: CheckpointStageInputMetadata { get }
+    func makeSequenceCache() -> any CheckpointShardSequenceCache
+    func estimatedOutputBytes(inputLength: Int) throws -> Int
     func forward(tokens: MLXArray) throws -> MLXArray
     func forward(hidden: MLXArray) throws -> MLXArray
+    func prefill(
+        tokens: MLXArray,
+        cache: any CheckpointShardSequenceCache
+    ) throws -> MLXArray
+    func prefill(
+        hidden: MLXArray,
+        cache: any CheckpointShardSequenceCache
+    ) throws -> MLXArray
+    func decode(
+        tokens: MLXArray,
+        cache: any CheckpointShardSequenceCache
+    ) throws -> MLXArray
+    func decode(
+        hidden: MLXArray,
+        cache: any CheckpointShardSequenceCache
+    ) throws -> MLXArray
 }
 
 /// Model-family seam: checkpoint transport, budgeting, and orchestration stay
@@ -107,6 +135,7 @@ struct CheckpointShardAdapterRegistry: Sendable {
 struct CheckpointShardRuntimeConfiguration: Sendable {
     let adapterRegistry: CheckpointShardAdapterRegistry
     let workerBudgetBytes: Int
+    let maxOpenSequencesPerShard: Int
     let tokens: [Int32]
     let rtol: Float
     let atol: Float
@@ -119,6 +148,7 @@ enum CheckpointShardError: LocalizedError {
     case invalidRange(Range<Int>, Int)
     case missingInputModule(String)
     case missingOutputModule(String)
+    case invalidSequenceCache(String)
     case noSafetensors(URL)
 
     var errorDescription: String? {
@@ -135,6 +165,8 @@ enum CheckpointShardError: LocalizedError {
             return "first checkpoint stage requires input module \(path)"
         case .missingOutputModule(let path):
             return "final checkpoint stage requires output module \(path)"
+        case .invalidSequenceCache(let reason):
+            return "invalid checkpoint shard sequence cache: \(reason)"
         case .noSafetensors(let directory):
             return "no safetensors found in \(directory.path)"
         }
