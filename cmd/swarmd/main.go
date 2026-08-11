@@ -20,8 +20,9 @@ import (
 const maxDebugTensorPayload = 64 << 20
 
 type healthResponse struct {
-	Status string `json:"status"`
-	Name   string `json:"name"`
+	Status         string `json:"status"`
+	Name           string `json:"name"`
+	WorkerRestarts int    `json:"workerRestarts"`
 }
 
 type errorResponse struct {
@@ -44,7 +45,7 @@ func run() error {
 	debugShardComplete := make(chan struct{}, 1)
 
 	worker := workerproc.Client{Path: workerproc.DefaultPath()}
-	persistentWorker, err := workerproc.StartPersistent(worker.Path)
+	persistentWorker, err := workerproc.StartPersistentSupervisor(worker.Path)
 	if err != nil {
 		return fmt.Errorf("start persistent MLX worker: %w", err)
 	}
@@ -66,7 +67,9 @@ func run() error {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(healthResponse{Status: "ok", Name: "mlx-swarm"})
+		_ = json.NewEncoder(w).Encode(healthResponse{
+			Status: "ok", Name: "mlx-swarm", WorkerRestarts: persistentWorker.RestartCount(),
+		})
 	})
 
 	mux.HandleFunc("GET /v1/worker/state", func(w http.ResponseWriter, r *http.Request) {
@@ -173,9 +176,15 @@ func forwardPersistentRequest(
 	worker workerproc.PersistentCaller,
 	request workerproc.PersistentRequest,
 ) (workerproc.PersistentResponse, error) {
+	requestContext, cancel, prepared, err := workerproc.RequestContext(ctx, request)
+	if err != nil {
+		return workerproc.PersistentResponse{}, err
+	}
+	defer cancel()
+	request = prepared
 	callerRequestID := request.RequestID
 	request.RequestID = ""
-	response, err := worker.Call(ctx, request)
+	response, err := worker.Call(requestContext, request)
 	if callerRequestID != "" {
 		response.RequestID = callerRequestID
 	}

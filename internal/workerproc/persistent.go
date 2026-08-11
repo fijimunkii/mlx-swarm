@@ -24,14 +24,15 @@ const (
 var errPersistentWorkerStopped = errors.New("persistent worker is stopped")
 
 type PersistentRequest struct {
-	RequestID string                      `json:"requestID"`
-	Command   string                      `json:"command"`
-	LoadShard *PersistentLoadShardRequest `json:"loadShard,omitempty"`
-	Shard     *PersistentShardRequest     `json:"shard,omitempty"`
-	Sequence  *PersistentSequenceRequest  `json:"sequence,omitempty"`
-	Forward   *PersistentForwardRequest   `json:"forward,omitempty"`
-	Model     *PersistentModelRequest     `json:"model,omitempty"`
-	Text      *PersistentTextRequest      `json:"text,omitempty"`
+	RequestID          string                      `json:"requestID"`
+	Command            string                      `json:"command"`
+	DeadlineUnixMillis int64                       `json:"deadlineUnixMillis,omitempty"`
+	LoadShard          *PersistentLoadShardRequest `json:"loadShard,omitempty"`
+	Shard              *PersistentShardRequest     `json:"shard,omitempty"`
+	Sequence           *PersistentSequenceRequest  `json:"sequence,omitempty"`
+	Forward            *PersistentForwardRequest   `json:"forward,omitempty"`
+	Model              *PersistentModelRequest     `json:"model,omitempty"`
+	Text               *PersistentTextRequest      `json:"text,omitempty"`
 }
 
 type PersistentLoadShardRequest struct {
@@ -226,10 +227,17 @@ type persistentWrite struct {
 }
 
 func StartPersistent(path string) (*PersistentClient, error) {
+	return StartPersistentCommand(path, "serve-stdio")
+}
+
+// StartPersistentCommand starts a framed worker using explicit arguments.
+// Production callers use StartPersistent; deterministic fault harnesses use
+// this entry point to run a protocol-compatible child mode from their binary.
+func StartPersistentCommand(path string, args ...string) (*PersistentClient, error) {
 	if path == "" {
 		path = DefaultPath()
 	}
-	cmd := exec.Command(path, "serve-stdio")
+	cmd := exec.Command(path, args...)
 	// Keep terminal/service signals scoped to swarmd so it can ask the worker
 	// to release MLX state and acknowledge shutdown instead of dying in parallel.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -269,6 +277,13 @@ func (c *PersistentClient) Call(
 	if err := ctx.Err(); err != nil {
 		return PersistentResponse{}, err
 	}
+	callContext, cancel, prepared, err := RequestContext(ctx, request)
+	if err != nil {
+		return PersistentResponse{}, err
+	}
+	defer cancel()
+	ctx = callContext
+	request = prepared
 
 	c.mu.Lock()
 	select {
@@ -309,6 +324,7 @@ func (c *PersistentClient) Call(
 	}:
 	case <-ctx.Done():
 		c.removePending(request.RequestID)
+		c.abortTimedOutInference(request)
 		return PersistentResponse{}, ctx.Err()
 	case <-c.done:
 		return PersistentResponse{}, c.callError()
@@ -320,6 +336,7 @@ func (c *PersistentClient) Call(
 			return PersistentResponse{}, fmt.Errorf("write persistent worker request: %w", err)
 		}
 	case <-ctx.Done():
+		c.abortTimedOutInference(request)
 		return PersistentResponse{}, ctx.Err()
 	case <-c.done:
 		return PersistentResponse{}, c.callError()
@@ -327,16 +344,31 @@ func (c *PersistentClient) Call(
 
 	select {
 	case result := <-response:
+		if err := ctx.Err(); err != nil {
+			c.abortTimedOutInference(request)
+			return PersistentResponse{}, err
+		}
 		return checkedResponse(result)
 	case <-ctx.Done():
+		c.abortTimedOutInference(request)
 		return PersistentResponse{}, ctx.Err()
 	case <-c.done:
 		select {
 		case result := <-response:
+			if err := ctx.Err(); err != nil {
+				c.abortTimedOutInference(request)
+				return PersistentResponse{}, err
+			}
 			return checkedResponse(result)
 		default:
 			return PersistentResponse{}, c.callError()
 		}
+	}
+}
+
+func (c *PersistentClient) abortTimedOutInference(request PersistentRequest) {
+	if isInferenceCommand(request.Command) {
+		_ = c.Kill()
 	}
 }
 

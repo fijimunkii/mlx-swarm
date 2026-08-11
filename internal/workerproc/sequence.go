@@ -154,8 +154,14 @@ func closeSequence(ctx context.Context, opened openedSequence) error {
 		ctx, opened.target, "closeSequence", opened.sequenceID, opened.ownerID,
 	)
 	var responseErr *WorkerResponseError
-	if errors.As(err, &responseErr) && strings.Contains(responseErr.Message, "is not open on shard") {
-		return nil
+	if errors.As(err, &responseErr) {
+		// A restarted worker has already released both the shard and every
+		// sequence it owned, so cleanup is complete even though the close can
+		// no longer find its original target.
+		if strings.Contains(responseErr.Message, "is not open on shard") ||
+			strings.Contains(responseErr.Message, "is not loaded") {
+			return nil
+		}
 	}
 	return err
 }

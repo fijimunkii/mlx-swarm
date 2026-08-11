@@ -190,7 +190,7 @@ printf '%s\n' '{"requestID":"request-2","ok":true,"result":{"status":"ok"}}'
 	}
 }
 
-func TestPersistentClientCancellationDoesNotWaitForBlockedWrite(t *testing.T) {
+func TestPersistentClientKillsInferenceWorkerAfterDeadline(t *testing.T) {
 	worker := writeWorkerScript(t, `#!/bin/sh
 read request
 printf '%s\n' '{"requestID":"ready","ok":true,"result":{"status":"ok"}}'
@@ -238,15 +238,10 @@ while :; do :; done
 		t.Fatalf("blocked write cancellation took %v", elapsed)
 	}
 
-	queueCtx, cancelQueue := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	started = time.Now()
-	_, err = client.Call(queueCtx, PersistentRequest{RequestID: "blocked-queue", Command: "health"})
-	cancelQueue()
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("queued write error = %v, want deadline exceeded", err)
-	}
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-		t.Fatalf("queued write cancellation took %v", elapsed)
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelWait()
+	if waitErr := client.Wait(waitCtx); waitErr == nil || errors.Is(waitErr, context.DeadlineExceeded) {
+		t.Fatalf("timed-out inference worker wait error = %v", waitErr)
 	}
 }
 

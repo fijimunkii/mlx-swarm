@@ -17,11 +17,14 @@ import (
 )
 
 type SessionConfig struct {
-	Model    string
-	RTol     float64
-	ATol     float64
-	Observer StageObserver
+	Model          string
+	RTol           float64
+	ATol           float64
+	ForwardTimeout time.Duration
+	Observer       StageObserver
 }
+
+const DefaultForwardTimeout = 30 * time.Second
 
 // StageObserver receives one synchronous observation for each prefill or
 // decode operation after the resulting token has been sampled. Observer work
@@ -111,10 +114,43 @@ type Result struct {
 	EOSTokenID            *int32        `json:"eosTokenID,omitempty"`
 	RTol                  float64       `json:"rtol"`
 	ATol                  float64       `json:"atol"`
+	ForwardTimeoutMillis  int64         `json:"forwardTimeoutMillis"`
 	ProducerKVCacheBytes  int           `json:"producerKVCacheBytes"`
 	ConsumerKVCacheBytes  int           `json:"consumerKVCacheBytes"`
 	Timing                Timing        `json:"timing"`
 	Verification          *Verification `json:"verification,omitempty"`
+	Failure               *Failure      `json:"failure,omitempty"`
+}
+
+type Failure struct {
+	SequenceID             string `json:"sequenceID"`
+	ShardID                string `json:"shardID,omitempty"`
+	Phase                  string `json:"phase"`
+	Operation              string `json:"operation,omitempty"`
+	Position               uint64 `json:"position"`
+	LastAcceptedTokenIndex int    `json:"lastAcceptedTokenIndex"`
+	LastAcceptedTokenID    *int32 `json:"lastAcceptedTokenID,omitempty"`
+	TimedOut               bool   `json:"timedOut"`
+	Canceled               bool   `json:"canceled"`
+	Cause                  string `json:"cause"`
+}
+
+type GenerationError struct {
+	Failure Failure
+	Err     error
+}
+
+func (err *GenerationError) Error() string {
+	return fmt.Sprintf("generation %s failed: %v", err.Failure.Phase, err.Err)
+}
+
+func (err *GenerationError) Unwrap() error { return err.Err }
+
+type failurePoint struct {
+	phase     string
+	shardID   string
+	operation string
+	position  uint64
 }
 
 type Session struct {
@@ -160,6 +196,12 @@ func NewSession(
 		math.IsNaN(config.RTol) || math.IsNaN(config.ATol) ||
 		math.IsInf(config.RTol, 0) || math.IsInf(config.ATol, 0) {
 		return nil, errors.New("numeric tolerances must be finite and non-negative")
+	}
+	if config.ForwardTimeout < 0 {
+		return nil, errors.New("forward timeout must be non-negative")
+	}
+	if config.ForwardTimeout == 0 {
+		config.ForwardTimeout = DefaultForwardTimeout
 	}
 
 	producerModel, err := modelInfo(ctx, producer, config.Model)
@@ -249,8 +291,18 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 		CheckpointFingerprint: s.model.CheckpointFingerprint, ShardPlan: s.plan,
 		SequenceID: request.SequenceID, Prompt: request.Prompt, MaxTokens: request.MaxTokens,
 		RTol: s.config.RTol, ATol: s.config.ATol,
-		Timing: Timing{SessionSetupMicros: s.setupMicros},
+		ForwardTimeoutMillis: s.config.ForwardTimeout.Milliseconds(),
+		Timing:               Timing{SessionSetupMicros: s.setupMicros},
 	}
+	point := failurePoint{phase: "tokenize", shardID: s.plan.Producer.ID}
+	defer func() {
+		if returnErr == nil || result.Failure != nil {
+			return
+		}
+		failure := failureFrom(point, result, returnErr)
+		result.Failure = &failure
+		returnErr = &GenerationError{Failure: failure, Err: returnErr}
+	}()
 
 	tokenizeStarted := time.Now()
 	tokenized, err := tokenize(ctx, s.producer, s.config.Model, request.Prompt)
@@ -273,11 +325,15 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 			Name: "reference", Caller: s.reference, ShardID: s.referenceShard,
 		})
 	}
+	point = failurePoint{phase: "open_sequences"}
 	sequences, err := workerproc.OpenSequences(ctx, targets, request.SequenceID)
 	if sequences != nil {
 		defer func() {
 			cleanupErr := sequences.Cleanup()
 			if cleanupErr != nil {
+				if returnErr == nil {
+					point = failurePoint{phase: "sequence_cleanup"}
+				}
 				if returnErr == nil {
 					returnErr = cleanupErr
 				} else {
@@ -293,14 +349,24 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 	prompt := tokenTensor(tokenized.TokenIDs)
 	prefillStarted := time.Now()
 	distributedStarted := time.Now()
+	point = failurePoint{
+		phase: "producer_prefill", shardID: s.plan.Producer.ID,
+		operation: "prefill", position: 0,
+	}
 	producerResult, producerWallMicros, err := measuredInfer(
-		ctx, s.producer, "prefill", s.plan.Producer.ID, request.SequenceID, 0, "tokens", prompt,
+		ctx, s.config.ForwardTimeout, s.producer,
+		"prefill", s.plan.Producer.ID, request.SequenceID, 0, "tokens", prompt,
 	)
 	if err != nil {
 		return result, fmt.Errorf("producer prefill: %w", err)
 	}
+	point = failurePoint{
+		phase: "consumer_prefill", shardID: s.plan.Consumer.ID,
+		operation: "prefill", position: 0,
+	}
 	consumerResult, consumerWallMicros, err := measuredInfer(
-		ctx, s.consumer, "prefill", s.plan.Consumer.ID, request.SequenceID, 0, "hidden", producerResult.Output,
+		ctx, s.config.ForwardTimeout, s.consumer,
+		"prefill", s.plan.Consumer.ID, request.SequenceID, 0, "hidden", producerResult.Output,
 	)
 	if err != nil {
 		return result, fmt.Errorf("consumer prefill: %w", err)
@@ -309,8 +375,13 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 	var referenceResult *workerproc.PersistentForwardResult
 	var referenceWallMicros int64
 	if s.reference != nil {
+		point = failurePoint{
+			phase: "reference_prefill", shardID: s.referenceShard,
+			operation: "prefill", position: 0,
+		}
 		referenceResult, referenceWallMicros, err = measuredInfer(
-			ctx, s.reference, "prefill", s.referenceShard, request.SequenceID, 0, "tokens", prompt,
+			ctx, s.config.ForwardTimeout, s.reference,
+			"prefill", s.referenceShard, request.SequenceID, 0, "tokens", prompt,
 		)
 		if err != nil {
 			return result, fmt.Errorf("reference prefill: %w", err)
@@ -343,6 +414,7 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 	}
 	decodeStarted := time.Now()
 	for len(result.GeneratedTokenIDs) < request.MaxTokens {
+		point = failurePoint{phase: "sample", operation: "sample", position: position}
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
@@ -405,14 +477,24 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 
 		token := tokenTensor([]int32{nextToken})
 		distributedStarted = time.Now()
+		point = failurePoint{
+			phase: "producer_decode", shardID: s.plan.Producer.ID,
+			operation: "decode", position: position,
+		}
 		producerResult, producerWallMicros, err = measuredInfer(
-			ctx, s.producer, "decode", s.plan.Producer.ID, request.SequenceID, position, "tokens", token,
+			ctx, s.config.ForwardTimeout, s.producer,
+			"decode", s.plan.Producer.ID, request.SequenceID, position, "tokens", token,
 		)
 		if err != nil {
 			return result, fmt.Errorf("producer decode step %d: %w", len(result.GeneratedTokenIDs), err)
 		}
+		point = failurePoint{
+			phase: "consumer_decode", shardID: s.plan.Consumer.ID,
+			operation: "decode", position: position,
+		}
 		consumerResult, consumerWallMicros, err = measuredInfer(
-			ctx, s.consumer, "decode", s.plan.Consumer.ID, request.SequenceID, position, "hidden", producerResult.Output,
+			ctx, s.config.ForwardTimeout, s.consumer,
+			"decode", s.plan.Consumer.ID, request.SequenceID, position, "hidden", producerResult.Output,
 		)
 		if err != nil {
 			return result, fmt.Errorf("consumer decode step %d: %w", len(result.GeneratedTokenIDs), err)
@@ -426,8 +508,13 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 		referenceResult = nil
 		referenceWallMicros = 0
 		if s.reference != nil {
+			point = failurePoint{
+				phase: "reference_decode", shardID: s.referenceShard,
+				operation: "decode", position: position,
+			}
 			referenceResult, referenceWallMicros, err = measuredInfer(
-				ctx, s.reference, "decode", s.referenceShard, request.SequenceID, position, "tokens", token,
+				ctx, s.config.ForwardTimeout, s.reference,
+				"decode", s.referenceShard, request.SequenceID, position, "tokens", token,
 			)
 			if err != nil {
 				return result, fmt.Errorf("reference decode step %d: %w", len(result.GeneratedTokenIDs), err)
@@ -447,6 +534,7 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 	}
 	result.Timing.DecodeMicros = time.Since(decodeStarted).Microseconds()
 
+	point = failurePoint{phase: "detokenize", shardID: s.plan.Producer.ID}
 	detokenizeStarted := time.Now()
 	text, err := detokenize(ctx, s.producer, s.config.Model, result.GeneratedTokenIDs)
 	result.Timing.DetokenizeMicros = time.Since(detokenizeStarted).Microseconds()
@@ -454,6 +542,7 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 		return result, fmt.Errorf("detokenize generated tokens: %w", err)
 	}
 	result.Text = text
+	point = failurePoint{}
 	return result, nil
 }
 
@@ -630,6 +719,7 @@ func workerState(
 
 func measuredInfer(
 	ctx context.Context,
+	timeout time.Duration,
 	caller workerproc.PersistentCaller,
 	command string,
 	shardID string,
@@ -638,8 +728,10 @@ func measuredInfer(
 	inputKind string,
 	input workerproc.WireTensor,
 ) (*workerproc.PersistentForwardResult, int64, error) {
+	callContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	started := time.Now()
-	result, err := infer(ctx, caller, command, shardID, sequenceID, position, inputKind, input)
+	result, err := infer(callContext, caller, command, shardID, sequenceID, position, inputKind, input)
 	return result, time.Since(started).Microseconds(), err
 }
 
@@ -658,7 +750,7 @@ func newStageSample(
 ) StageSample {
 	serializationStarted := time.Now()
 	wirePayload, _ := json.Marshal(workerproc.PersistentRequest{
-		Command: operation,
+		Command: operation, DeadlineUnixMillis: time.Now().UnixMilli(),
 		Forward: &workerproc.PersistentForwardRequest{
 			ShardID: consumer.ShardID, SequenceID: sequenceID, Position: position,
 			InputKind: "hidden", Input: producer.Output,
@@ -706,8 +798,12 @@ func infer(
 	inputKind string,
 	input workerproc.WireTensor,
 ) (*workerproc.PersistentForwardResult, error) {
+	deadline, hasDeadline := ctx.Deadline()
+	if !hasDeadline {
+		return nil, workerproc.ErrInferenceDeadlineRequired
+	}
 	response, err := call(ctx, caller, workerproc.PersistentRequest{
-		Command: command,
+		Command: command, DeadlineUnixMillis: deadline.UnixMilli(),
 		Forward: &workerproc.PersistentForwardRequest{
 			ShardID: shardID, SequenceID: sequenceID, Position: position,
 			InputKind: inputKind, Input: input,
@@ -727,6 +823,21 @@ func infer(
 		)
 	}
 	return result, nil
+}
+
+func failureFrom(point failurePoint, result Result, err error) Failure {
+	failure := Failure{
+		SequenceID: result.SequenceID, ShardID: point.shardID,
+		Phase: point.phase, Operation: point.operation, Position: point.position,
+		LastAcceptedTokenIndex: len(result.GeneratedTokenIDs) - 1,
+		TimedOut:               errors.Is(err, context.DeadlineExceeded),
+		Canceled:               errors.Is(err, context.Canceled), Cause: err.Error(),
+	}
+	if len(result.GeneratedTokenIDs) > 0 {
+		token := result.GeneratedTokenIDs[len(result.GeneratedTokenIDs)-1]
+		failure.LastAcceptedTokenID = &token
+	}
+	return failure
 }
 
 func call(

@@ -128,6 +128,30 @@ go run ./cmd/swarm-generate-smoke -worker "$worker"
 The framed request contract is documented in
 [`docs/persistent-worker-protocol.md`](docs/persistent-worker-protocol.md).
 
+### Failure characterization
+
+Run the deterministic process and transport fault proof without a model or
+public-network dependency:
+
+```bash
+go run ./cmd/swarm-failure-smoke > failure-characterization.json
+```
+
+The harness injects a paused worker, a killed worker, a long inference delay,
+bounded jitter, and a dropped loopback HTTP connection. Each inference call
+has its own deadline (150 ms by default), and each scenario must terminate
+within a larger bound (2 seconds by default). Its JSON records accepted and
+failed tokens, the failed sequence/shard/phase/position and last accepted
+token, worker restart count, sequence/KV cleanup, next-sequence recovery, and
+the aggregate failed-token rate.
+
+An inference timeout kills the local MLX process because an already-running
+kernel cannot be safely canceled and may have mutated cache state. `swarmd`
+starts a clean worker before returning the failure, but it never retries a
+cache mutation. The active sequence fails; the next session reloads its shards
+and can generate normally. This is bounded recovery, not transparent
+same-sequence recovery.
+
 ### Go-relayed two-process proof
 
 ```bash
@@ -221,8 +245,10 @@ cmd/swarm-cache-smoke/   cached prefill/decode and reference-logit proof
 cmd/swarm-benchmark/     warm distributed/reference benchmark and JSON artifact
 cmd/swarm-generate/      prompt-to-text distributed greedy generation
 cmd/swarm-generate-smoke/ deterministic generation/reference/retention proof
+cmd/swarm-failure-smoke/ deterministic process/transport failure proof
 internal/generation/     reusable model planning and generation session
 internal/benchmark/      percentile, throughput, transfer, and memory summaries
+internal/failureharness/ reusable fault workers, injection, and observations
 internal/smoke/          shared smoke request and assertion helpers
 internal/tensorcheck/    reusable tensor decoding and reference comparison
 internal/workerproc/     persistent targets, transports, and sequence lifecycle
@@ -242,5 +268,7 @@ The M2 real-checkpoint pipeline now produces tokenizer-backed text through
 per-sequence KV-cached prefill/decode, with exact greedy-token parity enforced
 between paired macOS CI runners and a cached full-model reference. Warm paired
 runs also publish statistically useful latency, throughput, transfer, and
-memory evidence. The next milestone is controlled failure characterization;
+memory evidence. Deterministic CI now characterizes deadline, process, and
+transport failures with bounded cleanup and next-sequence recovery. The next
+MVP proof is pooled memory: serve a model that cannot fit on either Mac alone;
 see [ROADMAP.md](ROADMAP.md).

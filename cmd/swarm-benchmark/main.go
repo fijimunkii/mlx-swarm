@@ -43,6 +43,7 @@ type configuration struct {
 	SamplingPolicy          string               `json:"samplingPolicy"`
 	RTol                    float64              `json:"rtol"`
 	ATol                    float64              `json:"atol"`
+	ForwardTimeoutMillis    int64                `json:"forwardTimeoutMillis"`
 	SessionSetupMicros      int64                `json:"sessionSetupMicrosExcluded"`
 }
 
@@ -121,6 +122,7 @@ func run() error {
 	route := flag.String("route", "", "network route description recorded in output")
 	rtol := flag.Float64("rtol", 1e-4, "relative reference-logit tolerance")
 	atol := flag.Float64("atol", 1e-4, "absolute reference-logit tolerance")
+	forwardTimeout := flag.Duration("forward-timeout", generation.DefaultForwardTimeout, "deadline for each prefill/decode worker request")
 	timeout := flag.Duration("timeout", 15*time.Minute, "overall benchmark timeout")
 	flag.Parse()
 
@@ -138,6 +140,9 @@ func run() error {
 	}
 	if *timeout <= 0 {
 		return errors.New("-timeout must be positive")
+	}
+	if *forwardTimeout <= 0 {
+		return errors.New("-forward-timeout must be positive")
 	}
 	if *route == "" {
 		if *peer == "" {
@@ -169,7 +174,8 @@ func run() error {
 	session, err := generation.NewSession(
 		ctx, producer.Caller, consumer.Caller, reference.Caller,
 		generation.SessionConfig{
-			Model: *model, RTol: *rtol, ATol: *atol, Observer: collector.observe,
+			Model: *model, RTol: *rtol, ATol: *atol,
+			ForwardTimeout: *forwardTimeout, Observer: collector.observe,
 		},
 	)
 	if err != nil {
@@ -253,7 +259,8 @@ func run() error {
 			WarmupDecodeSteps:       *warmupDecodes,
 			PrefillSamplesRequested: *prefillSamples, DecodeSamplesRequested: *decodeSamples,
 			SamplingPolicy: "greedy lowest-token-ID tie-break; EOS ignored for fixed sample count",
-			RTol:           *rtol, ATol: *atol, SessionSetupMicros: info.SessionSetupMicros,
+			RTol:           *rtol, ATol: *atol, ForwardTimeoutMillis: forwardTimeout.Milliseconds(),
+			SessionSetupMicros: info.SessionSetupMicros,
 		},
 		Warmup: warmupSummary{
 			GeneratedTokenCount: len(warmup.GeneratedTokenIDs),

@@ -35,6 +35,7 @@ func run() error {
 	verify := flag.Bool("verify", false, "compare every greedy step with a full-model cached reference")
 	rtol := flag.Float64("rtol", 1e-4, "relative reference-logit tolerance")
 	atol := flag.Float64("atol", 1e-4, "absolute reference-logit tolerance")
+	forwardTimeout := flag.Duration("forward-timeout", generation.DefaultForwardTimeout, "deadline for each prefill/decode worker request")
 	timeout := flag.Duration("timeout", 10*time.Minute, "overall generation timeout")
 	flag.Parse()
 
@@ -46,6 +47,9 @@ func run() error {
 	}
 	if *timeout <= 0 {
 		return errors.New("-timeout must be positive")
+	}
+	if *forwardTimeout <= 0 {
+		return errors.New("-forward-timeout must be positive")
 	}
 
 	signalContext, stopSignals := signal.NotifyContext(
@@ -84,7 +88,9 @@ func run() error {
 		producer.Caller,
 		consumer.Caller,
 		referenceCaller,
-		generation.SessionConfig{Model: *model, RTol: *rtol, ATol: *atol},
+		generation.SessionConfig{
+			Model: *model, RTol: *rtol, ATol: *atol, ForwardTimeout: *forwardTimeout,
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("prepare generation session: %w", err)
@@ -93,6 +99,11 @@ func run() error {
 		Prompt: *prompt, MaxTokens: *maxTokens, SequenceID: *sequenceID,
 	})
 	if err != nil {
+		if result.Failure != nil {
+			if encoded, encodeErr := json.Marshal(result); encodeErr == nil {
+				fmt.Println(string(encoded))
+			}
+		}
 		return fmt.Errorf("generate: %w", err)
 	}
 	encoded, err := json.Marshal(result)

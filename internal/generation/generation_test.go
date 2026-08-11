@@ -132,11 +132,22 @@ func TestCancellationClosesOpenedSequences(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
-	_, err := session.Generate(ctx, Request{
+	result, err := session.Generate(ctx, Request{
 		Prompt: "hello", MaxTokens: 2, SequenceID: "cancelled",
 	})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected deadline error, got %v", err)
+	}
+	var generationErr *GenerationError
+	if !errors.As(err, &generationErr) || result.Failure == nil {
+		t.Fatalf("missing structured generation failure: result=%+v err=%v", result, err)
+	}
+	if result.Failure.Phase != "producer_decode" ||
+		result.Failure.ShardID != session.plan.Producer.ID ||
+		result.Failure.Operation != "decode" || !result.Failure.TimedOut ||
+		result.Failure.LastAcceptedTokenIndex != 0 ||
+		result.Failure.LastAcceptedTokenID == nil || *result.Failure.LastAcceptedTokenID != 3 {
+		t.Fatalf("unexpected failure: %+v", *result.Failure)
 	}
 	assertNoFakeSequences(t, producer, consumer, reference)
 }
@@ -429,6 +440,9 @@ func (worker *fakeWorker) Call(
 		}
 		delete(worker.sequences, request.Sequence.SequenceID)
 	case "prefill", "decode":
+		if request.DeadlineUnixMillis <= time.Now().UnixMilli() {
+			return workerproc.PersistentResponse{}, errors.New("missing or expired inference deadline")
+		}
 		if request.Command == "decode" && worker.blockDecode {
 			worker.mu.Unlock()
 			<-ctx.Done()
