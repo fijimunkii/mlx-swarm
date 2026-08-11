@@ -70,7 +70,11 @@ private final class Gemma3CheckpointSequenceCache: CheckpointShardSequenceCache 
         }
         var total = 0
         for layer in layers {
-            let retainedPositions = min(position, layer.maxSize ?? position)
+            // RotatingKVCache retains an oversized first multi-token write in
+            // full and only applies its window when a later update trims it.
+            let retainedPositions = layer.state.isEmpty
+                ? position
+                : min(position, layer.maxSize ?? position)
             let (layerBytes, layerOverflow) = retainedPositions.multipliedReportingOverflow(
                 by: bytesPerLayerPosition
             )

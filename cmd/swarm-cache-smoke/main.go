@@ -694,6 +694,54 @@ func proveResourceLimits(
 	consumer workerproc.PersistentCaller,
 	plan *sequencePlan,
 ) (bool, error) {
+	const cacheBudgetSequence = "cache-kv-budget"
+	if err := sequenceCommand(ctx, producer, "openSequence", producerShard, cacheBudgetSequence); err != nil {
+		return false, err
+	}
+	cacheBudgetOpen := true
+	defer func() {
+		if cacheBudgetOpen {
+			_ = sequenceCommand(ctx, producer, "closeSequence", producerShard, cacheBudgetSequence)
+		}
+	}()
+
+	longPrompt := make([]int32, 8_192)
+	for index := range longPrompt {
+		longPrompt[index] = int32(index%128 + 1)
+	}
+	producerBefore, err := state(ctx, producer)
+	if err != nil {
+		return false, err
+	}
+	if !expectWorkerError(
+		ctx,
+		producer,
+		inferenceRequest(
+			"prefill",
+			producerShard,
+			cacheBudgetSequence,
+			0,
+			"tokens",
+			tokenTensor(longPrompt),
+		),
+		"retained sequence state",
+	) {
+		return false, errors.New("oversized initial rotating-cache write was not rejected")
+	}
+	producerAfter, err := state(ctx, producer)
+	if err != nil {
+		return false, err
+	}
+	if producerAfter.ForwardCount != producerBefore.ForwardCount ||
+		producerAfter.KVCacheBytes != producerBefore.KVCacheBytes ||
+		producerAfter.RetainedBytes != producerBefore.RetainedBytes {
+		return false, errors.New("rotating-cache budget rejection mutated worker state")
+	}
+	if err := sequenceCommand(ctx, producer, "closeSequence", producerShard, cacheBudgetSequence); err != nil {
+		return false, err
+	}
+	cacheBudgetOpen = false
+
 	const budgetSequence = "cache-resource-budget"
 	if err := sequenceCommand(ctx, consumer, "openSequence", consumerShard, budgetSequence); err != nil {
 		return false, err
