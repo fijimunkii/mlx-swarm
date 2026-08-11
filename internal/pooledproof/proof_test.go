@@ -94,6 +94,147 @@ func TestRunRejectsDirtyWorkersBeforePreparingSession(t *testing.T) {
 	}
 }
 
+func TestRunUsesConfiguredClientAndUnloadsPartialSession(t *testing.T) {
+	reference, err := LoadReference(filepath.Join(
+		"..", "..", "testdata", "pooled-memory", "gemma-3-text-12b-it-4bit.json",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	producer, producerState, producerCommands := newSessionSetupWorkerServer(t, reference, false)
+	defer producer.Close()
+	consumer, _, _ := newSessionSetupWorkerServer(t, reference, true)
+	defer consumer.Close()
+
+	client := &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		clone := request.Clone(request.Context())
+		clone.Header = request.Header.Clone()
+		clone.Header.Set("X-Pooled-Proof-Client", "configured")
+		return http.DefaultTransport.RoundTrip(clone)
+	})}
+	_, err = Run(context.Background(), reference, RunConfig{
+		ProducerURL: producer.URL, ConsumerURL: consumer.URL,
+		ForwardTimeout: time.Second, HTTPClient: client,
+	})
+	if err == nil || !strings.Contains(err.Error(), "consumer shard") {
+		t.Fatalf("Run error = %v, want consumer shard setup failure", err)
+	}
+	if got := producerState(); len(got.LoadedShards) != 0 {
+		t.Fatalf("producer retained shards after rollback: %+v", got.LoadedShards)
+	}
+	if got := producerCommands(); !containsString(got, "unloadShard") {
+		t.Fatalf("producer commands = %v, want unloadShard rollback", got)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
+func newSessionSetupWorkerServer(
+	t *testing.T,
+	reference Reference,
+	failLoad bool,
+) (*httptest.Server, func() workerproc.PersistentWorkerState, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	state := workerproc.PersistentWorkerState{}
+	var commands []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("X-Pooled-Proof-Client") != "configured" {
+			http.Error(w, "configured client header is required", http.StatusUnauthorized)
+			return
+		}
+		if request.URL.Path == "/v1/debug/worker/capabilities" {
+			_, _ = w.Write([]byte(`{
+				"runtime":"mlx-swift",
+				"device":"gpu",
+				"physicalMemoryBytes":7516192768,
+				"mlxMemoryLimitBytes":6442450944,
+				"mlxCacheLimitBytes":67108864
+			}`))
+			return
+		}
+		if request.URL.Path != "/v1/worker/request" {
+			http.NotFound(w, request)
+			return
+		}
+
+		var frame workerproc.PersistentRequest
+		if err := json.NewDecoder(request.Body).Decode(&frame); err != nil {
+			t.Errorf("decode persistent request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		commands = append(commands, frame.Command)
+		response := workerproc.PersistentResponse{RequestID: frame.RequestID, OK: true}
+		switch frame.Command {
+		case "state":
+			snapshot := state
+			snapshot.LoadedShards = append([]workerproc.PersistentShardSnapshot(nil), state.LoadedShards...)
+			response.Result = &workerproc.PersistentWorkerResult{State: &snapshot}
+		case "modelInfo":
+			response.Result = &workerproc.PersistentWorkerResult{Model: &workerproc.PersistentModelResult{
+				ModelID: reference.Model, ModelType: reference.ModelType, LayerCount: reference.LayerCount,
+				CheckpointFingerprint: reference.CheckpointFingerprint, CheckpointBytes: reference.CheckpointBytes,
+			}}
+		case "loadShard":
+			if failLoad {
+				response.OK = false
+				response.Error = "injected load failure"
+				break
+			}
+			load := frame.LoadShard
+			shard := workerproc.PersistentShardSnapshot{
+				ShardID: load.ShardID, ModelID: load.ModelID, ModelType: reference.ModelType,
+				CheckpointFingerprint: load.CheckpointFingerprint,
+				LayerStart:            load.LayerStart, LayerEnd: load.LayerEnd,
+				OwnsInput: load.OwnsInput, OwnsOutput: load.OwnsOutput,
+			}
+			state.LoadedShards = append(state.LoadedShards, shard)
+			response.Result = &workerproc.PersistentWorkerResult{Shard: &shard}
+		case "unloadShard":
+			for index, shard := range state.LoadedShards {
+				if shard.ShardID == frame.Shard.ShardID {
+					state.LoadedShards = append(state.LoadedShards[:index], state.LoadedShards[index+1:]...)
+					break
+				}
+			}
+			snapshot := state
+			response.Result = &workerproc.PersistentWorkerResult{State: &snapshot}
+		default:
+			response.OK = false
+			response.Error = "unexpected command " + frame.Command
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	return server, func() workerproc.PersistentWorkerState {
+			mu.Lock()
+			defer mu.Unlock()
+			snapshot := state
+			snapshot.LoadedShards = append([]workerproc.PersistentShardSnapshot(nil), state.LoadedShards...)
+			return snapshot
+		}, func() []string {
+			mu.Lock()
+			defer mu.Unlock()
+			return append([]string(nil), commands...)
+		}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func newProofWorkerServer(
 	t *testing.T,
 	state *workerproc.PersistentWorkerState,

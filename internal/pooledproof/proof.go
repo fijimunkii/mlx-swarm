@@ -23,6 +23,7 @@ const (
 	DefaultMinimumTokens       = 32
 	DefaultWorkerMemoryLimit   = 6 * 1024 * 1024 * 1024
 	defaultCapabilitiesMaxBody = 1 << 20
+	defaultCleanupTimeout      = 10 * time.Second
 )
 
 type Capabilities struct {
@@ -253,7 +254,7 @@ func CreateReference(ctx context.Context, config ReferenceConfig) (Reference, er
 	return reference, nil
 }
 
-func Run(ctx context.Context, reference Reference, config RunConfig) (Result, error) {
+func Run(ctx context.Context, reference Reference, config RunConfig) (result Result, returnErr error) {
 	if err := ValidateReference(reference); err != nil {
 		return Result{}, err
 	}
@@ -284,12 +285,16 @@ func Run(ctx context.Context, reference Reference, config RunConfig) (Result, er
 	if err != nil {
 		return Result{}, fmt.Errorf("consumer capabilities: %w", err)
 	}
-	producer, err := workerproc.OpenPersistentTarget("", config.ProducerURL)
+	producer, err := workerproc.OpenPersistentTargetWithHTTPClient(
+		"", config.ProducerURL, config.HTTPClient,
+	)
 	if err != nil {
 		return Result{}, fmt.Errorf("producer: %w", err)
 	}
 	defer producer.Cleanup()
-	consumer, err := workerproc.OpenPersistentTarget("", config.ConsumerURL)
+	consumer, err := workerproc.OpenPersistentTargetWithHTTPClient(
+		"", config.ConsumerURL, config.HTTPClient,
+	)
 	if err != nil {
 		return Result{}, fmt.Errorf("consumer: %w", err)
 	}
@@ -307,6 +312,19 @@ func Run(ctx context.Context, reference Reference, config RunConfig) (Result, er
 	if !cleanAtStart {
 		return Result{}, errors.New("producer and consumer workers must be clean before pooled-memory proof")
 	}
+	defer func() {
+		cleanupErr := cleanupProofShards(
+			proofCleanupTarget{
+				Name: "producer", Caller: producer.Caller, ShardIDPrefix: "generate-producer-",
+			},
+			proofCleanupTarget{
+				Name: "consumer", Caller: consumer.Caller, ShardIDPrefix: "generate-consumer-",
+			},
+		)
+		if cleanupErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("clean up pooled-memory proof: %w", cleanupErr))
+		}
+	}()
 
 	producerEvidence := WorkerEvidence{Endpoint: config.ProducerURL, Capabilities: producerCapabilities}
 	consumerEvidence := WorkerEvidence{Endpoint: config.ConsumerURL, Capabilities: consumerCapabilities}
@@ -397,7 +415,7 @@ func Run(ctx context.Context, reference Reference, config RunConfig) (Result, er
 		SequenceStateReleased:         releasedWorker(producerFinal) && releasedWorker(consumerFinal),
 	}
 	checks.AllPassed = allChecksPassed(checks)
-	result := Result{
+	result = Result{
 		SchemaVersion: SchemaVersion,
 		Model:         generated.Model, ModelType: generated.ModelType,
 		CheckpointFingerprint:      generated.CheckpointFingerprint,
@@ -411,6 +429,45 @@ func Run(ctx context.Context, reference Reference, config RunConfig) (Result, er
 		return result, errors.New("pooled-memory proof did not satisfy every check")
 	}
 	return result, nil
+}
+
+type proofCleanupTarget struct {
+	Name          string
+	Caller        workerproc.PersistentCaller
+	ShardIDPrefix string
+}
+
+func cleanupProofShards(targets ...proofCleanupTarget) error {
+	var cleanupErr error
+	for _, target := range targets {
+		ctx, cancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
+		state, err := workerproc.State(ctx, target.Caller)
+		cancel()
+		if err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s state: %w", target.Name, err))
+			continue
+		}
+		for _, shard := range state.LoadedShards {
+			if !strings.HasPrefix(shard.ShardID, target.ShardIDPrefix) {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf(
+					"%s has unexpected shard %q after proof", target.Name, shard.ShardID,
+				))
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), defaultCleanupTimeout)
+			_, err := target.Caller.Call(ctx, workerproc.PersistentRequest{
+				Command: "unloadShard",
+				Shard:   &workerproc.PersistentShardRequest{ShardID: shard.ShardID},
+			})
+			cancel()
+			if err != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf(
+					"%s unload shard %q: %w", target.Name, shard.ShardID, err,
+				))
+			}
+		}
+	}
+	return cleanupErr
 }
 
 func remoteCapabilities(

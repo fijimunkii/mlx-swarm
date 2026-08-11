@@ -241,7 +241,7 @@ go run ./cmd/swarm-pooled-memory \
 The machine-readable result inventories both Macs, verifies their configured
 limits, reports load/prefill/decode peaks, checks every generated token against
 the pinned full-model reference, rejects any full-range serving shard, and
-proves sequence teardown. See
+proves sequence teardown before unloading both proof-owned shards. See
 [`docs/pooled-memory-proof.md`](docs/pooled-memory-proof.md) for checkpoint
 prefetch, worker startup, reference provenance, and the paired-runner workflow.
 

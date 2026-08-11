@@ -101,6 +101,8 @@ fails unless:
 
 The JSON preserves hardware inventory, shard ownership, phase memory,
 generation timings, token IDs, teardown state, and every acceptance check.
+After capturing that evidence, the command unloads both proof-owned shards on
+success or failure so the same clean daemons can run the proof again.
 
 ## Regenerate the reference
 
