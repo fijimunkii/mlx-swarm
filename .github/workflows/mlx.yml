@@ -1,6 +1,7 @@
 name: MLX Worker
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
@@ -46,7 +47,22 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: swift --version
+      - name: Fingerprint Swift toolchain
+        id: mlx-toolchain
+        run: |
+          toolchain="$( { xcodebuild -version; swift --version; } )"
+          printf '%s\n' "$toolchain"
+          fingerprint="$(printf '%s\n' "$toolchain" | shasum -a 256 | awk '{print $1}')"
+          printf 'fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Restore MLX build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            worker/mlx/.build/source-packages
+            worker/mlx/.build/xcode/Build
+          key: mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-${{ hashFiles('worker/mlx/Sources/**', 'scripts/build-mlx-worker.sh') }}
+          restore-keys: |
+            mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-
       - name: Build MLX worker and Metal library
         run: ./scripts/build-mlx-worker.sh
       - name: Smoke test MLX worker
@@ -74,6 +90,22 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Fingerprint Swift toolchain
+        id: mlx-toolchain
+        run: |
+          toolchain="$( { xcodebuild -version; swift --version; } )"
+          printf '%s\n' "$toolchain"
+          fingerprint="$(printf '%s\n' "$toolchain" | shasum -a 256 | awk '{print $1}')"
+          printf 'fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Restore MLX build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            worker/mlx/.build/source-packages
+            worker/mlx/.build/xcode/Build
+          key: mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-${{ hashFiles('worker/mlx/Sources/**', 'scripts/build-mlx-worker.sh') }}
+          restore-keys: |
+            mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-
       # Resolve/build before Tailscale modifies the macOS DNS resolver. SwiftPM
       # needs ordinary github.com DNS while fetching mlx-swift-lm.
       - name: Build MLX worker and Metal library
@@ -112,7 +144,22 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: swift --version
+      - name: Fingerprint Swift toolchain
+        id: mlx-toolchain
+        run: |
+          toolchain="$( { xcodebuild -version; swift --version; } )"
+          printf '%s\n' "$toolchain"
+          fingerprint="$(printf '%s\n' "$toolchain" | shasum -a 256 | awk '{print $1}')"
+          printf 'fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Restore MLX build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            worker/mlx/.build/source-packages
+            worker/mlx/.build/xcode/Build
+          key: mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-${{ hashFiles('worker/mlx/Sources/**', 'scripts/build-mlx-worker.sh') }}
+          restore-keys: |
+            mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-
       # Keep all dependency resolution and local correctness work off the
       # Tailscale-modified resolver; attach to the tailnet only for WAN relay.
       - name: Build MLX worker and Metal library
