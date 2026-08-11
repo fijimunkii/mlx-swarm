@@ -6,7 +6,7 @@ import MLX
 /// `Data` is contiguous native-endian MLX storage. The protobuf transport will
 /// carry the same three fields as raw bytes rather than JSON/base64.
 struct WireTensor: Codable {
-    enum ElementType: String, Codable {
+    enum ElementType: String, Codable, Hashable {
         case bool
         case uint8
         case uint16
@@ -85,7 +85,7 @@ struct WireTensor: Codable {
         self.data = payload.data
     }
 
-    func materialize() throws -> MLXArray {
+    func validate() throws {
         var elementCount = 1
         for dimension in shape {
             guard dimension >= 0 else {
@@ -110,6 +110,10 @@ struct WireTensor: Codable {
                 dtype: dtype.rawValue
             )
         }
+    }
+
+    func materialize() throws -> MLXArray {
+        try validate()
         return MLXArray(data, shape, dtype: dtype.mlxDType)
     }
 }

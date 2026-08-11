@@ -53,8 +53,18 @@ struct CheckpointReferenceOutput {
     let memory: StageMemory
 }
 
+struct CheckpointStageInputMetadata {
+    let tokenDType: WireTensor.ElementType
+    let tokenRank: Int
+    let vocabularySize: Int
+    let hiddenDTypes: Set<WireTensor.ElementType>
+    let hiddenRank: Int
+    let hiddenSize: Int
+}
+
 protocol CheckpointShardStage: AnyObject {
     var weightKeyCount: Int { get }
+    var inputMetadata: CheckpointStageInputMetadata { get }
     func forward(tokens: MLXArray) throws -> MLXArray
     func forward(hidden: MLXArray) throws -> MLXArray
 }

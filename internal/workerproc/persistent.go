@@ -11,11 +11,14 @@ import (
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const (
 	maxPersistentResponseBytes = 128 << 20
 	maxPersistentStderrBytes   = 64 << 10
+	persistentEOFExitGrace     = 500 * time.Millisecond
+	persistentEOFReapGrace     = time.Second
 )
 
 var errPersistentWorkerStopped = errors.New("persistent worker is stopped")
@@ -378,8 +381,36 @@ func (c *PersistentClient) readLoop(stdout io.Reader) {
 		c.failRead(fmt.Errorf("read persistent worker response: %w", scanErr))
 		return
 	}
-	waitErr := c.cmd.Wait()
-	c.finish(waitErr)
+	c.finishEOF()
+}
+
+func (c *PersistentClient) finishEOF() {
+	waitResult := make(chan error, 1)
+	go func() {
+		waitResult <- c.cmd.Wait()
+	}()
+
+	select {
+	case waitErr := <-waitResult:
+		c.finish(waitErr)
+		return
+	case <-time.After(persistentEOFExitGrace):
+	}
+
+	eofErr := errors.New("persistent worker closed stdout without exiting")
+	killErr := c.Kill()
+	_ = c.stdin.Close()
+	if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+		c.finish(fmt.Errorf("%w; kill persistent worker: %v", eofErr, killErr))
+		return
+	}
+
+	select {
+	case <-waitResult:
+		c.finish(eofErr)
+	case <-time.After(persistentEOFReapGrace):
+		c.finish(fmt.Errorf("%w; timed out reaping process", eofErr))
+	}
 }
 
 func (c *PersistentClient) failRead(readErr error) {

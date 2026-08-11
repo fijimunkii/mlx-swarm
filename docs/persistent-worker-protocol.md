@@ -52,6 +52,12 @@ the tensor shape and dtype. These checks apply to both token and hidden-state
 inputs, so malformed network payloads remain per-request errors rather than
 terminating the retained worker.
 
+The currently registered Gemma stage accepts rank-2 `int32` token tensors and
+rank-3 `bfloat16` hidden tensors whose final dimension matches the checkpoint's
+hidden size. The adapter-provided stage metadata drives these checks, including
+token vocabulary bounds, so future model families can declare their own safe
+input contract.
+
 ## Response and errors
 
 A success has `ok: true` and a command-specific `result`:

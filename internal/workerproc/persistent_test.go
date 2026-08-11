@@ -24,6 +24,26 @@ func TestPersistentClientReportsUnexpectedEOF(t *testing.T) {
 	}
 }
 
+func TestPersistentClientKillsWorkerThatClosesStdoutWithoutExiting(t *testing.T) {
+	worker := writeWorkerScript(t, `#!/bin/sh
+exec 1>&-
+while read ignored; do :; done
+`)
+	client, err := StartPersistent(worker)
+	if err != nil {
+		t.Fatalf("StartPersistent: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err = client.Call(ctx, PersistentRequest{Command: "health"})
+	if err == nil || !strings.Contains(err.Error(), "closed stdout without exiting") {
+		t.Fatalf("Call error = %v, want bounded stdout EOF error", err)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Call reached its deadline instead of killing worker: %v", err)
+	}
+}
+
 func TestPersistentClientAcceptsAcknowledgedShutdown(t *testing.T) {
 	worker := writeWorkerScript(t, `#!/bin/sh
 read request

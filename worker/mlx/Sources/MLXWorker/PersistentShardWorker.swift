@@ -329,6 +329,7 @@ final class PersistentShardService {
                     expected: "hidden"
                 )
             }
+            try validateTokenInput(request.input, metadata: shard.stage.inputMetadata)
             output = try shard.stage.forward(tokens: request.input.materialize())
         case "hidden":
             guard !shard.ownsInput else {
@@ -338,6 +339,7 @@ final class PersistentShardService {
                     expected: "tokens"
                 )
             }
+            try validateHiddenInput(request.input, metadata: shard.stage.inputMetadata)
             output = try shard.stage.forward(hidden: request.input.materialize())
         default:
             throw PersistentWorkerError.unsupportedInputKind(request.inputKind)
@@ -354,6 +356,61 @@ final class PersistentShardService {
             computeMicros: elapsed / 1_000,
             memory: CheckpointMemory.snapshot()
         )
+    }
+
+    private func validateTokenInput(
+        _ input: WireTensor,
+        metadata: CheckpointStageInputMetadata
+    ) throws {
+        try input.validate()
+        guard input.dtype == metadata.tokenDType else {
+            throw PersistentWorkerError.invalidRequest(
+                "token tensor dtype must be \(metadata.tokenDType.rawValue), got \(input.dtype.rawValue)"
+            )
+        }
+        guard input.shape.count == metadata.tokenRank,
+              input.shape.allSatisfy({ $0 > 0 })
+        else {
+            throw PersistentWorkerError.invalidRequest(
+                "token tensor shape must have \(metadata.tokenRank) positive dimensions"
+            )
+        }
+
+        let invalidToken = input.data.withUnsafeBytes { bytes -> Int32? in
+            for offset in stride(from: 0, to: bytes.count, by: MemoryLayout<Int32>.size) {
+                let token = bytes.loadUnaligned(fromByteOffset: offset, as: Int32.self)
+                if token < 0 || Int(token) >= metadata.vocabularySize {
+                    return token
+                }
+            }
+            return nil
+        }
+        if let invalidToken {
+            throw PersistentWorkerError.invalidRequest(
+                "token ID \(invalidToken) is outside vocabulary size \(metadata.vocabularySize)"
+            )
+        }
+    }
+
+    private func validateHiddenInput(
+        _ input: WireTensor,
+        metadata: CheckpointStageInputMetadata
+    ) throws {
+        try input.validate()
+        guard metadata.hiddenDTypes.contains(input.dtype) else {
+            let expected = metadata.hiddenDTypes.map(\.rawValue).sorted().joined(separator: ", ")
+            throw PersistentWorkerError.invalidRequest(
+                "hidden tensor dtype must be one of [\(expected)], got \(input.dtype.rawValue)"
+            )
+        }
+        guard input.shape.count == metadata.hiddenRank,
+              input.shape.allSatisfy({ $0 > 0 }),
+              input.shape.last == metadata.hiddenSize
+        else {
+            throw PersistentWorkerError.invalidRequest(
+                "hidden tensor shape must have \(metadata.hiddenRank) positive dimensions and width \(metadata.hiddenSize)"
+            )
+        }
     }
 
     private func state() -> PersistentWorkerState {

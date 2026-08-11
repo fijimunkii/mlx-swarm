@@ -39,7 +39,7 @@ type summary struct {
 	InputKindValidation    bool                   `json:"inputKindValidation"`
 	TensorValidation       bool                   `json:"tensorValidation"`
 	CancellationReported   bool                   `json:"cancellationReported"`
-	CrashReported          bool                   `json:"crashReported"`
+	CrashReported          *bool                  `json:"crashReported,omitempty"`
 	LoadedMemory           workerproc.StageMemory `json:"loadedMemory"`
 	AfterForwardMemory     workerproc.StageMemory `json:"afterForwardMemory"`
 	AfterUnloadActiveBytes int                    `json:"afterUnloadActiveBytes"`
@@ -211,23 +211,33 @@ func run() error {
 	})
 	responseErr = nil
 	inputKindValidation := errors.As(inputKindErr, &responseErr)
-	_, tensorValidationErr := client.Call(ctx, workerproc.PersistentRequest{
-		Command: "forward",
-		Forward: &workerproc.PersistentForwardRequest{
-			ShardID:    *shardID,
-			SequenceID: sequenceA,
-			Position:   0,
-			InputKind:  "tokens",
-			Input: workerproc.WireTensor{
-				Shape: []int{1, 2},
-				DType: "int32",
-				Data:  []byte{0},
+	validateTensor := func(input workerproc.WireTensor, want string) bool {
+		_, err := client.Call(ctx, workerproc.PersistentRequest{
+			Command: "forward",
+			Forward: &workerproc.PersistentForwardRequest{
+				ShardID:    *shardID,
+				SequenceID: sequenceA,
+				Position:   0,
+				InputKind:  "tokens",
+				Input:      input,
 			},
-		},
-	})
-	responseErr = nil
-	tensorValidation := errors.As(tensorValidationErr, &responseErr) &&
-		strings.Contains(responseErr.Message, "invalid wire tensor byte count")
+		})
+		var workerErr *workerproc.WorkerResponseError
+		return errors.As(err, &workerErr) && strings.Contains(workerErr.Message, want)
+	}
+	tensorValidation := validateTensor(
+		workerproc.WireTensor{Shape: []int{1, 2}, DType: "int32", Data: []byte{0}},
+		"invalid wire tensor byte count",
+	) && validateTensor(
+		workerproc.WireTensor{Shape: []int{1, 1}, DType: "float32", Data: make([]byte, 4)},
+		"token tensor dtype must be int32",
+	) && validateTensor(
+		workerproc.WireTensor{Shape: []int{1, 1, 1}, DType: "int32", Data: make([]byte, 4)},
+		"token tensor shape must have 2 positive dimensions",
+	) && validateTensor(
+		tokenTensor([]int32{-1}),
+		"token ID -1 is outside vocabulary size",
+	)
 	if _, err := call(ctx, client, workerproc.PersistentRequest{Command: "health"}); err != nil {
 		return fmt.Errorf("health after malformed tensor: %w", err)
 	}
@@ -287,9 +297,13 @@ func run() error {
 		cleanShutdown = true
 	}
 
-	crashReported := proveCrashReported(ctx, *worker)
-	if !crashReported {
-		return errors.New("killed worker did not return a bounded error")
+	var crashReported *bool
+	if directClient != nil {
+		proved := proveCrashReported(ctx, *worker)
+		if !proved {
+			return errors.New("killed worker did not return a bounded error")
+		}
+		crashReported = &proved
 	}
 
 	result := summary{

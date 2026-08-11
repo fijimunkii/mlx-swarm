@@ -60,9 +60,10 @@ go run ./cmd/swarm-session-smoke -worker "$worker"
 
 The smoke performs 100 forwards through one retained stage, alternates two
 sequence IDs, rejects incorrect shard/sequence routing, unloads the stage, and
-proves clean shutdown plus bounded crash reporting. Its default checkpoint is
-the current CI fixture; the protocol and loader select arbitrary registered
-model-family adapters by checkpoint `model_type`.
+proves clean shutdown. Direct mode also proves bounded local crash reporting;
+HTTP `-peer` mode does not claim control of or crash-test the remote process.
+Its default checkpoint is the current CI fixture; the protocol and loader
+select arbitrary registered model-family adapters by checkpoint `model_type`.
 
 The framed request contract is documented in
 [`docs/persistent-worker-protocol.md`](docs/persistent-worker-protocol.md).
