@@ -40,7 +40,7 @@ worker="worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
 
 `generate` uses MLX Swift LM's registered `mlx-community/SmolLM-135M-Instruct-4bit` model and downloads/caches its Hugging Face assets on first use.
 
-`checkpoint-shard-smoke` downloads/caches `mlx-community/gemma-3-270m-it-4bit`, runs its 18-layer checkpoint as two independently loaded 9-layer stages, and verifies their composed output against the full-checkpoint layer stack.
+`checkpoint-shard-smoke` downloads/caches `mlx-community/gemma-3-270m-it-4bit`, runs its 18-layer checkpoint as two independently loaded 9-layer stages, applies the upstream final norm and language head, and verifies the final logits against full-checkpoint inference at `rtol=atol=1e-4`. It also fails unless both workers stay below a 128 MiB budget that the full checkpoint exceeds.
 
 ### Go-relayed two-process proof
 
@@ -52,7 +52,7 @@ Go launches one Swift worker for layers 0–3, captures its `WireTensor`, launch
 
 ### Two-Mac network proof
 
-`swarmd` now has a deliberately temporary HTTP endpoint carrying the same tensor payload. This transport is **unauthenticated and unencrypted** and is only for a trusted LAN/debug experiment; do not expose it to the public Internet.
+`swarmd` has a deliberately temporary HTTP endpoint carrying the real checkpoint boundary envelope. Mac A loads the embedding and layers 0–8; Mac B independently loads layers 9–17, the final norm, and the language head. This transport is **unauthenticated and unencrypted** and is only for a trusted LAN/debug experiment; do not expose it to the public Internet.
 
 On Mac B:
 
@@ -71,7 +71,7 @@ go run ./cmd/swarm-net \
   -peer http://MAC_B_LAN_IP:8080
 ```
 
-The result records logical tensor bytes, encoded wire bytes, local producer time, network/remote time, and whether the remote completion matches the reference.
+The result records logical tensor bytes, encoded wire bytes, local producer time, network/remote time, final-logit correctness, and measured full/producer/consumer peak memory. The current 270M checkpoint produces a 7,680-byte `bfloat16` boundary and logits shaped `[1, 6, 262144]`.
 
 The current boundary representation is `shape + dtype + contiguous bytes`. JSON/base64 framing is temporary; `proto/swarm.proto` already models the intended raw-byte tensor message.
 
@@ -102,4 +102,4 @@ ROADMAP.md                staged experimental plan
 
 ## Status
 
-M2 network proof in progress. The process boundary and Go relay are implemented; the next physical experiment sends the same tensor between the two Macs.
+The M2 real-checkpoint pipeline is implemented and enforced in paired macOS CI runners over Tailscale. Remaining M2 work is decode-time KV-cache ownership and statistically useful latency/throughput measurement; see [ROADMAP.md](ROADMAP.md).
