@@ -2,7 +2,6 @@ package workerproc
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,7 +12,12 @@ import (
 	"syscall"
 )
 
-const maxPersistentResponseBytes = 128 << 20
+const (
+	maxPersistentResponseBytes = 128 << 20
+	maxPersistentStderrBytes   = 64 << 10
+)
+
+var errPersistentWorkerStopped = errors.New("persistent worker is stopped")
 
 type PersistentRequest struct {
 	RequestID string                      `json:"requestID"`
@@ -116,21 +120,41 @@ func (e *WorkerResponseError) Error() string {
 	return fmt.Sprintf("worker request %s: %s", e.RequestID, e.Message)
 }
 
-type synchronizedBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
+type cappedTailBuffer struct {
+	mu        sync.Mutex
+	data      []byte
+	truncated bool
 }
 
-func (b *synchronizedBuffer) Write(p []byte) (int, error) {
+func (b *cappedTailBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.b.Write(p)
+	written := len(p)
+	if written >= maxPersistentStderrBytes {
+		b.truncated = b.truncated || len(b.data) > 0 || written > maxPersistentStderrBytes
+		b.data = append(b.data[:0], p[written-maxPersistentStderrBytes:]...)
+		return written, nil
+	}
+	if overflow := len(b.data) + written - maxPersistentStderrBytes; overflow > 0 {
+		copy(b.data, b.data[overflow:])
+		b.data = b.data[:len(b.data)-overflow]
+		b.truncated = true
+	}
+	b.data = append(b.data, p...)
+	return written, nil
 }
 
-func (b *synchronizedBuffer) String() string {
+func (b *cappedTailBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.b.String()
+	if !b.truncated {
+		return string(b.data)
+	}
+	return fmt.Sprintf(
+		"[stderr truncated; showing last %d bytes]\n%s",
+		maxPersistentStderrBytes,
+		b.data,
+	)
 }
 
 // PersistentClient supervises one long-lived MLX worker and multiplexes
@@ -138,7 +162,7 @@ func (b *synchronizedBuffer) String() string {
 type PersistentClient struct {
 	cmd          *exec.Cmd
 	stdin        io.WriteCloser
-	stderr       synchronizedBuffer
+	stderr       cappedTailBuffer
 	done         chan struct{}
 	writeMu      sync.Mutex
 	mu           sync.Mutex
@@ -195,7 +219,7 @@ func (c *PersistentClient) Call(
 	select {
 	case <-c.done:
 		c.mu.Unlock()
-		return PersistentResponse{}, c.processError()
+		return PersistentResponse{}, c.callError()
 	default:
 	}
 	if request.RequestID == "" {
@@ -218,10 +242,13 @@ func (c *PersistentClient) Call(
 	payload = append(payload, '\n')
 
 	c.writeMu.Lock()
-	_, err = c.stdin.Write(payload)
+	written, err := c.stdin.Write(payload)
 	c.writeMu.Unlock()
+	if err == nil && written != len(payload) {
+		err = io.ErrShortWrite
+	}
 	if err != nil {
-		c.removePending(request.RequestID)
+		_ = c.Kill()
 		return PersistentResponse{}, fmt.Errorf("write persistent worker request: %w", err)
 	}
 
@@ -229,14 +256,13 @@ func (c *PersistentClient) Call(
 	case result := <-response:
 		return checkedResponse(result)
 	case <-ctx.Done():
-		c.removePending(request.RequestID)
 		return PersistentResponse{}, ctx.Err()
 	case <-c.done:
 		select {
 		case result := <-response:
 			return checkedResponse(result)
 		default:
-			return PersistentResponse{}, c.processError()
+			return PersistentResponse{}, c.callError()
 		}
 	}
 }
@@ -309,6 +335,7 @@ func (c *PersistentClient) finish(err error) {
 	default:
 	}
 	c.waitErr = err
+	c.pending = make(map[string]chan PersistentResponse)
 	close(c.done)
 }
 
@@ -337,6 +364,13 @@ func (c *PersistentClient) processError() error {
 		return fmt.Errorf("persistent worker exited: %w", err)
 	}
 	return fmt.Errorf("persistent worker exited: %w: %s", err, stderr)
+}
+
+func (c *PersistentClient) callError() error {
+	if err := c.processError(); err != nil {
+		return err
+	}
+	return errPersistentWorkerStopped
 }
 
 func checkedResponse(response PersistentResponse) (PersistentResponse, error) {

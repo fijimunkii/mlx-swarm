@@ -105,6 +105,7 @@ private enum PersistentWorkerError: LocalizedError {
     case sequenceAlreadyOpen(String, String)
     case sequenceNotFound(String, String)
     case unsupportedInputKind(String)
+    case inputKindMismatch(String, got: String, expected: String)
 
     var errorDescription: String? {
         switch self {
@@ -122,6 +123,8 @@ private enum PersistentWorkerError: LocalizedError {
             return "sequence \(sequenceID) is not open on shard \(shardID)"
         case .unsupportedInputKind(let kind):
             return "unsupported forward input kind \(kind)"
+        case .inputKindMismatch(let shardID, let got, let expected):
+            return "shard \(shardID) requires input kind \(expected), got \(got)"
         }
     }
 }
@@ -314,8 +317,22 @@ final class PersistentShardService {
         let output: MLXArray
         switch request.inputKind {
         case "tokens":
+            guard shard.ownsInput else {
+                throw PersistentWorkerError.inputKindMismatch(
+                    request.shardID,
+                    got: request.inputKind,
+                    expected: "hidden"
+                )
+            }
             output = try shard.stage.forward(tokens: request.input.materialize())
         case "hidden":
+            guard !shard.ownsInput else {
+                throw PersistentWorkerError.inputKindMismatch(
+                    request.shardID,
+                    got: request.inputKind,
+                    expected: "tokens"
+                )
+            }
             output = try shard.stage.forward(hidden: request.input.materialize())
         default:
             throw PersistentWorkerError.unsupportedInputKind(request.inputKind)

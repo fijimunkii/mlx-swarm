@@ -35,6 +35,7 @@ type summary struct {
 	OutputsStable          bool                   `json:"outputsStable"`
 	SequenceIsolation      bool                   `json:"sequenceIsolation"`
 	ShardIsolation         bool                   `json:"shardIsolation"`
+	InputKindValidation    bool                   `json:"inputKindValidation"`
 	CancellationReported   bool                   `json:"cancellationReported"`
 	CrashReported          bool                   `json:"crashReported"`
 	LoadedMemory           workerproc.StageMemory `json:"loadedMemory"`
@@ -177,6 +178,18 @@ func main() {
 	})
 	responseErr = nil
 	shardIsolation := errors.As(shardIsolationErr, &responseErr)
+	_, inputKindErr := client.Call(ctx, workerproc.PersistentRequest{
+		Command: "forward",
+		Forward: &workerproc.PersistentForwardRequest{
+			ShardID:    *shardID,
+			SequenceID: sequenceA,
+			Position:   0,
+			InputKind:  "hidden",
+			Input:      tokens,
+		},
+	})
+	responseErr = nil
+	inputKindValidation := errors.As(inputKindErr, &responseErr)
 
 	stateResponse := mustCall(ctx, client, workerproc.PersistentRequest{Command: "state"})
 	if stateResponse.Result == nil || stateResponse.Result.State == nil {
@@ -193,7 +206,7 @@ func main() {
 	if shard.OpenSequenceCount != 2 {
 		fatalf("expected two open sequences, got %d", shard.OpenSequenceCount)
 	}
-	if !outputsStable || !sequenceIsolation || !shardIsolation {
+	if !outputsStable || !sequenceIsolation || !shardIsolation || !inputKindValidation {
 		fatalf("persistent worker output or identifier isolation failed")
 	}
 
@@ -244,6 +257,7 @@ func main() {
 		OutputsStable:          outputsStable,
 		SequenceIsolation:      sequenceIsolation,
 		ShardIsolation:         shardIsolation,
+		InputKindValidation:    inputKindValidation,
 		CancellationReported:   cancellationReported,
 		CrashReported:          crashReported,
 		LoadedMemory:           shard.LoadedMemory,
@@ -295,10 +309,19 @@ func proveCrashReported(ctx context.Context, worker string) bool {
 		return false
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	_ = client.Wait(waitCtx)
-	_, err = client.Call(waitCtx, workerproc.PersistentRequest{Command: "state"})
-	return err != nil
+	waitErr := client.Wait(waitCtx)
+	cancel()
+	if waitErr == nil || isContextError(waitErr) {
+		return false
+	}
+	callCtx, cancelCall := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelCall()
+	_, callErr := client.Call(callCtx, workerproc.PersistentRequest{Command: "state"})
+	return callErr != nil && !isContextError(callErr)
+}
+
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func fatalf(format string, args ...any) {

@@ -1,7 +1,9 @@
 package workerproc
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +37,80 @@ printf '%s\n' '{"requestID":"request-1","ok":true,"result":{"shutdown":true}}'
 	defer cancel()
 	if err := client.Shutdown(ctx); err != nil {
 		t.Fatalf("Shutdown: %v", err)
+	}
+	if _, err := client.Call(ctx, PersistentRequest{Command: "state"}); !errors.Is(err, errPersistentWorkerStopped) {
+		t.Fatalf("Call after shutdown error = %v, want stopped worker", err)
+	}
+}
+
+func TestPersistentClientReservesCanceledRequestID(t *testing.T) {
+	worker := writeWorkerScript(t, `#!/bin/sh
+read first
+sleep 0.1
+printf '%s\n' '{"requestID":"shared","ok":true,"result":{"status":"ok"}}'
+while read request; do
+  printf '%s\n' '{"requestID":"shared","ok":true,"result":{"status":"ok"}}'
+done
+`)
+	client, err := StartPersistent(worker)
+	if err != nil {
+		t.Fatalf("StartPersistent: %v", err)
+	}
+	defer func() {
+		_ = client.Kill()
+		waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = client.Wait(waitCtx)
+	}()
+
+	canceledCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = client.Call(canceledCtx, PersistentRequest{RequestID: "shared", Command: "health"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("canceled Call error = %v, want deadline exceeded", err)
+	}
+	if _, err := client.Call(context.Background(), PersistentRequest{RequestID: "shared", Command: "health"}); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("reused pending ID error = %v, want duplicate", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		response, err := client.Call(context.Background(), PersistentRequest{RequestID: "shared", Command: "health"})
+		if err == nil {
+			if response.Result == nil || response.Result.Status != "ok" {
+				t.Fatalf("released ID response = %#v", response)
+			}
+			break
+		}
+		if !strings.Contains(err.Error(), "duplicate") {
+			t.Fatalf("released ID error = %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("late response did not release canceled request ID")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCappedTailBufferBoundsAndMarksStderr(t *testing.T) {
+	var buffer cappedTailBuffer
+	if _, err := buffer.Write([]byte("discarded-prefix")); err != nil {
+		t.Fatalf("Write prefix: %v", err)
+	}
+	payload := bytes.Repeat([]byte("x"), maxPersistentStderrBytes+32)
+	copy(payload[len(payload)-4:], "tail")
+	if _, err := buffer.Write(payload); err != nil {
+		t.Fatalf("Write payload: %v", err)
+	}
+	got := buffer.String()
+	if !strings.HasPrefix(got, "[stderr truncated;") {
+		t.Fatalf("stderr marker missing: %q", got[:min(len(got), 80)])
+	}
+	if !strings.HasSuffix(got, "tail") {
+		t.Fatalf("stderr tail missing")
+	}
+	if len(got) > maxPersistentStderrBytes+128 {
+		t.Fatalf("stderr length = %d, want capped tail plus marker", len(got))
 	}
 }
 

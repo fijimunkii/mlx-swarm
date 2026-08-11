@@ -47,13 +47,7 @@ func main() {
 		_ = persistentWorker.Kill()
 		log.Fatalf("persistent MLX worker health: %v", err)
 	}
-	defer func() {
-		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancelShutdown()
-		if err := persistentWorker.Shutdown(shutdownContext); err != nil {
-			log.Printf("persistent MLX worker shutdown: %v", err)
-		}
-	}()
+	defer shutdownPersistentWorker(persistentWorker)
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +83,7 @@ func main() {
 			writeError(w, http.StatusForbidden, errors.New("swarmd owns worker shutdown"))
 			return
 		}
-		response, err := persistentWorker.Call(r.Context(), request)
+		response, err := forwardPersistentRequest(r.Context(), persistentWorker, request)
 		writePersistentResponse(w, response, err)
 	})
 
@@ -161,7 +155,46 @@ func main() {
 	serveErr := server.ListenAndServe()
 	close(serverStopped)
 	if serveErr != nil && serveErr != http.ErrServerClosed {
-		log.Fatal(serveErr)
+		log.Printf("swarmd serve: %v", serveErr)
+	}
+}
+
+func forwardPersistentRequest(
+	ctx context.Context,
+	worker workerproc.PersistentCaller,
+	request workerproc.PersistentRequest,
+) (workerproc.PersistentResponse, error) {
+	callerRequestID := request.RequestID
+	request.RequestID = ""
+	response, err := worker.Call(ctx, request)
+	if callerRequestID != "" {
+		response.RequestID = callerRequestID
+	}
+	return response, err
+}
+
+type persistentWorkerLifecycle interface {
+	Shutdown(context.Context) error
+	Kill() error
+	Wait(context.Context) error
+}
+
+func shutdownPersistentWorker(worker persistentWorkerLifecycle) {
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	err := worker.Shutdown(shutdownContext)
+	cancelShutdown()
+	if err == nil {
+		return
+	}
+	log.Printf("persistent MLX worker shutdown: %v", err)
+	if killErr := worker.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+		log.Printf("persistent MLX worker kill fallback: %v", killErr)
+		return
+	}
+	reapContext, cancelReap := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelReap()
+	if waitErr := worker.Wait(reapContext); errors.Is(waitErr, context.DeadlineExceeded) {
+		log.Printf("persistent MLX worker reap: %v", waitErr)
 	}
 }
 
