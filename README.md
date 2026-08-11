@@ -40,7 +40,9 @@ worker="worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
 
 `generate` uses MLX Swift LM's registered `mlx-community/SmolLM-135M-Instruct-4bit` model and downloads/caches its Hugging Face assets on first use.
 
-`checkpoint-shard-smoke` downloads/caches `mlx-community/gemma-3-270m-it-4bit`, runs its 18-layer checkpoint as two independently loaded 9-layer stages, applies the upstream final norm and language head, and verifies the final logits against full-checkpoint inference at `rtol=atol=1e-4`. It also fails unless both workers stay below a 128 MiB budget that the full checkpoint exceeds.
+`checkpoint-shard-smoke` resolves the checkpoint's `model_type` through the shard-adapter registry. The first validated adapter is Gemma 3: it downloads/caches `mlx-community/gemma-3-270m-it-4bit`, runs its 18-layer checkpoint as two independently loaded 9-layer stages, applies the upstream final norm and language head, and verifies the final logits against full-checkpoint inference at `rtol=atol=1e-4`. It also fails unless both workers stay below a 128 MiB budget that the full checkpoint exceeds.
+
+Checkpoint resolution, boundary transport, correctness checks, memory budgeting, safetensor selection, and partial module updates are architecture-neutral. Model-family adapters own parameter paths and execution details such as embedding scaling, attention masks, caches, final normalization, and output heads.
 
 ### Go-relayed two-process proof
 
@@ -96,6 +98,10 @@ cmd/swarm-net/           two-machine shard experiment client
 internal/                Go control-plane and worker-process packages
 proto/                   language-neutral protocol definitions
 worker/mlx/              Swift MLX worker
+  CheckpointShardRuntime generic orchestration and adapter registry
+  CheckpointWeightLoader generic filtered checkpoint I/O
+  WorkerCheckpointShards app-level adapter registration and defaults
+  Gemma3CheckpointShard first model-family adapter
 ARCHITECTURE.md           design boundaries and execution model
 ROADMAP.md                staged experimental plan
 ```

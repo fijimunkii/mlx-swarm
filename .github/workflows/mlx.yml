@@ -194,6 +194,7 @@ jobs:
             echo "| Metric | Value |"
             echo "|---|---:|"
             printf '| Model | `%s` |\n' "$(printf '%s' "$network_json" | jq -r '.model')"
+            printf '| Adapter model type | `%s` |\n' "$(printf '%s' "$network_json" | jq -r '.modelType')"
             printf '| Layers | %s (split at %s) |\n' "$(printf '%s' "$network_json" | jq -r '.layers')" "$(printf '%s' "$network_json" | jq -r '.splitLayer')"
             printf '| Boundary dtype | `%s` |\n' "$(printf '%s' "$network_json" | jq -r '.boundaryDType')"
             printf '| Output shape | `%s` |\n' "$(printf '%s' "$network_json" | jq -c '.outputShape')"

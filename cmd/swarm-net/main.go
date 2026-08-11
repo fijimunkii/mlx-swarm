@@ -24,6 +24,7 @@ type stageMemory struct {
 
 type checkpointShardResult struct {
 	Model                      string      `json:"model"`
+	ModelType                  string      `json:"modelType"`
 	Layers                     int         `json:"layers"`
 	SplitLayer                 int         `json:"splitLayer"`
 	WorkerBudgetBytes          int         `json:"workerBudgetBytes"`
@@ -53,6 +54,7 @@ type networkSummary struct {
 	MatchesFullCheckpoint   bool    `json:"matchesFullCheckpoint"`
 	PassesMemoryProof       bool    `json:"passesMemoryProof"`
 	Model                   string  `json:"model"`
+	ModelType               string  `json:"modelType"`
 	Layers                  int     `json:"layers"`
 	SplitLayer              int     `json:"splitLayer"`
 	BoundaryDType           string  `json:"boundaryDType"`
@@ -137,6 +139,7 @@ func main() {
 		MatchesFullCheckpoint:   result.MatchesFullCheckpoint,
 		PassesMemoryProof:       result.PassesMemoryProof,
 		Model:                   result.Model,
+		ModelType:               result.ModelType,
 		Layers:                  result.Layers,
 		SplitLayer:              result.SplitLayer,
 		BoundaryDType:           result.BoundaryDType,

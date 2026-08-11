@@ -29,6 +29,7 @@ Current correctness proof (`mlx-community/gemma-3-270m-it-4bit`):
 - distributed logits match full-checkpoint inference at `rtol=atol=1e-4`
 - under a configured 128 MiB worker budget, measured peaks are about 119 MiB and 121 MiB while full-checkpoint inference peaks near 150 MiB
 - paired macOS CI runners exercise the boundary over Tailscale and require both correctness and memory proofs
+- checkpoint orchestration and filtered loading are architecture-neutral; `model_type` selects a registered adapter, with Gemma 3 as the first validated family
 
 ## M3 — chaos harness
 

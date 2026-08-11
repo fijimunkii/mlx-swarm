@@ -39,6 +39,14 @@ Each participating machine initially runs two processes:
 
 A process boundary gives us crash isolation and lets future worker backends implement the same protocol without changing the control plane.
 
+Inside the Swift worker, checkpoint sharding has three boundaries:
+
+- `CheckpointShardRuntime` resolves a checkpoint, chooses an adapter from an injected registry using `model_type`, transports stage boundaries, and enforces correctness and memory budgets.
+- `CheckpointWeightLoader` performs architecture-neutral safetensor selection and partial module updates.
+- a `CheckpointShardAdapter` owns model-family details: parameter paths, embeddings, attention/cache semantics, normalization, and output heads. Gemma 3 is the first registered adapter, not a control-plane special case.
+
+`WorkerCheckpointShards` is the composition root: it registers adapters and supplies experiment defaults without coupling the reusable runtime to Gemma or any future model family.
+
 ## Execution model
 
 The first useful primitive is conceptually:

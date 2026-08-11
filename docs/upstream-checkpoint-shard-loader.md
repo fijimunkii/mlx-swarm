@@ -1,8 +1,13 @@
 # Upstream checkpoint-shard loader seam
 
-Issue #2 deliberately keeps model math in MLX Swift LM. The local implementation only selects and applies checkpoint parameters; Gemma 3 embedding, transformer blocks, final RMS norm, and language head remain upstream modules.
+Issue #2 deliberately keeps model math in MLX Swift LM. The local implementation is split into three seams:
 
-The generally useful upstream change is a filtered variant of `loadWeights` with this shape:
+- `CheckpointShardRuntime` owns model resolution, injected-registry dispatch, stage requests, boundary envelopes, correctness, and memory budgets.
+- `CheckpointWeightLoader` owns safetensor discovery, pre/post-sanitizer filtering, and partial `Module` updates.
+- model-family adapters own parameter paths, quantization replacement, and execution semantics. `Gemma3CheckpointShardAdapter` is the first validated adapter; its embedding, transformer blocks, final RMS norm, and language head remain upstream modules.
+- `WorkerCheckpointShards` composes the runtime by registering adapters and providing the current model, token, tolerance, and budget defaults.
+
+The remaining generally useful upstream change is a filtered variant of `loadWeights` with this shape:
 
 ```swift
 public func loadWeights(
@@ -21,4 +26,4 @@ Its implementation should preserve the existing loader sequence:
 4. quantize and update only selected leaf modules, including non-zero array ranges without constructing sparse child arrays;
 5. evaluate only retained modules so unowned random parameters do not materialize.
 
-The validation case in this repository exercises the tricky parts: a non-zero Gemma layer range, quantized layers, a tied `lm_head`, final norm/head ownership, two independent processes, final-logit equality, and peak-memory accounting. Once the API is accepted upstream, `Gemma3CheckpointShard.loadStage` can collapse to selection predicates plus retained module references; no checkpoint format or model fork is required.
+The validation case exercises the tricky parts: adapter selection from `model_type`, a non-zero Gemma layer range, quantized layers, a tied `lm_head`, final norm/head ownership, two independent processes, final-logit equality, and peak-memory accounting. Once the API is accepted upstream, `CheckpointWeightLoader` can delegate its file loading and filtering while adapters continue to retain and execute architecture-specific modules; no checkpoint format or model fork is required.

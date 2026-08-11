@@ -39,7 +39,7 @@ private enum WorkerCommand {
             self = .checkpointShardSmoke(
                 modelID: arguments.count == 2
                     ? arguments[1]
-                    : Gemma3CheckpointShard.defaultModelID
+                    : WorkerCheckpointShards.defaultModelID
             )
         case "shard-produce":
             guard arguments.count == 2 else {
@@ -91,6 +91,7 @@ private enum WorkerError: LocalizedError {
 private struct WorkerCapabilities: Codable {
     let runtime: String
     let device: String
+    let checkpointShardModelTypes: [String]
     let physicalMemoryBytes: UInt64
     let mlxActiveMemoryBytes: Int
     let mlxCacheMemoryBytes: Int
@@ -110,6 +111,8 @@ struct MLXWorker {
             let capabilities = WorkerCapabilities(
                 runtime: "mlx-swift",
                 device: Device.defaultDevice().deviceType?.rawValue ?? "unknown",
+                checkpointShardModelTypes: WorkerCheckpointShards.configuration
+                    .adapterRegistry.supportedModelTypes,
                 physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
                 mlxActiveMemoryBytes: Memory.activeMemory,
                 mlxCacheMemoryBytes: Memory.cacheMemory
@@ -124,7 +127,10 @@ struct MLXWorker {
             print(String(decoding: try encoder.encode(result), as: UTF8.self))
 
         case .checkpointShardSmoke(let modelID):
-            let result = try await Gemma3CheckpointShard.run(modelID: modelID)
+            let result = try await CheckpointShardRuntime.run(
+                modelID: modelID,
+                configuration: WorkerCheckpointShards.configuration
+            )
             guard result.matchesFullCheckpoint, result.passesMemoryProof else {
                 throw WorkerError.checkpointShardMismatch
             }
@@ -158,12 +164,18 @@ struct MLXWorker {
             // The envelope includes the real checkpoint boundary plus producer
             // memory measurements for the remote consumer's proof.
             FileHandle.standardOutput.write(
-                try await Gemma3CheckpointShard.produceBoundaryPayload()
+                try await CheckpointShardRuntime.produceBoundaryPayload(
+                    modelID: WorkerCheckpointShards.defaultModelID,
+                    configuration: WorkerCheckpointShards.configuration
+                )
             )
 
         case .checkpointShardFinishStdio:
             let payload = FileHandle.standardInput.readDataToEndOfFile()
-            let result = try await Gemma3CheckpointShard.finishBoundary(from: payload)
+            let result = try await CheckpointShardRuntime.finishBoundary(
+                from: payload,
+                configuration: WorkerCheckpointShards.configuration
+            )
             guard result.matchesFullCheckpoint, result.passesMemoryProof else {
                 throw WorkerError.checkpointShardMismatch
             }
