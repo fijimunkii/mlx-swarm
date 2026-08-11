@@ -11,10 +11,12 @@ on:
       - 'cmd/swarm-net/**'
       - 'cmd/swarm-session-smoke/**'
       - 'cmd/swarm-cache-smoke/**'
+      - 'cmd/swarm-benchmark/**'
       - 'cmd/swarm-generate/**'
       - 'cmd/swarm-generate-smoke/**'
       - 'cmd/swarmd/**'
       - 'internal/generation/**'
+      - 'internal/benchmark/**'
       - 'internal/smoke/**'
       - 'internal/tensorcheck/**'
       - 'internal/workerproc/**'
@@ -28,10 +30,12 @@ on:
       - 'cmd/swarm-net/**'
       - 'cmd/swarm-session-smoke/**'
       - 'cmd/swarm-cache-smoke/**'
+      - 'cmd/swarm-benchmark/**'
       - 'cmd/swarm-generate/**'
       - 'cmd/swarm-generate-smoke/**'
       - 'cmd/swarmd/**'
       - 'internal/generation/**'
+      - 'internal/benchmark/**'
       - 'internal/smoke/**'
       - 'internal/tensorcheck/**'
       - 'internal/workerproc/**'
@@ -215,6 +219,7 @@ jobs:
           tags: tag:ci
           hostname: mlx-swarm-p-${{ github.run_id }}
       - name: Discover receiver and exercise cached pipeline across runners
+        id: distributed
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
           peer_name="mlx-swarm-r-${GITHUB_RUN_ID}"
@@ -289,6 +294,27 @@ jobs:
             exit 1
           fi
 
+          benchmark_path="$RUNNER_TEMP/mlx-swarm-distributed-benchmark.json"
+          hardware="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m)"
+          go run ./cmd/swarm-benchmark \
+            -worker "$worker" \
+            -peer "http://${peer_ip}:8080" \
+            -hardware "$hardware" \
+            -route "$route" \
+            -decode-samples 100 > "$benchmark_path"
+          if ! jq -e '
+            (.decode.sampleCount >= 100) and
+            .verification.allFinalLogitsMatch and
+            .verification.greedyTokenIDsMatch and
+            (.memory.producer.postRunKVCacheBytes == 0) and
+            (.memory.consumer.postRunKVCacheBytes == 0) and
+            (.memory.reference.postRunKVCacheBytes == 0)
+          ' "$benchmark_path" >/dev/null; then
+            echo "Warm distributed benchmark did not complete its fixed verified token plan" >&2
+            exit 1
+          fi
+          printf 'benchmark_path=%s\n' "$benchmark_path" >> "$GITHUB_OUTPUT"
+
           network_json="$(go run ./cmd/swarm-net \
             -worker "$worker" \
             -peer "http://${peer_ip}:8080")"
@@ -339,5 +365,27 @@ jobs:
             printf '| Greedy generation correctness | **%s** |\n' "$(printf '%s' "$generation_json" | jq -r 'if .greedyTokenIDsMatch then "MATCH" else "MISMATCH" end')"
             printf '| Repeated request / teardown | **%s / %s** |\n' "$(printf '%s' "$generation_json" | jq -r 'if .repeatedRequestValidated then "PASS" else "FAIL" end')" "$(printf '%s' "$generation_json" | jq -r 'if .sequenceTeardownValidated then "PASS" else "FAIL" end')"
             echo
+            echo '| Warm benchmark samples | p50 | p95 |'
+            echo '|---|---:|---:|'
+            printf '| Prefill TTFT | %.3f ms | %.3f ms |\n' "$(jq -r '.prefill.tokenLatencyMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.prefill.tokenLatencyMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Decode producer | %.3f ms | %.3f ms |\n' "$(jq -r '.decode.producerWallMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.decode.producerWallMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Boundary serialization | %.3f ms | %.3f ms |\n' "$(jq -r '.decode.boundarySerializationMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.decode.boundarySerializationMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Transport overhead | %.3f ms | %.3f ms |\n' "$(jq -r '.decode.transportOverheadMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.decode.transportOverheadMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Decode consumer compute | %.3f ms | %.3f ms |\n' "$(jq -r '.decode.consumerComputeMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.decode.consumerComputeMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Distributed end-to-end | %.3f ms | %.3f ms |\n' "$(jq -r '.decode.distributedEndToEndMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.decode.distributedEndToEndMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Decode inter-token latency | %.3f ms | %.3f ms |\n' "$(jq -r '.decode.tokenLatencyMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.decode.tokenLatencyMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Single-node cached baseline | %.3f ms | %.3f ms |\n' "$(jq -r '.decode.referenceTokenLatencyMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.decode.referenceTokenLatencyMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Decode throughput | %.2f tok/s | %.2f tok/s baseline |\n' "$(jq -r '.decode.tokensPerSecond' "$benchmark_path")" "$(jq -r '.decode.referenceTokensPerSecond' "$benchmark_path")"
+            printf '| Boundary transfer | %s tensor bytes/sample | %s wire bytes/sample |\n' "$(jq -r '.decode.boundaryTensorBytes.p50Bytes' "$benchmark_path")" "$(jq -r '.decode.boundaryWireBytes.p50Bytes' "$benchmark_path")"
+            printf '| Producer weight / max KV memory | %.2f MiB | %.2f MiB |\n' "$(jq -r '.memory.producer.loadedShardMemory.activeBytes / 1048576' "$benchmark_path")" "$(jq -r '.memory.producer.maxKVCacheBytes / 1048576' "$benchmark_path")"
+            printf '| Consumer weight / max KV memory | %.2f MiB | %.2f MiB |\n' "$(jq -r '.memory.consumer.loadedShardMemory.activeBytes / 1048576' "$benchmark_path")" "$(jq -r '.memory.consumer.maxKVCacheBytes / 1048576' "$benchmark_path")"
+            printf '| Full-model weight / max KV memory | %.2f MiB | %.2f MiB |\n' "$(jq -r '.memory.reference.loadedShardMemory.activeBytes / 1048576' "$benchmark_path")" "$(jq -r '.memory.reference.maxKVCacheBytes / 1048576' "$benchmark_path")"
+            echo
             echo "Route probe: \`$route_line\`"
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload distributed benchmark JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlx-swarm-distributed-benchmark-${{ github.run_id }}
+          path: ${{ steps.distributed.outputs.benchmark_path }}
+          if-no-files-found: error

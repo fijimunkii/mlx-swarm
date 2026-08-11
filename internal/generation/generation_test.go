@@ -32,6 +32,51 @@ func TestGenerateStopsAtMaximumAndCleansSequences(t *testing.T) {
 	assertNoFakeSequences(t, producer, consumer, reference)
 }
 
+func TestGenerateObservesHotPathSeparatelyFromReference(t *testing.T) {
+	producer, consumer, reference := fakeSwarm([]int32{3, 2, 3})
+	var samples []StageSample
+	session, err := NewSession(
+		context.Background(), producer, consumer, reference,
+		SessionConfig{
+			Model: "test/model", RTol: 1e-4, ATol: 1e-4,
+			Observer: func(sample StageSample) { samples = append(samples, sample) },
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = session.Generate(context.Background(), Request{
+		Prompt: "hello", MaxTokens: 2, SequenceID: "observed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(samples) != 2 || samples[0].Operation != "prefill" || samples[1].Operation != "decode" {
+		t.Fatalf("unexpected observations: %+v", samples)
+	}
+	if samples[0].InputTokenCount != 2 || samples[1].InputTokenCount != 1 {
+		t.Fatalf("unexpected input token counts: %+v", samples)
+	}
+	for _, sample := range samples {
+		if sample.BoundaryTensorBytes <= 0 || sample.BoundaryWireBytes <= sample.BoundaryTensorBytes {
+			t.Fatalf("invalid boundary accounting: %+v", sample)
+		}
+		if sample.ReferenceComputeMicros == 0 || sample.ReferenceKVCacheBytes == 0 {
+			t.Fatalf("missing reference baseline: %+v", sample)
+		}
+		if sample.TokenLatencyMicros < sample.DistributedEndToEndMicros ||
+			sample.ReferenceTokenLatencyMicros < sample.ReferenceWallMicros {
+			t.Fatalf("invalid token latency: %+v", sample)
+		}
+	}
+	info := session.Info()
+	if info.ReferenceShardID == "" || info.ShardPlan.Producer.LayerEnd != 1 ||
+		info.ShardPlan.Consumer.LayerStart != 1 {
+		t.Fatalf("unexpected session info: %+v", info)
+	}
+}
+
 func TestGenerateStopsAtEOSAndCleansSequences(t *testing.T) {
 	producer, consumer, reference := fakeSwarm([]int32{1, 3})
 	session := newFakeSession(t, producer, consumer, reference)
@@ -43,6 +88,23 @@ func TestGenerateStopsAtEOSAndCleansSequences(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.StopReason != "eos" || len(result.GeneratedTokenIDs) != 1 ||
+		result.GeneratedTokenIDs[0] != 1 {
+		t.Fatalf("unexpected result: stop=%s tokens=%v", result.StopReason, result.GeneratedTokenIDs)
+	}
+	assertNoFakeSequences(t, producer, consumer, reference)
+}
+
+func TestGenerateCanIgnoreEOSForFixedBenchmarkPlan(t *testing.T) {
+	producer, consumer, reference := fakeSwarm([]int32{1, 3})
+	session := newFakeSession(t, producer, consumer, reference)
+
+	result, err := session.Generate(context.Background(), Request{
+		Prompt: "hello", MaxTokens: 2, SequenceID: "ignore-eos", IgnoreEOS: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StopReason != "max_tokens" || len(result.GeneratedTokenIDs) != 2 ||
 		result.GeneratedTokenIDs[0] != 1 {
 		t.Fatalf("unexpected result: stop=%s tokens=%v", result.StopReason, result.GeneratedTokenIDs)
 	}

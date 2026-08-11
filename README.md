@@ -169,6 +169,12 @@ go run ./cmd/swarm-generate \
 go run ./cmd/swarm-cache-smoke \
   -worker "$PWD/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker" \
   -peer http://MAC_B_LAN_IP:8080
+go run ./cmd/swarm-benchmark \
+  -worker "$PWD/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker" \
+  -peer http://MAC_B_LAN_IP:8080 \
+  -hardware "Apple Silicon description" \
+  -route "LAN or Tailscale route" \
+  > distributed-benchmark.json
 go run ./cmd/swarm-net \
   -peer http://MAC_B_LAN_IP:8080
 ```
@@ -179,6 +185,16 @@ cached and one-shot proofs also record logical tensor bytes, encoded wire
 bytes, local producer time, network/remote time, final-logit correctness, and
 measured full/producer/consumer peak memory. The current 270M checkpoint
 produces a 7,680-byte `bfloat16` boundary and logits shaped `[1, 6, 262144]`.
+
+`swarm-benchmark` separates model setup and an explicit warmup from measured
+work. By default it records five fresh-sequence prefills and 100 cached decode
+steps. Each distributed sample reports producer wall/compute time,
+representative boundary JSON serialization, consumer round-trip/compute time,
+transport overhead, end-to-end token latency, tensor/wire bytes, and memory.
+The cached full-model oracle receives the identical prompt and greedy token
+plan but runs outside the distributed hot-path timer. JSON contains both raw
+samples and nearest-rank p50/p95 summaries; CI uploads it as an artifact and
+prints a readable table without performance pass/fail thresholds.
 
 The current boundary representation is `shape + dtype + contiguous bytes`. JSON/base64 framing is temporary; `proto/swarm.proto` already models the intended raw-byte tensor message.
 
@@ -202,9 +218,11 @@ cmd/swarm-local/         local two-worker orchestration
 cmd/swarm-net/           two-machine shard experiment client
 cmd/swarm-session-smoke/ persistent shard lifecycle and reuse proof
 cmd/swarm-cache-smoke/   cached prefill/decode and reference-logit proof
+cmd/swarm-benchmark/     warm distributed/reference benchmark and JSON artifact
 cmd/swarm-generate/      prompt-to-text distributed greedy generation
 cmd/swarm-generate-smoke/ deterministic generation/reference/retention proof
 internal/generation/     reusable model planning and generation session
+internal/benchmark/      percentile, throughput, transfer, and memory summaries
 internal/smoke/          shared smoke request and assertion helpers
 internal/tensorcheck/    reusable tensor decoding and reference comparison
 internal/workerproc/     persistent targets, transports, and sequence lifecycle
@@ -222,6 +240,7 @@ ROADMAP.md                staged experimental plan
 
 The M2 real-checkpoint pipeline now produces tokenizer-backed text through
 per-sequence KV-cached prefill/decode, with exact greedy-token parity enforced
-between paired macOS CI runners and a cached full-model reference. Remaining
-M2 work is statistically useful latency/throughput measurement; see
-[ROADMAP.md](ROADMAP.md).
+between paired macOS CI runners and a cached full-model reference. Warm paired
+runs also publish statistically useful latency, throughput, transfer, and
+memory evidence. The next milestone is controlled failure characterization;
+see [ROADMAP.md](ROADMAP.md).

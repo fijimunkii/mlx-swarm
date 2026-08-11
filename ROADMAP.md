@@ -22,7 +22,7 @@
 - [x] preserve per-shard KV cache
 - [x] compare final logits with single-node inference at an explicit tolerance
 - [x] tokenize prompts and generate user-visible text with cached greedy decode
-- [ ] measure p50/p95 latency, TTFT, and tokens/sec (single-run transfer/timing metrics exist)
+- [x] measure p50/p95 latency, TTFT, and tokens/sec with warm repeated samples
 
 Current correctness proof (`mlx-community/gemma-3-270m-it-4bit`):
 
@@ -41,6 +41,8 @@ Current correctness proof (`mlx-community/gemma-3-270m-it-4bit`):
 - generation requires identical resolved-checkpoint fingerprints across producer, consumer, and reference workers; private sequence owners make ambiguous cleanup safe under caller-supplied ID collisions
 - local and paired-macOS proofs generate 32 tokens whose complete greedy token sequence matches a cached full-checkpoint reference; a second request reuses the loaded shards and both requests release their sequence caches
 - generation and smoke proofs share bounded worker cleanup and rollback-safe multi-shard sequence orchestration; smoke proofs also share request assertions and accumulated final-logit comparison metrics so later experiments add only proof-specific behavior
+- the paired-macOS benchmark warms already-loaded shards, records five fresh prefills and 100 cached decode steps, and reports p50/p95 producer, serialization, transport, consumer, end-to-end, TTFT, inter-token, throughput, transfer, and memory metrics alongside the same-token cached full-model baseline
+- benchmark JSON includes its model fingerprint, prompt and token plan, split, hardware, Tailscale route, tolerances, aggregate distributions, and raw samples; CI uploads it without enforcing hosted-runner performance thresholds
 
 ## M3 — chaos harness
 
