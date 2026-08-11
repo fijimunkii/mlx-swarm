@@ -92,26 +92,30 @@ type PersistentForwardResult struct {
 }
 
 type PersistentShardSnapshot struct {
-	ShardID           string      `json:"shardID"`
-	ModelID           string      `json:"modelID"`
-	ModelType         string      `json:"modelType"`
-	LayerStart        int         `json:"layerStart"`
-	LayerEnd          int         `json:"layerEnd"`
-	OwnsInput         bool        `json:"ownsInput"`
-	OwnsOutput        bool        `json:"ownsOutput"`
-	WeightKeyCount    int         `json:"weightKeyCount"`
-	OpenSequenceCount int         `json:"openSequenceCount"`
-	ForwardCount      int         `json:"forwardCount"`
-	KVCacheBytes      int         `json:"kvCacheBytes"`
-	LoadedMemory      StageMemory `json:"loadedMemory"`
+	ShardID              string      `json:"shardID"`
+	ModelID              string      `json:"modelID"`
+	ModelType            string      `json:"modelType"`
+	LayerStart           int         `json:"layerStart"`
+	LayerEnd             int         `json:"layerEnd"`
+	OwnsInput            bool        `json:"ownsInput"`
+	OwnsOutput           bool        `json:"ownsOutput"`
+	WeightKeyCount       int         `json:"weightKeyCount"`
+	OpenSequenceCount    int         `json:"openSequenceCount"`
+	MaxOpenSequenceCount int         `json:"maxOpenSequenceCount"`
+	ForwardCount         int         `json:"forwardCount"`
+	KVCacheBytes         int         `json:"kvCacheBytes"`
+	RetainedBytes        int         `json:"retainedBytes"`
+	LoadedMemory         StageMemory `json:"loadedMemory"`
 }
 
 type PersistentWorkerState struct {
-	LoadedShards []PersistentShardSnapshot `json:"loadedShards"`
-	LoadCount    int                       `json:"loadCount"`
-	ForwardCount int                       `json:"forwardCount"`
-	KVCacheBytes int                       `json:"kvCacheBytes"`
-	Memory       StageMemory               `json:"memory"`
+	LoadedShards       []PersistentShardSnapshot `json:"loadedShards"`
+	LoadCount          int                       `json:"loadCount"`
+	ForwardCount       int                       `json:"forwardCount"`
+	KVCacheBytes       int                       `json:"kvCacheBytes"`
+	RetainedBytes      int                       `json:"retainedBytes"`
+	RetainedByteBudget int                       `json:"retainedByteBudget"`
+	Memory             StageMemory               `json:"memory"`
 }
 
 type StageMemory struct {

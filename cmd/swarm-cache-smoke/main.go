@@ -48,6 +48,7 @@ type smokeSummary struct {
 	AllFinalLogitsMatch         bool    `json:"allFinalLogitsMatch"`
 	PositionsValidated          bool    `json:"positionsValidated"`
 	MutationReplayValidated     bool    `json:"mutationReplayValidated"`
+	ResourceLimitsValidated     bool    `json:"resourceLimitsValidated"`
 	SequenceIsolationValidated  bool    `json:"sequenceIsolationValidated"`
 	ProducerKVCacheBytes        int     `json:"producerKVCacheBytes"`
 	ConsumerKVCacheBytes        int     `json:"consumerKVCacheBytes"`
@@ -246,6 +247,15 @@ func run() error {
 	}
 
 	positionsValidated, err := provePositionValidation(ctx, producer.caller, consumer.caller, plans[0])
+	if err != nil {
+		return err
+	}
+	resourceLimitsValidated, err := proveResourceLimits(
+		ctx,
+		producer.caller,
+		consumer.caller,
+		plans[0],
+	)
 	if err != nil {
 		return err
 	}
@@ -449,6 +459,7 @@ func run() error {
 		AllFinalLogitsMatch:         true,
 		PositionsValidated:          positionsValidated,
 		MutationReplayValidated:     mutationReplayValidated,
+		ResourceLimitsValidated:     resourceLimitsValidated,
 		SequenceIsolationValidated:  sequenceIsolation,
 		ProducerKVCacheBytes:        producerAfterDecode.KVCacheBytes,
 		ConsumerKVCacheBytes:        consumerAfterDecode.KVCacheBytes,
@@ -675,6 +686,130 @@ func provePositionValidation(
 		}
 	}
 	return true, nil
+}
+
+func proveResourceLimits(
+	ctx context.Context,
+	producer workerproc.PersistentCaller,
+	consumer workerproc.PersistentCaller,
+	plan *sequencePlan,
+) (bool, error) {
+	const budgetSequence = "cache-resource-budget"
+	if err := sequenceCommand(ctx, consumer, "openSequence", consumerShard, budgetSequence); err != nil {
+		return false, err
+	}
+	budgetOpen := true
+	defer func() {
+		if budgetOpen {
+			_ = sequenceCommand(ctx, consumer, "closeSequence", consumerShard, budgetSequence)
+		}
+	}()
+
+	longTokens := make([]int32, 129)
+	for index := range longTokens {
+		longTokens[index] = int32(index + 1)
+	}
+	boundary, err := infer(
+		ctx,
+		producer,
+		"forward",
+		producerShard,
+		plan.id,
+		0,
+		"tokens",
+		tokenTensor(longTokens),
+	)
+	if err != nil {
+		return false, fmt.Errorf("build retained-budget input: %w", err)
+	}
+	before, err := state(ctx, consumer)
+	if err != nil {
+		return false, err
+	}
+	if !expectWorkerError(
+		ctx,
+		consumer,
+		inferenceRequest(
+			"prefill",
+			consumerShard,
+			budgetSequence,
+			0,
+			"hidden",
+			boundary.Output,
+		),
+		"retained sequence state",
+	) {
+		return false, errors.New("oversized retained state was not rejected")
+	}
+	after, err := state(ctx, consumer)
+	if err != nil {
+		return false, err
+	}
+	if after.ForwardCount != before.ForwardCount || after.KVCacheBytes != before.KVCacheBytes ||
+		after.RetainedBytes != before.RetainedBytes {
+		return false, errors.New("retained-budget rejection mutated worker state")
+	}
+	if err := sequenceCommand(ctx, consumer, "closeSequence", consumerShard, budgetSequence); err != nil {
+		return false, err
+	}
+	budgetOpen = false
+
+	current, err := state(ctx, consumer)
+	if err != nil {
+		return false, err
+	}
+	shard, err := shardState(current, consumerShard)
+	if err != nil {
+		return false, err
+	}
+	if shard.MaxOpenSequenceCount <= shard.OpenSequenceCount {
+		return false, fmt.Errorf(
+			"invalid open sequence limit %d for %d open sequences",
+			shard.MaxOpenSequenceCount,
+			shard.OpenSequenceCount,
+		)
+	}
+	extraCount := shard.MaxOpenSequenceCount - shard.OpenSequenceCount
+	extraIDs := make([]string, 0, extraCount)
+	defer func() {
+		for _, sequenceID := range extraIDs {
+			_ = sequenceCommand(ctx, consumer, "closeSequence", consumerShard, sequenceID)
+		}
+	}()
+	for index := 0; index < extraCount; index++ {
+		sequenceID := fmt.Sprintf("cache-sequence-limit-%d", index)
+		if err := sequenceCommand(ctx, consumer, "openSequence", consumerShard, sequenceID); err != nil {
+			return false, err
+		}
+		extraIDs = append(extraIDs, sequenceID)
+	}
+	if !expectWorkerError(ctx, consumer, workerproc.PersistentRequest{
+		Command: "openSequence",
+		Sequence: &workerproc.PersistentSequenceRequest{
+			ShardID: consumerShard, SequenceID: "cache-sequence-limit-overflow",
+		},
+	}, "open sequence limit") {
+		return false, errors.New("open sequence limit was not enforced")
+	}
+	for _, sequenceID := range extraIDs {
+		if err := sequenceCommand(ctx, consumer, "closeSequence", consumerShard, sequenceID); err != nil {
+			return false, err
+		}
+	}
+	extraIDs = nil
+	return true, nil
+}
+
+func shardState(
+	state *workerproc.PersistentWorkerState,
+	shardID string,
+) (*workerproc.PersistentShardSnapshot, error) {
+	for index := range state.LoadedShards {
+		if state.LoadedShards[index].ShardID == shardID {
+			return &state.LoadedShards[index], nil
+		}
+	}
+	return nil, fmt.Errorf("state did not contain shard %s", shardID)
 }
 
 func inferenceRequest(

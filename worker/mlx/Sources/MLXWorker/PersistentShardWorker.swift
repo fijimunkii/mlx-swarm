@@ -94,8 +94,10 @@ struct PersistentShardSnapshot: Codable {
     let ownsOutput: Bool
     let weightKeyCount: Int
     let openSequenceCount: Int
+    let maxOpenSequenceCount: Int
     let forwardCount: Int
     let kvCacheBytes: Int
+    let retainedBytes: Int
     let loadedMemory: StageMemory
 }
 
@@ -104,6 +106,8 @@ struct PersistentWorkerState: Codable {
     let loadCount: Int
     let forwardCount: Int
     let kvCacheBytes: Int
+    let retainedBytes: Int
+    let retainedByteBudget: Int
     let memory: StageMemory
 }
 
@@ -113,11 +117,14 @@ private enum PersistentWorkerError: LocalizedError {
     case shardNotFound(String)
     case shardHasOpenSequences(String, Int)
     case sequenceAlreadyOpen(String, String)
+    case openSequenceLimit(String, Int)
     case sequenceNotFound(String, String)
     case sequenceAlreadyPrefilled(String, String)
     case sequenceNotPrefilled(String, String)
     case invalidPosition(String, String, got: UInt64, expected: UInt64)
     case cachePositionMismatch(String, String, got: Int, expected: Int)
+    case sequenceLengthLimit(String, String, got: Int, maximum: Int)
+    case retainedByteBudget(got: Int, maximum: Int)
     case unsupportedInputKind(String)
     case inputKindMismatch(String, got: String, expected: String)
 
@@ -133,6 +140,8 @@ private enum PersistentWorkerError: LocalizedError {
             return "shard \(shardID) has \(count) open sequences"
         case .sequenceAlreadyOpen(let shardID, let sequenceID):
             return "sequence \(sequenceID) is already open on shard \(shardID)"
+        case .openSequenceLimit(let shardID, let maximum):
+            return "shard \(shardID) reached its open sequence limit of \(maximum)"
         case .sequenceNotFound(let shardID, let sequenceID):
             return "sequence \(sequenceID) is not open on shard \(shardID)"
         case .sequenceAlreadyPrefilled(let shardID, let sequenceID):
@@ -143,6 +152,10 @@ private enum PersistentWorkerError: LocalizedError {
             return "sequence \(sequenceID) on shard \(shardID) received position \(got); expected \(expected)"
         case .cachePositionMismatch(let shardID, let sequenceID, let got, let expected):
             return "sequence \(sequenceID) on shard \(shardID) cache is at position \(got); expected \(expected)"
+        case .sequenceLengthLimit(let shardID, let sequenceID, let got, let maximum):
+            return "sequence \(sequenceID) on shard \(shardID) would reach position \(got); maximum is \(maximum)"
+        case .retainedByteBudget(let got, let maximum):
+            return "retained sequence state would use \(got) bytes; budget is \(maximum)"
         case .unsupportedInputKind(let kind):
             return "unsupported forward input kind \(kind)"
         case .inputKindMismatch(let shardID, let got, let expected):
@@ -367,6 +380,12 @@ final class PersistentShardService {
         guard shard.sequences[request.sequenceID] == nil else {
             throw PersistentWorkerError.sequenceAlreadyOpen(request.shardID, request.sequenceID)
         }
+        guard shard.sequences.count < configuration.maxOpenSequencesPerShard else {
+            throw PersistentWorkerError.openSequenceLimit(
+                request.shardID,
+                configuration.maxOpenSequencesPerShard
+            )
+        }
         shard.sequences[request.sequenceID] = PersistentSequenceState(
             cache: shard.stage.makeSequenceCache()
         )
@@ -443,6 +462,12 @@ final class PersistentShardService {
                 )
             }
             try validatePosition(request, sequence: sequence, expected: 0)
+            try validateMutationBudget(
+                request: request,
+                shard: shard,
+                sequence: sequence,
+                inputLength: inputLength
+            )
             output = try request.inputKind == "tokens"
                 ? shard.stage.prefill(tokens: input, cache: sequence.cache)
                 : shard.stage.prefill(hidden: input, cache: sequence.cache)
@@ -468,6 +493,12 @@ final class PersistentShardService {
                 request,
                 sequence: sequence,
                 expected: sequence.nextPosition
+            )
+            try validateMutationBudget(
+                request: request,
+                shard: shard,
+                sequence: sequence,
+                inputLength: inputLength
             )
             output = try request.inputKind == "tokens"
                 ? shard.stage.decode(tokens: input, cache: sequence.cache)
@@ -533,10 +564,7 @@ final class PersistentShardService {
         sequence: PersistentSequenceState,
         inputLength: Int
     ) throws {
-        let (nextPosition, overflow) = sequence.nextPosition.addingReportingOverflow(inputLength)
-        guard !overflow else {
-            throw PersistentWorkerError.invalidRequest("sequence position overflow")
-        }
+        let nextPosition = try projectedPosition(sequence: sequence, inputLength: inputLength)
         guard sequence.cache.position == nextPosition else {
             throw PersistentWorkerError.cachePositionMismatch(
                 request.shardID,
@@ -546,6 +574,53 @@ final class PersistentShardService {
             )
         }
         sequence.nextPosition = nextPosition
+    }
+
+    private func validateMutationBudget(
+        request: PersistentForwardRequest,
+        shard: PersistentLoadedShard,
+        sequence: PersistentSequenceState,
+        inputLength: Int
+    ) throws {
+        let nextPosition = try projectedPosition(sequence: sequence, inputLength: inputLength)
+        let maximum = shard.stage.inputMetadata.maximumSequenceLength
+        guard nextPosition <= maximum else {
+            throw PersistentWorkerError.sequenceLengthLimit(
+                request.shardID,
+                request.sequenceID,
+                got: nextPosition,
+                maximum: maximum
+            )
+        }
+
+        let currentSequenceBytes = retainedBytes(sequence: sequence)
+        let currentWorkerBytes = retainedBytes()
+        let estimatedCacheBytes = try sequence.cache.estimatedMemoryBytes(at: nextPosition)
+        let estimatedOutputBytes = try shard.stage.estimatedOutputBytes(inputLength: inputLength)
+        let (estimatedSequenceBytes, sequenceOverflow) = estimatedCacheBytes
+            .addingReportingOverflow(estimatedOutputBytes)
+        let workerWithoutSequence = max(0, currentWorkerBytes - currentSequenceBytes)
+        let (estimatedWorkerBytes, workerOverflow) = workerWithoutSequence
+            .addingReportingOverflow(estimatedSequenceBytes)
+        guard !sequenceOverflow, !workerOverflow,
+              estimatedWorkerBytes <= configuration.workerBudgetBytes
+        else {
+            throw PersistentWorkerError.retainedByteBudget(
+                got: sequenceOverflow || workerOverflow ? Int.max : estimatedWorkerBytes,
+                maximum: configuration.workerBudgetBytes
+            )
+        }
+    }
+
+    private func projectedPosition(
+        sequence: PersistentSequenceState,
+        inputLength: Int
+    ) throws -> Int {
+        let (nextPosition, overflow) = sequence.nextPosition.addingReportingOverflow(inputLength)
+        guard !overflow else {
+            throw PersistentWorkerError.invalidRequest("sequence position overflow")
+        }
+        return nextPosition
     }
 
     private func validateTokenInput(
@@ -612,6 +687,8 @@ final class PersistentShardService {
             loadCount: loadCount,
             forwardCount: forwardCount,
             kvCacheBytes: shards.values.reduce(0) { $0 + cacheBytes(shard: $1) },
+            retainedBytes: retainedBytes(),
+            retainedByteBudget: configuration.workerBudgetBytes,
             memory: CheckpointMemory.snapshot()
         )
     }
@@ -630,14 +707,40 @@ final class PersistentShardService {
             ownsOutput: shard.ownsOutput,
             weightKeyCount: shard.stage.weightKeyCount,
             openSequenceCount: shard.sequences.count,
+            maxOpenSequenceCount: configuration.maxOpenSequencesPerShard,
             forwardCount: shard.forwardCount,
             kvCacheBytes: cacheBytes(shard: shard),
+            retainedBytes: retainedBytes(shard: shard),
             loadedMemory: shard.loadedMemory
         )
     }
 
     private func cacheBytes(shard: PersistentLoadedShard) -> Int {
         shard.sequences.values.reduce(0) { $0 + $1.cache.memoryBytes }
+    }
+
+    private func retainedBytes() -> Int {
+        shards.values.reduce(0) { total, shard in
+            saturatedAdd(total, retainedBytes(shard: shard))
+        }
+    }
+
+    private func retainedBytes(shard: PersistentLoadedShard) -> Int {
+        shard.sequences.values.reduce(0) { total, sequence in
+            saturatedAdd(total, retainedBytes(sequence: sequence))
+        }
+    }
+
+    private func retainedBytes(sequence: PersistentSequenceState) -> Int {
+        saturatedAdd(
+            sequence.cache.memoryBytes,
+            sequence.completedMutation?.result.output.data.count ?? 0
+        )
+    }
+
+    private func saturatedAdd(_ left: Int, _ right: Int) -> Int {
+        let (result, overflow) = left.addingReportingOverflow(right)
+        return overflow ? Int.max : result
     }
 }
 

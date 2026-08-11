@@ -35,6 +35,7 @@ Current correctness proof (`mlx-community/gemma-3-270m-it-4bit`):
 - each shard owns adapter-defined KV caches keyed by shard and sequence; CI prefills two interleaved prompts once and reuses both shard caches for 32 decode steps per sequence
 - every distributed cached step matches the upstream full-checkpoint cached path at `rtol=atol=1e-4`; stale, skipped, conflicting, unknown, and closed sequence positions fail deterministically
 - KV memory is reported separately from resident weights and allocator cache; sequence teardown returns KV accounting to zero while the shard remains loaded
+- cached mutations are retry-safe by exact replay, and adapter-provided context/cache estimates enforce retained-state and open-sequence admission limits before inference
 
 ## M3 — chaos harness
 

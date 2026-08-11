@@ -64,6 +64,14 @@ advancing the cache. This content-based replay also works when a transport
 retry uses a new `requestID`. A stale request with different input remains an
 error. Advancing to the next position replaces the retained replay result.
 
+Admission is bounded before cache-mutating inference. Each architecture adapter
+reports its maximum context and conservatively estimates cache and output bytes;
+the worker rejects a mutation whose aggregate retained KV plus replay result
+would exceed the configured worker budget. It also caps open sequences per
+shard (16 in the current composition root), including empty sequences. State
+snapshots expose `retainedBytes`, `retainedByteBudget`, and each shard's
+`maxOpenSequenceCount` so the coordinator can observe these limits.
+
 The worker obtains cache objects from the selected architecture adapter. The
 Gemma 3 adapter uses rotating caches for sliding-window layers and standard
 caches for global-attention layers, including when a shard begins in the

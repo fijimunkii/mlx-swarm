@@ -60,6 +60,7 @@ struct CheckpointStageInputMetadata {
     let hiddenDTypes: Set<WireTensor.ElementType>
     let hiddenRank: Int
     let hiddenSize: Int
+    let maximumSequenceLength: Int
 }
 
 /// Adapter-owned, per-sequence incremental state. The worker can account for
@@ -68,12 +69,14 @@ struct CheckpointStageInputMetadata {
 protocol CheckpointShardSequenceCache: AnyObject {
     var position: Int { get }
     var memoryBytes: Int { get }
+    func estimatedMemoryBytes(at position: Int) throws -> Int
 }
 
 protocol CheckpointShardStage: AnyObject {
     var weightKeyCount: Int { get }
     var inputMetadata: CheckpointStageInputMetadata { get }
     func makeSequenceCache() -> any CheckpointShardSequenceCache
+    func estimatedOutputBytes(inputLength: Int) throws -> Int
     func forward(tokens: MLXArray) throws -> MLXArray
     func forward(hidden: MLXArray) throws -> MLXArray
     func prefill(
@@ -132,6 +135,7 @@ struct CheckpointShardAdapterRegistry: Sendable {
 struct CheckpointShardRuntimeConfiguration: Sendable {
     let adapterRegistry: CheckpointShardAdapterRegistry
     let workerBudgetBytes: Int
+    let maxOpenSequencesPerShard: Int
     let tokens: [Int32]
     let rtol: Float
     let atol: Float

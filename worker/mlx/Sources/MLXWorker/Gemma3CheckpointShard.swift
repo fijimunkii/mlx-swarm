@@ -4,11 +4,56 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
+private struct Gemma3ResourceConfiguration: Decodable {
+    let headDim: Int
+    let kvHeads: Int
+    let maximumSequenceLength: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case headDim = "head_dim"
+        case kvHeads = "num_key_value_heads"
+        case maximumSequenceLength = "max_position_embeddings"
+    }
+
+    private enum RootKeys: String, CodingKey {
+        case textConfig = "text_config"
+    }
+
+    init(from decoder: Decoder) throws {
+        let root = try decoder.container(keyedBy: RootKeys.self)
+        let values = if root.contains(.textConfig) {
+            try root.nestedContainer(keyedBy: CodingKeys.self, forKey: .textConfig)
+        } else {
+            try decoder.container(keyedBy: CodingKeys.self)
+        }
+        headDim = try values.decodeIfPresent(Int.self, forKey: .headDim) ?? 256
+        kvHeads = try values.decodeIfPresent(Int.self, forKey: .kvHeads) ?? 1
+        maximumSequenceLength =
+            try values.decodeIfPresent(Int.self, forKey: .maximumSequenceLength) ?? 32_768
+    }
+
+    func conservativeCacheBytesPerLayerPosition() throws -> Int {
+        guard headDim > 0, kvHeads > 0, maximumSequenceLength > 0 else {
+            throw CheckpointShardError.invalidBoundary("Gemma cache geometry must be positive")
+        }
+        // Two tensors (key/value), conservatively budgeted at Float32 width.
+        let (headBytes, headOverflow) = headDim.multipliedReportingOverflow(by: 4)
+        let (headsBytes, headsOverflow) = headBytes.multipliedReportingOverflow(by: kvHeads)
+        let (total, totalOverflow) = headsBytes.multipliedReportingOverflow(by: 2)
+        guard !headOverflow, !headsOverflow, !totalOverflow else {
+            throw CheckpointShardError.invalidBoundary("Gemma cache geometry overflows Int")
+        }
+        return total
+    }
+}
+
 private final class Gemma3CheckpointSequenceCache: CheckpointShardSequenceCache {
     let layers: [KVCache]
+    let bytesPerLayerPosition: Int
 
-    init(layers: [KVCache]) {
+    init(layers: [KVCache], bytesPerLayerPosition: Int) {
         self.layers = layers
+        self.bytesPerLayerPosition = bytesPerLayerPosition
     }
 
     var position: Int {
@@ -17,6 +62,27 @@ private final class Gemma3CheckpointSequenceCache: CheckpointShardSequenceCache 
 
     var memoryBytes: Int {
         layers.flatMap(\.state).reduce(0) { $0 + $1.nbytes }
+    }
+
+    func estimatedMemoryBytes(at position: Int) throws -> Int {
+        guard position >= 0 else {
+            throw CheckpointShardError.invalidSequenceCache("negative estimated position")
+        }
+        var total = 0
+        for layer in layers {
+            let retainedPositions = min(position, layer.maxSize ?? position)
+            let (layerBytes, layerOverflow) = retainedPositions.multipliedReportingOverflow(
+                by: bytesPerLayerPosition
+            )
+            let (nextTotal, totalOverflow) = total.addingReportingOverflow(layerBytes)
+            guard !layerOverflow, !totalOverflow else {
+                throw CheckpointShardError.invalidSequenceCache(
+                    "estimated cache memory overflows Int"
+                )
+            }
+            total = nextTotal
+        }
+        return max(total, memoryBytes)
     }
 }
 
@@ -29,6 +95,9 @@ private final class Gemma3CheckpointStage: CheckpointShardStage {
     let referenceModel: Gemma3TextModel?
     let hiddenSize: Int
     let vocabularySize: Int
+    let maximumSequenceLength: Int
+    let cacheBytesPerLayerPosition: Int
+    let ownsOutput: Bool
     let weightKeyCount: Int
 
     init(
@@ -40,6 +109,9 @@ private final class Gemma3CheckpointStage: CheckpointShardStage {
         referenceModel: Gemma3TextModel? = nil,
         hiddenSize: Int,
         vocabularySize: Int,
+        maximumSequenceLength: Int,
+        cacheBytesPerLayerPosition: Int,
+        ownsOutput: Bool,
         weightKeyCount: Int
     ) {
         self.embedding = embedding
@@ -50,6 +122,9 @@ private final class Gemma3CheckpointStage: CheckpointShardStage {
         self.referenceModel = referenceModel
         self.hiddenSize = hiddenSize
         self.vocabularySize = vocabularySize
+        self.maximumSequenceLength = maximumSequenceLength
+        self.cacheBytesPerLayerPosition = cacheBytesPerLayerPosition
+        self.ownsOutput = ownsOutput
         self.weightKeyCount = weightKeyCount
     }
 
@@ -60,16 +135,37 @@ private final class Gemma3CheckpointStage: CheckpointShardStage {
             vocabularySize: vocabularySize,
             hiddenDTypes: [.bfloat16],
             hiddenRank: 3,
-            hiddenSize: hiddenSize
+            hiddenSize: hiddenSize,
+            maximumSequenceLength: maximumSequenceLength
         )
     }
 
     func makeSequenceCache() -> any CheckpointShardSequenceCache {
         if let referenceModel {
-            return Gemma3CheckpointSequenceCache(layers: referenceModel.newCache())
+            return Gemma3CheckpointSequenceCache(
+                layers: referenceModel.newCache(),
+                bytesPerLayerPosition: cacheBytesPerLayerPosition
+            )
         }
         let caches = cachePrototypes.map { $0.copy() }
-        return Gemma3CheckpointSequenceCache(layers: caches)
+        return Gemma3CheckpointSequenceCache(
+            layers: caches,
+            bytesPerLayerPosition: cacheBytesPerLayerPosition
+        )
+    }
+
+    func estimatedOutputBytes(inputLength: Int) throws -> Int {
+        guard inputLength > 0 else {
+            throw CheckpointShardError.invalidBoundary("output length must be positive")
+        }
+        let width = ownsOutput ? vocabularySize : hiddenSize
+        let (elements, elementOverflow) = inputLength.multipliedReportingOverflow(by: width)
+        // Conservatively budget the retained result at Float32 width.
+        let (bytes, byteOverflow) = elements.multipliedReportingOverflow(by: 4)
+        guard !elementOverflow, !byteOverflow else {
+            throw CheckpointShardError.invalidBoundary("estimated output memory overflows Int")
+        }
+        return bytes
     }
 
     func forward(tokens: MLXArray) throws -> MLXArray {
@@ -242,6 +338,12 @@ struct Gemma3CheckpointShardAdapter: CheckpointShardAdapter {
             BaseConfiguration.self,
             from: checkpoint.configData
         )
+        let resourceConfig = try JSONDecoder().decode(
+            Gemma3ResourceConfiguration.self,
+            from: checkpoint.configData
+        )
+        let cacheBytesPerLayerPosition =
+            try resourceConfig.conservativeCacheBytesPerLayerPosition()
         let languageModel = try await LLMModelFactory.shared.typeRegistry.createModel(
             configuration: checkpoint.configData,
             modelType: checkpoint.modelType
@@ -283,6 +385,9 @@ struct Gemma3CheckpointShardAdapter: CheckpointShardAdapter {
                 referenceModel: model,
                 hiddenSize: inner.config.hiddenSize,
                 vocabularySize: inner.embedTokens.weight.shape[0],
+                maximumSequenceLength: resourceConfig.maximumSequenceLength,
+                cacheBytesPerLayerPosition: cacheBytesPerLayerPosition,
+                ownsOutput: true,
                 weightKeyCount: model.parameters().flattened().count
             )
         }
@@ -384,6 +489,9 @@ struct Gemma3CheckpointShardAdapter: CheckpointShardAdapter {
             lmHead: lmHead,
             hiddenSize: inner.config.hiddenSize,
             vocabularySize: inner.embedTokens.weight.shape[0],
+            maximumSequenceLength: resourceConfig.maximumSequenceLength,
+            cacheBytesPerLayerPosition: cacheBytesPerLayerPosition,
+            ownsOutput: request.ownsOutput,
             weightKeyCount: selected.count
         )
         if let embedding = stage.embedding {
