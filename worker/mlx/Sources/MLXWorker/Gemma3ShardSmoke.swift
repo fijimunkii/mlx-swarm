@@ -154,7 +154,7 @@ enum Gemma3ShardSmoke {
             precondition(expectedProduce.boundaryBytes == boundary.data.count)
         }
 
-        var hidden = boundary.materialize()
+        var hidden = try boundary.materialize()
         for layer in inner.layers[splitLayer...] {
             hidden = layer(hidden, mask: TinyGemma3Fixture.mask(), cache: nil)
         }

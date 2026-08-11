@@ -17,6 +17,7 @@ private enum WorkerCommand {
     case shardFinishStdio
     case checkpointShardProduceStdio
     case checkpointShardFinishStdio
+    case serveStdio
     case generate(prompt: String)
 
     init(arguments: [String]) throws {
@@ -59,6 +60,8 @@ private enum WorkerCommand {
             self = .checkpointShardProduceStdio
         case "checkpoint-shard-finish-stdio":
             self = .checkpointShardFinishStdio
+        case "serve-stdio":
+            self = .serveStdio
         case "generate":
             let prompt = arguments.dropFirst().joined(separator: " ")
             guard !prompt.isEmpty else {
@@ -79,7 +82,7 @@ private enum WorkerError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .usage(let message):
-            return "\(message)\nusage: mlx-worker [health | capabilities | shard-smoke | checkpoint-shard-smoke [model-id] | shard-produce <path> | shard-finish <path> | shard-produce-stdio | shard-finish-stdio | checkpoint-shard-produce-stdio | checkpoint-shard-finish-stdio | generate <prompt>]"
+            return "\(message)\nusage: mlx-worker [health | capabilities | shard-smoke | checkpoint-shard-smoke [model-id] | shard-produce <path> | shard-finish <path> | shard-produce-stdio | shard-finish-stdio | checkpoint-shard-produce-stdio | checkpoint-shard-finish-stdio | serve-stdio | generate <prompt>]"
         case .shardMismatch:
             return "sharded output did not match the single-range reference"
         case .checkpointShardMismatch:
@@ -180,6 +183,9 @@ struct MLXWorker {
                 throw WorkerError.checkpointShardMismatch
             }
             print(String(decoding: try encoder.encode(result), as: UTF8.self))
+
+        case .serveStdio:
+            await PersistentShardWorker.serveStdio()
 
         case .generate(let prompt):
             let configuration = LLMRegistry.smolLM_135M_4bit

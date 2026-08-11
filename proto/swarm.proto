@@ -34,11 +34,22 @@ message LoadShardRequest {
   string shard_id = 2;
   uint32 layer_start = 3;
   uint32 layer_end = 4;
+  bool owns_input = 5;
+  bool owns_output = 6;
 }
 
 message LoadShardResponse {
   bool loaded = 1;
   string error = 2;
+}
+
+message UnloadShardRequest {
+  string shard_id = 1;
+}
+
+message SequenceRequest {
+  string shard_id = 1;
+  string sequence_id = 2;
 }
 
 message ForwardRequest {
@@ -49,6 +60,7 @@ message ForwardRequest {
   uint64 position = 5;
   Tensor input = 6;
   uint64 deadline_unix_millis = 7;
+  string input_kind = 8; // tokens or hidden
 }
 
 message ForwardResponse {
@@ -56,4 +68,29 @@ message ForwardResponse {
   Tensor output = 2;
   uint64 compute_micros = 3;
   string error = 4;
+}
+
+message ShardState {
+  string shard_id = 1;
+  string model_id = 2;
+  string model_type = 3;
+  uint32 layer_start = 4;
+  uint32 layer_end = 5;
+  bool owns_input = 6;
+  bool owns_output = 7;
+  uint64 weight_key_count = 8;
+  uint64 open_sequence_count = 9;
+  uint64 forward_count = 10;
+  uint64 active_memory_bytes = 11;
+  uint64 cache_memory_bytes = 12;
+  uint64 peak_memory_bytes = 13;
+}
+
+message WorkerStateResponse {
+  repeated ShardState loaded_shards = 1;
+  uint64 load_count = 2;
+  uint64 forward_count = 3;
+  uint64 active_memory_bytes = 4;
+  uint64 cache_memory_bytes = 5;
+  uint64 peak_memory_bytes = 6;
 }

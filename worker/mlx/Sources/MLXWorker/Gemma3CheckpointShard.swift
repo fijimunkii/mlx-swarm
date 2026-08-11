@@ -10,6 +10,7 @@ private final class Gemma3CheckpointStage: CheckpointShardStage {
     let finalNorm: (any UnaryLayer)?
     let lmHead: (any UnaryLayer)?
     let hiddenSize: Int
+    let vocabularySize: Int
     let weightKeyCount: Int
 
     init(
@@ -18,6 +19,7 @@ private final class Gemma3CheckpointStage: CheckpointShardStage {
         finalNorm: (any UnaryLayer)?,
         lmHead: (any UnaryLayer)?,
         hiddenSize: Int,
+        vocabularySize: Int,
         weightKeyCount: Int
     ) {
         self.embedding = embedding
@@ -25,7 +27,19 @@ private final class Gemma3CheckpointStage: CheckpointShardStage {
         self.finalNorm = finalNorm
         self.lmHead = lmHead
         self.hiddenSize = hiddenSize
+        self.vocabularySize = vocabularySize
         self.weightKeyCount = weightKeyCount
+    }
+
+    var inputMetadata: CheckpointStageInputMetadata {
+        CheckpointStageInputMetadata(
+            tokenDType: .int32,
+            tokenRank: 2,
+            vocabularySize: vocabularySize,
+            hiddenDTypes: [.bfloat16],
+            hiddenRank: 3,
+            hiddenSize: hiddenSize
+        )
     }
 
     func forward(tokens: MLXArray) throws -> MLXArray {
@@ -209,6 +223,7 @@ struct Gemma3CheckpointShardAdapter: CheckpointShardAdapter {
             finalNorm: finalNorm,
             lmHead: lmHead,
             hiddenSize: inner.config.hiddenSize,
+            vocabularySize: inner.embedTokens.weight.shape[0],
             weightKeyCount: selected.count
         )
         if let embedding = stage.embedding {

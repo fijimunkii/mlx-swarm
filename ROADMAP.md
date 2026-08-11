@@ -17,6 +17,7 @@
 ## M2 — two-Mac pipeline
 
 - [x] load complementary contiguous layer ranges from a real checkpoint
+- [x] retain assigned shards in supervised workers across repeated forwards
 - [x] send hidden state from worker A to worker B
 - [ ] preserve per-shard KV cache
 - [x] compare final logits with single-node inference at an explicit tolerance
@@ -30,6 +31,7 @@ Current correctness proof (`mlx-community/gemma-3-270m-it-4bit`):
 - under a configured 128 MiB worker budget, measured peaks are about 119 MiB and 121 MiB while full-checkpoint inference peaks near 150 MiB
 - paired macOS CI runners exercise the boundary over Tailscale and require both correctness and memory proofs
 - checkpoint orchestration and filtered loading are architecture-neutral; `model_type` selects a registered adapter, with Gemma 3 as the first validated family
+- `swarmd` supervises a long-lived worker; CI loads one real shard once, reuses it for 100 forwards across two sequence IDs, then proves unload, shutdown, and crash behavior
 
 ## M3 — chaos harness
 

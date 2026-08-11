@@ -34,10 +34,16 @@ Test whether a dynamic pool of heterogeneous consumer devices can provide useful
 
 Each participating machine initially runs two processes:
 
-1. `swarmd` (Go): network-facing daemon and scheduler agent.
-2. `mlx-worker` (Swift): local MLX execution service.
+1. `swarmd` (Go): network-facing daemon, scheduler agent, and worker supervisor.
+2. `mlx-worker` (Swift): long-lived local MLX execution service.
 
 A process boundary gives us crash isolation and lets future worker backends implement the same protocol without changing the control plane.
+
+`swarmd` starts one `MLXWorker serve-stdio` child and exchanges framed,
+request-ID-correlated messages with it. The child retains assigned checkpoint
+stages until unload or shutdown. Unexpected EOF is a daemon health failure;
+only an acknowledged shutdown is treated as a clean exit. The concrete v0
+framing is described in `docs/persistent-worker-protocol.md`.
 
 Inside the Swift worker, checkpoint sharding has three boundaries:
 
@@ -55,7 +61,10 @@ The first useful primitive is conceptually:
 Forward(model, shard, sequence, position, tensor) -> tensor
 ```
 
-A shard is initially a contiguous transformer layer range. The worker owns weights and KV state for the shard while it is assigned.
+A shard is initially a contiguous transformer layer range. The worker owns its
+weights while it is assigned and validates that each forward's sequence ID was
+opened on that shard. Sequence registration is implemented; shard-local KV
+state is the next execution-layer milestone.
 
 The coordinator transfers only execution inputs/outputs and metadata during steady-state inference; weights remain cached on workers.
 
