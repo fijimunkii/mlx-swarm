@@ -2,10 +2,14 @@ package pooledproof
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/fijimunkii/mlx-swarm/internal/generation"
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
@@ -56,6 +60,80 @@ func TestRemoteCapabilities(t *testing.T) {
 	}
 	if !configuredLimit(capabilities, state, DefaultWorkerMemoryLimit) {
 		t.Fatalf("capabilities did not preserve configured limit: %+v", capabilities)
+	}
+}
+
+func TestRunRejectsDirtyWorkersBeforePreparingSession(t *testing.T) {
+	reference, err := LoadReference(filepath.Join(
+		"..", "..", "testdata", "pooled-memory", "gemma-3-text-12b-it-4bit.json",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dirty := &workerproc.PersistentWorkerState{
+		LoadedShards: []workerproc.PersistentShardSnapshot{{ShardID: "already-loaded"}},
+	}
+	producer, producerCommands := newProofWorkerServer(t, dirty)
+	defer producer.Close()
+	consumer, consumerCommands := newProofWorkerServer(t, &workerproc.PersistentWorkerState{})
+	defer consumer.Close()
+
+	_, err = Run(context.Background(), reference, RunConfig{
+		ProducerURL: producer.URL, ConsumerURL: consumer.URL,
+		ForwardTimeout: time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "workers must be clean") {
+		t.Fatalf("Run error = %v, want clean-worker rejection", err)
+	}
+	if got := producerCommands(); len(got) != 1 || got[0] != "state" {
+		t.Fatalf("producer commands = %v, want only initial state", got)
+	}
+	if got := consumerCommands(); len(got) != 1 || got[0] != "state" {
+		t.Fatalf("consumer commands = %v, want only initial state", got)
+	}
+}
+
+func newProofWorkerServer(
+	t *testing.T,
+	state *workerproc.PersistentWorkerState,
+) (*httptest.Server, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var commands []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/debug/worker/capabilities":
+			_, _ = w.Write([]byte(`{
+				"runtime":"mlx-swift",
+				"device":"gpu",
+				"physicalMemoryBytes":7516192768,
+				"mlxMemoryLimitBytes":6442450944,
+				"mlxCacheLimitBytes":67108864
+			}`))
+		case "/v1/worker/request":
+			var frame workerproc.PersistentRequest
+			if err := json.NewDecoder(request.Body).Decode(&frame); err != nil {
+				t.Errorf("decode persistent request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			commands = append(commands, frame.Command)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(workerproc.PersistentResponse{
+				RequestID: frame.RequestID,
+				OK:        true,
+				Result:    &workerproc.PersistentWorkerResult{State: state},
+			})
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	return server, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), commands...)
 	}
 }
 

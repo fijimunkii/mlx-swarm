@@ -304,6 +304,9 @@ func Run(ctx context.Context, reference Reference, config RunConfig) (Result, er
 		return Result{}, fmt.Errorf("consumer initial state: %w", err)
 	}
 	cleanAtStart := cleanWorker(producerInitial) && cleanWorker(consumerInitial)
+	if !cleanAtStart {
+		return Result{}, errors.New("producer and consumer workers must be clean before pooled-memory proof")
+	}
 
 	producerEvidence := WorkerEvidence{Endpoint: config.ProducerURL, Capabilities: producerCapabilities}
 	consumerEvidence := WorkerEvidence{Endpoint: config.ConsumerURL, Capabilities: consumerCapabilities}
