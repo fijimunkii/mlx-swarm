@@ -93,6 +93,34 @@ func TestOpenResponseFailureClosesAttemptedSequence(t *testing.T) {
 	assertNoFakeSequences(t, producer, consumer, reference)
 }
 
+func TestRejectedOpenDoesNotCloseExistingSequence(t *testing.T) {
+	producer, consumer, reference := fakeSwarm([]int32{3})
+	consumer.sequences["shared"] = true
+	session := newFakeSession(t, producer, consumer, reference)
+
+	_, err := session.Generate(context.Background(), Request{
+		Prompt: "hello", MaxTokens: 1, SequenceID: "shared",
+	})
+	var workerErr *workerproc.WorkerResponseError
+	if !errors.As(err, &workerErr) {
+		t.Fatalf("expected definitive worker rejection, got %v", err)
+	}
+	producer.mu.Lock()
+	producerCount := len(producer.sequences)
+	producer.mu.Unlock()
+	consumer.mu.Lock()
+	consumerRetained := consumer.sequences["shared"]
+	consumerCount := len(consumer.sequences)
+	consumer.mu.Unlock()
+	if producerCount != 0 || !consumerRetained || consumerCount != 1 {
+		t.Fatalf(
+			"unexpected sequence cleanup: producer=%d consumer=%d retained=%t",
+			producerCount, consumerCount, consumerRetained,
+		)
+	}
+	assertNoFakeSequences(t, producer, reference)
+}
+
 func TestGreedyTokenUsesFinalPositionAndLowestTie(t *testing.T) {
 	tensor := float32Tensor([]int{1, 2, 4}, []float32{
 		99, 0, 0, 0,
@@ -204,6 +232,12 @@ func (worker *fakeWorker) Call(
 		text := "decoded"
 		result.Text = &workerproc.PersistentTextResult{ModelID: request.Text.ModelID, Text: &text}
 	case "openSequence":
+		if worker.sequences[request.Sequence.SequenceID] {
+			return workerproc.PersistentResponse{}, &workerproc.WorkerResponseError{
+				RequestID: request.RequestID,
+				Message:   "sequence is already open",
+			}
+		}
 		worker.sequences[request.Sequence.SequenceID] = true
 		if worker.openErr != nil {
 			return workerproc.PersistentResponse{}, worker.openErr

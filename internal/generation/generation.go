@@ -225,11 +225,15 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 		}
 	}()
 	for _, target := range targets {
-		// Once an open is attempted its outcome can be ambiguous: the worker may
-		// apply the mutation after the caller's context expires but before the
-		// response is observed. Conservatively close every attempted target.
-		opened = append(opened, target)
-		if err := sequenceCommand(ctx, target.caller, "openSequence", target.shardID, request.SequenceID); err != nil {
+		err := sequenceCommand(ctx, target.caller, "openSequence", target.shardID, request.SequenceID)
+		var workerResponseErr *workerproc.WorkerResponseError
+		// Transport failures are ambiguous: the worker may apply the open after
+		// the caller stops waiting. A worker response is definitive, though, and
+		// must not let this request close a sequence it failed to create.
+		if err == nil || !errors.As(err, &workerResponseErr) {
+			opened = append(opened, target)
+		}
+		if err != nil {
 			return result, fmt.Errorf("open %s sequence: %w", target.name, err)
 		}
 	}
