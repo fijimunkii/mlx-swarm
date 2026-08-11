@@ -165,12 +165,17 @@ type PersistentClient struct {
 	stdin        io.WriteCloser
 	stderr       cappedTailBuffer
 	done         chan struct{}
-	writeMu      sync.Mutex
+	writes       chan persistentWrite
 	mu           sync.Mutex
 	pending      map[string]chan PersistentResponse
 	nextID       uint64
 	waitErr      error
 	expectedExit bool
+}
+
+type persistentWrite struct {
+	payload []byte
+	result  chan error
 }
 
 func StartPersistent(path string) (*PersistentClient, error) {
@@ -194,6 +199,7 @@ func StartPersistent(path string) (*PersistentClient, error) {
 		cmd:     cmd,
 		stdin:   stdin,
 		done:    make(chan struct{}),
+		writes:  make(chan persistentWrite),
 		pending: make(map[string]chan PersistentResponse),
 	}
 	cmd.Stderr = &client.stderr
@@ -201,6 +207,7 @@ func StartPersistent(path string) (*PersistentClient, error) {
 		_ = stdin.Close()
 		return nil, fmt.Errorf("start persistent worker: %w", err)
 	}
+	go client.writeLoop()
 	go client.readLoop(stdout)
 	return client, nil
 }
@@ -248,15 +255,25 @@ func (c *PersistentClient) Call(
 	}
 	payload = append(payload, '\n')
 
-	c.writeMu.Lock()
-	written, err := c.stdin.Write(payload)
-	c.writeMu.Unlock()
-	if err == nil && written != len(payload) {
-		err = io.ErrShortWrite
+	writeResult := make(chan error, 1)
+	select {
+	case c.writes <- persistentWrite{payload: payload, result: writeResult}:
+	case <-ctx.Done():
+		c.removePending(request.RequestID)
+		return PersistentResponse{}, ctx.Err()
+	case <-c.done:
+		return PersistentResponse{}, c.callError()
 	}
-	if err != nil {
-		_ = c.Kill()
-		return PersistentResponse{}, fmt.Errorf("write persistent worker request: %w", err)
+
+	select {
+	case err := <-writeResult:
+		if err != nil {
+			return PersistentResponse{}, fmt.Errorf("write persistent worker request: %w", err)
+		}
+	case <-ctx.Done():
+		return PersistentResponse{}, ctx.Err()
+	case <-c.done:
+		return PersistentResponse{}, c.callError()
 	}
 
 	select {
@@ -270,6 +287,27 @@ func (c *PersistentClient) Call(
 			return checkedResponse(result)
 		default:
 			return PersistentResponse{}, c.callError()
+		}
+	}
+}
+
+func (c *PersistentClient) writeLoop() {
+	for {
+		select {
+		case write := <-c.writes:
+			written, err := c.stdin.Write(write.payload)
+			if err == nil && written != len(write.payload) {
+				err = io.ErrShortWrite
+			}
+			if err != nil {
+				_ = c.Kill()
+			}
+			write.result <- err
+			if err != nil {
+				return
+			}
+		case <-c.done:
+			return
 		}
 	}
 }

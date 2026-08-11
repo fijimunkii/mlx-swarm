@@ -46,6 +46,12 @@ or `hidden` for an intermediate stage. A forward also carries `shardID`,
 `sequenceID`, and `position`; the worker rejects an unknown shard or a sequence
 that was not opened on that shard.
 
+Before constructing an MLX array, the worker rejects negative dimensions,
+shape multiplication overflow, and a byte count that does not exactly match
+the tensor shape and dtype. These checks apply to both token and hidden-state
+inputs, so malformed network payloads remain per-request errors rather than
+terminating the retained worker.
+
 ## Response and errors
 
 A success has `ok: true` and a command-specific `result`:
@@ -66,9 +72,12 @@ zero exit is considered clean only after the worker acknowledges `shutdown`.
 
 Canceling or timing out a Go request stops that caller's wait while leaving its
 ID reserved until the worker's late response is consumed and discarded. The
-supervised worker remains available. MLX kernels are not forcibly preempted in
-v0; an invocation that is already executing may finish before the serial worker
-handles the next frame.
+dedicated stdin writer preserves whole-frame ordering while allowing callers to
+observe cancellation even when another frame is queued or the child pipe is
+full. The supervised worker remains available. MLX kernels are not forcibly
+preempted in v0; an invocation that is already executing may finish before the
+serial worker handles the next frame. Failed shard loads clear released MLX
+cache allocations before the worker accepts another request.
 
 ## Security and limits
 

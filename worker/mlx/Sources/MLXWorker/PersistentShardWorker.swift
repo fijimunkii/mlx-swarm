@@ -251,6 +251,7 @@ final class PersistentShardService {
 
         Memory.clearCache()
         Memory.peakMemory = 0
+        defer { Memory.clearCache() }
         let stage = try await adapter.loadStage(
             checkpoint: checkpoint,
             request: CheckpointStageRequest(

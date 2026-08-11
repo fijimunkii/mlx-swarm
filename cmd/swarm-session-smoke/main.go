@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
@@ -36,6 +37,7 @@ type summary struct {
 	SequenceIsolation      bool                   `json:"sequenceIsolation"`
 	ShardIsolation         bool                   `json:"shardIsolation"`
 	InputKindValidation    bool                   `json:"inputKindValidation"`
+	TensorValidation       bool                   `json:"tensorValidation"`
 	CancellationReported   bool                   `json:"cancellationReported"`
 	CrashReported          bool                   `json:"crashReported"`
 	LoadedMemory           workerproc.StageMemory `json:"loadedMemory"`
@@ -209,6 +211,26 @@ func run() error {
 	})
 	responseErr = nil
 	inputKindValidation := errors.As(inputKindErr, &responseErr)
+	_, tensorValidationErr := client.Call(ctx, workerproc.PersistentRequest{
+		Command: "forward",
+		Forward: &workerproc.PersistentForwardRequest{
+			ShardID:    *shardID,
+			SequenceID: sequenceA,
+			Position:   0,
+			InputKind:  "tokens",
+			Input: workerproc.WireTensor{
+				Shape: []int{1, 2},
+				DType: "int32",
+				Data:  []byte{0},
+			},
+		},
+	})
+	responseErr = nil
+	tensorValidation := errors.As(tensorValidationErr, &responseErr) &&
+		strings.Contains(responseErr.Message, "invalid wire tensor byte count")
+	if _, err := call(ctx, client, workerproc.PersistentRequest{Command: "health"}); err != nil {
+		return fmt.Errorf("health after malformed tensor: %w", err)
+	}
 
 	stateResponse, err := call(ctx, client, workerproc.PersistentRequest{Command: "state"})
 	if err != nil {
@@ -228,8 +250,8 @@ func run() error {
 	if shard.OpenSequenceCount != 2 {
 		return fmt.Errorf("expected two open sequences, got %d", shard.OpenSequenceCount)
 	}
-	if !outputsStable || !sequenceIsolation || !shardIsolation || !inputKindValidation {
-		return errors.New("persistent worker output or identifier isolation failed")
+	if !outputsStable || !sequenceIsolation || !shardIsolation || !inputKindValidation || !tensorValidation {
+		return errors.New("persistent worker validation or identifier isolation failed")
 	}
 
 	for _, sequenceID := range []string{sequenceA, sequenceB} {
@@ -285,6 +307,7 @@ func run() error {
 		SequenceIsolation:      sequenceIsolation,
 		ShardIsolation:         shardIsolation,
 		InputKindValidation:    inputKindValidation,
+		TensorValidation:       tensorValidation,
 		CancellationReported:   cancellationReported,
 		CrashReported:          crashReported,
 		LoadedMemory:           shard.LoadedMemory,

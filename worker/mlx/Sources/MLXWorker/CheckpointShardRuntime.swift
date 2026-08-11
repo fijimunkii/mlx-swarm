@@ -298,7 +298,7 @@ enum CheckpointShardRuntime {
         secondStage = nil
 
         let matches = allClose(
-            expected.tensor.materialize(),
+            try expected.tensor.materialize(),
             output,
             rtol: Double(configuration.rtol),
             atol: Double(configuration.atol)

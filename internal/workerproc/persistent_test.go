@@ -128,6 +128,66 @@ printf '%s\n' '{"requestID":"request-2","ok":true,"result":{"status":"ok"}}'
 	}
 }
 
+func TestPersistentClientCancellationDoesNotWaitForBlockedWrite(t *testing.T) {
+	worker := writeWorkerScript(t, `#!/bin/sh
+read request
+printf '%s\n' '{"requestID":"ready","ok":true,"result":{"status":"ok"}}'
+while :; do :; done
+`)
+	client, err := StartPersistent(worker)
+	if err != nil {
+		t.Fatalf("StartPersistent: %v", err)
+	}
+	defer func() {
+		_ = client.Kill()
+		waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = client.Wait(waitCtx)
+	}()
+
+	readyCtx, cancelReady := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelReady()
+	if _, err := client.Call(readyCtx, PersistentRequest{RequestID: "ready", Command: "health"}); err != nil {
+		t.Fatalf("ready Call: %v", err)
+	}
+
+	largeRequest := PersistentRequest{
+		RequestID: "blocked-write",
+		Command:   "forward",
+		Forward: &PersistentForwardRequest{
+			ShardID:    "shard",
+			SequenceID: "sequence",
+			InputKind:  "hidden",
+			Input: WireTensor{
+				Shape: []int{1 << 20},
+				DType: "uint8",
+				Data:  bytes.Repeat([]byte{1}, 1<<20),
+			},
+		},
+	}
+	writeCtx, cancelWrite := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	started := time.Now()
+	_, err = client.Call(writeCtx, largeRequest)
+	cancelWrite()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("blocked write error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("blocked write cancellation took %v", elapsed)
+	}
+
+	queueCtx, cancelQueue := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	started = time.Now()
+	_, err = client.Call(queueCtx, PersistentRequest{RequestID: "blocked-queue", Command: "health"})
+	cancelQueue()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("queued write error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("queued write cancellation took %v", elapsed)
+	}
+}
+
 func TestPersistentClientRejectsUnmatchedResponseID(t *testing.T) {
 	worker := writeWorkerScript(t, `#!/bin/sh
 read request
