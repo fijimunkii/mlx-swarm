@@ -34,10 +34,13 @@ worker="worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
 "$worker" health
 "$worker" capabilities
 "$worker" shard-smoke
+"$worker" checkpoint-shard-smoke
 "$worker" generate "Reply with exactly: swarm online"
 ```
 
 `generate` uses MLX Swift LM's registered `mlx-community/SmolLM-135M-Instruct-4bit` model and downloads/caches its Hugging Face assets on first use.
+
+`checkpoint-shard-smoke` downloads/caches `mlx-community/gemma-3-270m-it-4bit`, runs its 18-layer checkpoint as two independently loaded 9-layer stages, and verifies their composed output against the full-checkpoint layer stack.
 
 ### Go-relayed two-process proof
 

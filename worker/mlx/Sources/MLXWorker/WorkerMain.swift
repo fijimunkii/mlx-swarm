@@ -10,6 +10,7 @@ private enum WorkerCommand {
     case health
     case capabilities
     case shardSmoke
+    case checkpointShardSmoke(modelID: String)
     case shardProduce(path: String)
     case shardFinish(path: String)
     case shardProduceStdio
@@ -29,6 +30,15 @@ private enum WorkerCommand {
             self = .capabilities
         case "shard-smoke":
             self = .shardSmoke
+        case "checkpoint-shard-smoke":
+            guard arguments.count <= 2 else {
+                throw WorkerError.usage("checkpoint-shard-smoke accepts at most one model id")
+            }
+            self = .checkpointShardSmoke(
+                modelID: arguments.count == 2
+                    ? arguments[1]
+                    : Gemma3CheckpointShard.defaultModelID
+            )
         case "shard-produce":
             guard arguments.count == 2 else {
                 throw WorkerError.usage("shard-produce requires an output path")
@@ -58,13 +68,16 @@ private enum WorkerCommand {
 private enum WorkerError: LocalizedError {
     case usage(String)
     case shardMismatch
+    case checkpointShardMismatch
 
     var errorDescription: String? {
         switch self {
         case .usage(let message):
-            return "\(message)\nusage: mlx-worker [health | capabilities | shard-smoke | shard-produce <path> | shard-finish <path> | shard-produce-stdio | shard-finish-stdio | generate <prompt>]"
+            return "\(message)\nusage: mlx-worker [health | capabilities | shard-smoke | checkpoint-shard-smoke [model-id] | shard-produce <path> | shard-finish <path> | shard-produce-stdio | shard-finish-stdio | generate <prompt>]"
         case .shardMismatch:
             return "sharded output did not match the single-range reference"
+        case .checkpointShardMismatch:
+            return "real checkpoint shard output did not match the full-checkpoint reference"
         }
     }
 }
@@ -101,6 +114,13 @@ struct MLXWorker {
             let result = Gemma3ShardSmoke.run()
             guard result.matchesSingleRange else {
                 throw WorkerError.shardMismatch
+            }
+            print(String(decoding: try encoder.encode(result), as: UTF8.self))
+
+        case .checkpointShardSmoke(let modelID):
+            let result = try await Gemma3CheckpointShard.run(modelID: modelID)
+            guard result.matchesFullCheckpoint else {
+                throw WorkerError.checkpointShardMismatch
             }
             print(String(decoding: try encoder.encode(result), as: UTF8.self))
 
