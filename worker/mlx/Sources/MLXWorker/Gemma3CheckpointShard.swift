@@ -1,4 +1,5 @@
 import Foundation
+import HuggingFace
 import MLX
 import MLXHuggingFace
 @_spi(GemmaEncoder) import MLXLLM
@@ -13,7 +14,7 @@ private struct SafetensorsIndex: Decodable {
     }
 }
 
-private struct StageMemory: Codable {
+struct StageMemory: Codable {
     let activeBytes: Int
     let cacheBytes: Int
     let peakBytes: Int
@@ -244,20 +245,47 @@ enum Gemma3CheckpointShard {
             owns(key: $0.key, range: range, includeEmbedding: includeEmbedding)
         }
 
-        if let quantization = baseConfig.perLayerQuantization {
-            quantize(model: model) { path, _ in
-                guard selected["\(path).scales"] != nil else {
-                    return nil
-                }
-                return quantization.quantization(layer: path)?.asTuple
+        // Apply each owned module independently. A sparse second-half `layers`
+        // update begins with empty array entries, which MLXNN cannot use when it
+        // replaces quantized child modules on the complete model.
+        if includeEmbedding {
+            let prefix = "model.embed_tokens."
+            if let quantization = baseConfig.perLayerQuantization,
+               selected["\(prefix)scales"] != nil,
+               let configuration = quantization.quantization(layer: "model.embed_tokens")
+            {
+                let embedding = QuantizedEmbedding(
+                    inner.embedTokens,
+                    groupSize: configuration.groupSize,
+                    bits: configuration.bits,
+                    mode: configuration.mode
+                )
+                try inner.update(
+                    modules: ModuleChildren.unflattened([("embed_tokens", embedding)]),
+                    verify: [.noUnusedKeys]
+                )
             }
+            try update(
+                module: inner.embedTokens,
+                from: selected,
+                prefix: prefix
+            )
         }
 
-        let parameters = ModuleParameters.unflattened(selected)
-        try model.update(
-            parameters: parameters,
-            verify: [.noUnusedKeys, .shapeMismatch]
-        )
+        for index in range {
+            let layer = inner.layers[index]
+            let prefix = "model.layers.\(index)."
+            if let quantization = baseConfig.perLayerQuantization {
+                quantize(model: layer) { path, _ in
+                    let fullPath = "model.layers.\(index).\(path)"
+                    guard selected["\(fullPath).scales"] != nil else {
+                        return nil
+                    }
+                    return quantization.quantization(layer: fullPath)?.asTuple
+                }
+            }
+            try update(module: layer, from: selected, prefix: prefix)
+        }
 
         // Keep only the owned module references. When this function returns the
         // parent Gemma3TextModel and every unowned random parameter can deallocate.
@@ -284,6 +312,25 @@ enum Gemma3CheckpointShard {
         let embedded = inner.embedTokens(tokens)
         let scale = MLXArray(sqrt(Float(inner.config.hiddenSize)), dtype: .bfloat16)
         return embedded * scale.asType(embedded.dtype)
+    }
+
+    private static func update(
+        module: Module,
+        from weights: [String: MLXArray],
+        prefix: String
+    ) throws {
+        let local: [String: MLXArray] = Dictionary(
+            uniqueKeysWithValues: weights.compactMap { key, value -> (String, MLXArray)? in
+                guard key.hasPrefix(prefix) else {
+                    return nil
+                }
+                return (String(key.dropFirst(prefix.count)), value)
+            }
+        )
+        try module.update(
+            parameters: ModuleParameters.unflattened(local),
+            verify: [.noUnusedKeys, .shapeMismatch]
+        )
     }
 
     private static func owns(

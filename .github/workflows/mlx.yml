@@ -53,6 +53,7 @@ jobs:
           "$worker" health
           "$worker" capabilities
           "$worker" shard-smoke
+          "$worker" checkpoint-shard-smoke
       - name: Relay shard across two worker processes with Go
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
@@ -112,6 +113,7 @@ jobs:
           "$worker" health
           "$worker" capabilities
           "$worker" shard-smoke
+          "$worker" checkpoint-shard-smoke
       - name: Relay shard across two local worker processes with Go
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
