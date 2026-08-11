@@ -3,7 +3,6 @@ package generation
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"math"
 	"sync"
@@ -190,25 +189,6 @@ func TestGreedyTokenUsesFinalPositionAndLowestTie(t *testing.T) {
 	}
 	if token != 1 {
 		t.Fatalf("greedy token = %d, want lowest tied index 1", token)
-	}
-}
-
-func TestCompareFinalLogitsReportsFiniteDifferenceFromZero(t *testing.T) {
-	got := float32Tensor([]int{1, 1, 1}, []float32{math.MaxFloat32})
-	want := float32Tensor([]int{1, 1, 1}, []float32{0})
-	absolute, relative, err := compareFinalLogits(got, want, 0, math.MaxFloat64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if math.IsNaN(absolute) || math.IsInf(absolute, 0) ||
-		math.IsNaN(relative) || math.IsInf(relative, 0) {
-		t.Fatalf("non-finite differences: absolute=%g relative=%g", absolute, relative)
-	}
-	if _, err := json.Marshal(Verification{
-		MaxAbsoluteDifference: absolute,
-		MaxRelativeDifference: relative,
-	}); err != nil {
-		t.Fatalf("marshal finite verification metrics: %v", err)
 	}
 }
 

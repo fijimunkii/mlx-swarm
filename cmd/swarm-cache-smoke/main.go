@@ -3,17 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"math"
 	"os"
 	"slices"
-	"strings"
 	"time"
 
+	"github.com/fijimunkii/mlx-swarm/internal/smoke"
+	"github.com/fijimunkii/mlx-swarm/internal/tensorcheck"
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
 
@@ -43,6 +42,7 @@ type smokeSummary struct {
 	Distributed                 bool    `json:"distributed"`
 	RTol                        float64 `json:"rtol"`
 	ATol                        float64 `json:"atol"`
+	LogitComparisons            int     `json:"logitComparisons"`
 	MaxAbsoluteDifference       float64 `json:"maxAbsoluteDifference"`
 	MaxRelativeDifference       float64 `json:"maxRelativeDifference"`
 	AllFinalLogitsMatch         bool    `json:"allFinalLogitsMatch"`
@@ -56,12 +56,6 @@ type smokeSummary struct {
 	ProducerAfterTeardownBytes  int     `json:"producerAfterTeardownBytes"`
 	ConsumerAfterTeardownBytes  int     `json:"consumerAfterTeardownBytes"`
 	ReferenceAfterTeardownBytes int     `json:"referenceAfterTeardownBytes"`
-}
-
-type managedClient struct {
-	caller workerproc.PersistentCaller
-	direct *workerproc.PersistentClient
-	clean  bool
 }
 
 func main() {
@@ -96,58 +90,49 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	producer, err := startDirect(*worker)
+	producer, err := smoke.OpenWorker(*worker, "")
 	if err != nil {
 		return fmt.Errorf("start producer worker: %w", err)
 	}
-	defer producer.terminate()
+	defer producer.Cleanup()
 
-	reference, err := startDirect(*worker)
+	reference, err := smoke.OpenWorker(*worker, "")
 	if err != nil {
 		return fmt.Errorf("start reference worker: %w", err)
 	}
-	defer reference.terminate()
+	defer reference.Cleanup()
 
-	var consumer *managedClient
-	if *peer == "" {
-		consumer, err = startDirect(*worker)
-		if err != nil {
-			return fmt.Errorf("start consumer worker: %w", err)
-		}
-		defer consumer.terminate()
-	} else {
-		httpClient, configureErr := workerproc.NewHTTPPersistentClient(*peer, nil)
-		if configureErr != nil {
-			return fmt.Errorf("configure consumer worker: %w", configureErr)
-		}
-		consumer = &managedClient{caller: httpClient}
+	consumer, err := smoke.OpenWorker(*worker, *peer)
+	if err != nil {
+		return fmt.Errorf("open consumer worker: %w", err)
 	}
+	defer consumer.Cleanup()
 
-	for name, client := range map[string]*managedClient{
+	for name, client := range map[string]*smoke.Worker{
 		"producer":  producer,
 		"consumer":  consumer,
 		"reference": reference,
 	} {
-		if _, err := call(ctx, client.caller, workerproc.PersistentRequest{Command: "health"}); err != nil {
+		if _, err := smoke.Call(ctx, client.Caller, workerproc.PersistentRequest{Command: "health"}); err != nil {
 			return fmt.Errorf("%s %w", name, err)
 		}
 	}
 
-	producerSnapshot, err := loadShard(ctx, producer.caller, workerproc.PersistentLoadShardRequest{
+	producerSnapshot, err := smoke.LoadShard(ctx, producer.Caller, workerproc.PersistentLoadShardRequest{
 		ModelID: *model, ShardID: producerShard,
 		LayerStart: 0, LayerEnd: *split, OwnsInput: true,
 	})
 	if err != nil {
 		return fmt.Errorf("load producer: %w", err)
 	}
-	consumerSnapshot, err := loadShard(ctx, consumer.caller, workerproc.PersistentLoadShardRequest{
+	consumerSnapshot, err := smoke.LoadShard(ctx, consumer.Caller, workerproc.PersistentLoadShardRequest{
 		ModelID: *model, ShardID: consumerShard,
 		LayerStart: *split, LayerEnd: *layers, OwnsOutput: true,
 	})
 	if err != nil {
 		return fmt.Errorf("load consumer: %w", err)
 	}
-	referenceSnapshot, err := loadShard(ctx, reference.caller, workerproc.PersistentLoadShardRequest{
+	referenceSnapshot, err := smoke.LoadShard(ctx, reference.Caller, workerproc.PersistentLoadShardRequest{
 		ModelID: *model, ShardID: referenceShard,
 		LayerStart: 0, LayerEnd: *layers, OwnsInput: true, OwnsOutput: true,
 	})
@@ -168,76 +153,70 @@ func run() error {
 		{id: sequenceA, prompt: []int32{1, 2, 3, 4, 5, 6}, tokenAdd: 32},
 		{id: sequenceB, prompt: []int32{11, 12, 13, 14}, tokenAdd: 96},
 	}
-	for _, plan := range plans {
-		for _, target := range []struct {
-			client workerproc.PersistentCaller
-			shard  string
-		}{
-			{producer.caller, producerShard},
-			{consumer.caller, consumerShard},
-			{reference.caller, referenceShard},
-		} {
-			if err := sequenceCommand(ctx, target.client, "openSequence", target.shard, plan.id); err != nil {
-				return err
-			}
-		}
+	targets := []smoke.SequenceTarget{
+		{Name: "producer", Caller: producer.Caller, ShardID: producerShard},
+		{Name: "consumer", Caller: consumer.Caller, ShardID: consumerShard},
+		{Name: "reference", Caller: reference.Caller, ShardID: referenceShard},
+	}
+	sequences, err := smoke.OpenSequences(ctx, targets, sequenceA, sequenceB)
+	if sequences != nil {
+		defer sequences.Cleanup()
+	}
+	if err != nil {
+		return err
 	}
 
-	maxAbsolute := 0.0
-	maxRelative := 0.0
+	var logitMetrics tensorcheck.Metrics
 	var lastBoundary workerproc.WireTensor
 	mutationReplayValidated := true
 	for _, plan := range plans {
-		prompt := tokenTensor(plan.prompt)
-		producerResult, err := infer(
-			ctx, producer.caller, "prefill", producerShard, plan.id, 0, "tokens", prompt,
+		prompt := smoke.TokenTensor(plan.prompt)
+		producerResult, err := smoke.Infer(
+			ctx, producer.Caller, "prefill", producerShard, plan.id, 0, "tokens", prompt,
 		)
 		if err != nil {
 			return err
 		}
 		if err := proveMutationReplay(
-			ctx, producer.caller, "prefill", producerShard, plan.id, 0, "tokens", prompt,
+			ctx, producer.Caller, "prefill", producerShard, plan.id, 0, "tokens", prompt,
 			producerResult,
 		); err != nil {
 			return fmt.Errorf("producer prefill replay for %s: %w", plan.id, err)
 		}
 		lastBoundary = producerResult.Output
-		consumerResult, err := infer(
-			ctx, consumer.caller, "prefill", consumerShard, plan.id, 0, "hidden",
+		consumerResult, err := smoke.Infer(
+			ctx, consumer.Caller, "prefill", consumerShard, plan.id, 0, "hidden",
 			producerResult.Output,
 		)
 		if err != nil {
 			return err
 		}
 		if err := proveMutationReplay(
-			ctx, consumer.caller, "prefill", consumerShard, plan.id, 0, "hidden",
+			ctx, consumer.Caller, "prefill", consumerShard, plan.id, 0, "hidden",
 			producerResult.Output, consumerResult,
 		); err != nil {
 			return fmt.Errorf("consumer prefill replay for %s: %w", plan.id, err)
 		}
-		referenceResult, err := infer(
-			ctx, reference.caller, "prefill", referenceShard, plan.id, 0, "tokens", prompt,
+		referenceResult, err := smoke.Infer(
+			ctx, reference.Caller, "prefill", referenceShard, plan.id, 0, "tokens", prompt,
 		)
 		if err != nil {
 			return err
 		}
 		if err := proveMutationReplay(
-			ctx, reference.caller, "prefill", referenceShard, plan.id, 0, "tokens", prompt,
+			ctx, reference.Caller, "prefill", referenceShard, plan.id, 0, "tokens", prompt,
 			referenceResult,
 		); err != nil {
 			return fmt.Errorf("reference prefill replay for %s: %w", plan.id, err)
 		}
-		absolute, relative, err := compareFinalLogits(
+		if err := logitMetrics.Compare(
 			consumerResult.Output,
 			referenceResult.Output,
 			*rtol,
 			*atol,
-		)
-		if err != nil {
+		); err != nil {
 			return fmt.Errorf("prefill logits for %s: %w", plan.id, err)
 		}
-		maxAbsolute = math.Max(maxAbsolute, absolute)
-		maxRelative = math.Max(maxRelative, relative)
 		plan.next = uint64(len(plan.prompt))
 		if producerResult.NextPosition != plan.next ||
 			consumerResult.NextPosition != plan.next ||
@@ -246,29 +225,29 @@ func run() error {
 		}
 	}
 
-	positionsValidated, err := provePositionValidation(ctx, producer.caller, consumer.caller, plans[0])
+	positionsValidated, err := provePositionValidation(ctx, producer.Caller, consumer.Caller, plans[0])
 	if err != nil {
 		return err
 	}
 	resourceLimitsValidated, err := proveResourceLimits(
 		ctx,
-		producer.caller,
-		consumer.caller,
+		producer.Caller,
+		consumer.Caller,
 		plans[0],
 	)
 	if err != nil {
 		return err
 	}
 
-	producerAfterPrefill, err := state(ctx, producer.caller)
+	producerAfterPrefill, err := smoke.State(ctx, producer.Caller)
 	if err != nil {
 		return err
 	}
-	consumerAfterPrefill, err := state(ctx, consumer.caller)
+	consumerAfterPrefill, err := smoke.State(ctx, consumer.Caller)
 	if err != nil {
 		return err
 	}
-	referenceAfterPrefill, err := state(ctx, reference.caller)
+	referenceAfterPrefill, err := smoke.State(ctx, reference.Caller)
 	if err != nil {
 		return err
 	}
@@ -284,24 +263,24 @@ func run() error {
 
 	for step := 0; step < *steps; step++ {
 		for _, plan := range plans {
-			token := tokenTensor([]int32{plan.tokenAdd + int32(step)})
-			producerResult, err := infer(
-				ctx, producer.caller, "decode", producerShard, plan.id, plan.next, "tokens", token,
+			token := smoke.TokenTensor([]int32{plan.tokenAdd + int32(step)})
+			producerResult, err := smoke.Infer(
+				ctx, producer.Caller, "decode", producerShard, plan.id, plan.next, "tokens", token,
 			)
 			if err != nil {
 				return fmt.Errorf("producer decode %s step %d: %w", plan.id, step, err)
 			}
 			if step == 0 {
 				if err := proveMutationReplay(
-					ctx, producer.caller, "decode", producerShard, plan.id, plan.next, "tokens",
+					ctx, producer.Caller, "decode", producerShard, plan.id, plan.next, "tokens",
 					token, producerResult,
 				); err != nil {
 					return fmt.Errorf("producer decode replay for %s: %w", plan.id, err)
 				}
 			}
 			lastBoundary = producerResult.Output
-			consumerResult, err := infer(
-				ctx, consumer.caller, "decode", consumerShard, plan.id, plan.next, "hidden",
+			consumerResult, err := smoke.Infer(
+				ctx, consumer.Caller, "decode", consumerShard, plan.id, plan.next, "hidden",
 				producerResult.Output,
 			)
 			if err != nil {
@@ -309,37 +288,34 @@ func run() error {
 			}
 			if step == 0 {
 				if err := proveMutationReplay(
-					ctx, consumer.caller, "decode", consumerShard, plan.id, plan.next, "hidden",
+					ctx, consumer.Caller, "decode", consumerShard, plan.id, plan.next, "hidden",
 					producerResult.Output, consumerResult,
 				); err != nil {
 					return fmt.Errorf("consumer decode replay for %s: %w", plan.id, err)
 				}
 			}
-			referenceResult, err := infer(
-				ctx, reference.caller, "decode", referenceShard, plan.id, plan.next, "tokens", token,
+			referenceResult, err := smoke.Infer(
+				ctx, reference.Caller, "decode", referenceShard, plan.id, plan.next, "tokens", token,
 			)
 			if err != nil {
 				return fmt.Errorf("reference decode %s step %d: %w", plan.id, step, err)
 			}
 			if step == 0 {
 				if err := proveMutationReplay(
-					ctx, reference.caller, "decode", referenceShard, plan.id, plan.next, "tokens",
+					ctx, reference.Caller, "decode", referenceShard, plan.id, plan.next, "tokens",
 					token, referenceResult,
 				); err != nil {
 					return fmt.Errorf("reference decode replay for %s: %w", plan.id, err)
 				}
 			}
-			absolute, relative, err := compareFinalLogits(
+			if err := logitMetrics.Compare(
 				consumerResult.Output,
 				referenceResult.Output,
 				*rtol,
 				*atol,
-			)
-			if err != nil {
+			); err != nil {
 				return fmt.Errorf("decode logits for %s step %d: %w", plan.id, step, err)
 			}
-			maxAbsolute = math.Max(maxAbsolute, absolute)
-			maxRelative = math.Max(maxRelative, relative)
 			plan.next++
 			if producerResult.NextPosition != plan.next ||
 				consumerResult.NextPosition != plan.next ||
@@ -348,58 +324,59 @@ func run() error {
 			}
 		}
 	}
+	expectedComparisons := len(plans) * (*steps + 1)
+	if logitMetrics.Comparisons != expectedComparisons {
+		return fmt.Errorf(
+			"compared %d final-logit pairs, want %d",
+			logitMetrics.Comparisons,
+			expectedComparisons,
+		)
+	}
 
-	producerAfterDecode, err := state(ctx, producer.caller)
+	producerAfterDecode, err := smoke.State(ctx, producer.Caller)
 	if err != nil {
 		return err
 	}
-	consumerAfterDecode, err := state(ctx, consumer.caller)
+	consumerAfterDecode, err := smoke.State(ctx, consumer.Caller)
 	if err != nil {
 		return err
 	}
-	referenceAfterDecode, err := state(ctx, reference.caller)
+	referenceAfterDecode, err := smoke.State(ctx, reference.Caller)
 	if err != nil {
 		return err
 	}
 
 	sequenceIsolation := true
-	for _, target := range []struct {
-		client workerproc.PersistentCaller
-		shard  string
-	}{
-		{producer.caller, producerShard},
-		{consumer.caller, consumerShard},
-		{reference.caller, referenceShard},
-	} {
-		if err := sequenceCommand(ctx, target.client, "closeSequence", target.shard, sequenceB); err != nil {
-			return err
-		}
-		if !expectWorkerError(ctx, target.client, workerproc.PersistentRequest{
+	if err := sequences.CloseSequence(ctx, sequenceB); err != nil {
+		return err
+	}
+	for _, target := range targets {
+		if !smoke.ExpectWorkerError(ctx, target.Caller, workerproc.PersistentRequest{
 			Command: "decode",
 			Forward: &workerproc.PersistentForwardRequest{
-				ShardID: target.shard, SequenceID: sequenceB, Position: plans[1].next,
-				InputKind: inputKind(target.shard), Input: closedInput(target.shard, lastBoundary),
+				ShardID: target.ShardID, SequenceID: sequenceB, Position: plans[1].next,
+				InputKind: inputKind(target.ShardID), Input: closedInput(target.ShardID, lastBoundary),
 			},
 		}, "is not open") {
 			sequenceIsolation = false
 		}
-		if err := sequenceCommand(ctx, target.client, "closeSequence", target.shard, sequenceA); err != nil {
-			return err
-		}
+	}
+	if err := sequences.Close(ctx); err != nil {
+		return err
 	}
 	if !sequenceIsolation {
 		return errors.New("a closed sequence accepted another decode")
 	}
 
-	producerAfterTeardown, err := state(ctx, producer.caller)
+	producerAfterTeardown, err := smoke.State(ctx, producer.Caller)
 	if err != nil {
 		return err
 	}
-	consumerAfterTeardown, err := state(ctx, consumer.caller)
+	consumerAfterTeardown, err := smoke.State(ctx, consumer.Caller)
 	if err != nil {
 		return err
 	}
-	referenceAfterTeardown, err := state(ctx, reference.caller)
+	referenceAfterTeardown, err := smoke.State(ctx, reference.Caller)
 	if err != nil {
 		return err
 	}
@@ -418,30 +395,19 @@ func run() error {
 		}
 	}
 
-	for _, target := range []struct {
-		client workerproc.PersistentCaller
-		shard  string
-	}{
-		{producer.caller, producerShard},
-		{consumer.caller, consumerShard},
-		{reference.caller, referenceShard},
-	} {
-		if _, err := call(ctx, target.client, workerproc.PersistentRequest{
+	for _, target := range targets {
+		if _, err := smoke.Call(ctx, target.Caller, workerproc.PersistentRequest{
 			Command: "unloadShard",
-			Shard:   &workerproc.PersistentShardRequest{ShardID: target.shard},
+			Shard:   &workerproc.PersistentShardRequest{ShardID: target.ShardID},
 		}); err != nil {
 			return err
 		}
 	}
 
-	for _, client := range []*managedClient{producer, consumer, reference} {
-		if client.direct == nil {
-			continue
-		}
-		if err := client.direct.Shutdown(ctx); err != nil {
+	for _, client := range []*smoke.Worker{producer, consumer, reference} {
+		if err := client.Shutdown(ctx); err != nil {
 			return fmt.Errorf("shutdown worker: %w", err)
 		}
-		client.clean = true
 	}
 
 	summary := smokeSummary{
@@ -454,8 +420,9 @@ func run() error {
 		Distributed:                 *peer != "",
 		RTol:                        *rtol,
 		ATol:                        *atol,
-		MaxAbsoluteDifference:       maxAbsolute,
-		MaxRelativeDifference:       maxRelative,
+		LogitComparisons:            logitMetrics.Comparisons,
+		MaxAbsoluteDifference:       logitMetrics.MaxAbsoluteDifference,
+		MaxRelativeDifference:       logitMetrics.MaxRelativeDifference,
 		AllFinalLogitsMatch:         true,
 		PositionsValidated:          positionsValidated,
 		MutationReplayValidated:     mutationReplayValidated,
@@ -476,106 +443,6 @@ func run() error {
 	return nil
 }
 
-func startDirect(worker string) (*managedClient, error) {
-	client, err := workerproc.StartPersistent(worker)
-	if err != nil {
-		return nil, err
-	}
-	return &managedClient{caller: client, direct: client}, nil
-}
-
-func (c *managedClient) terminate() {
-	if c == nil || c.direct == nil || c.clean {
-		return
-	}
-	_ = c.direct.Kill()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = c.direct.Wait(ctx)
-}
-
-func call(
-	ctx context.Context,
-	client workerproc.PersistentCaller,
-	request workerproc.PersistentRequest,
-) (workerproc.PersistentResponse, error) {
-	response, err := client.Call(ctx, request)
-	if err != nil {
-		return workerproc.PersistentResponse{}, fmt.Errorf("%s: %w", request.Command, err)
-	}
-	return response, nil
-}
-
-func loadShard(
-	ctx context.Context,
-	client workerproc.PersistentCaller,
-	request workerproc.PersistentLoadShardRequest,
-) (*workerproc.PersistentShardSnapshot, error) {
-	response, err := call(ctx, client, workerproc.PersistentRequest{
-		Command:   "loadShard",
-		LoadShard: &request,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if response.Result == nil || response.Result.Shard == nil {
-		return nil, errors.New("loadShard returned no shard snapshot")
-	}
-	return response.Result.Shard, nil
-}
-
-func sequenceCommand(
-	ctx context.Context,
-	client workerproc.PersistentCaller,
-	command string,
-	shardID string,
-	sequenceID string,
-) error {
-	_, err := call(ctx, client, workerproc.PersistentRequest{
-		Command: command,
-		Sequence: &workerproc.PersistentSequenceRequest{
-			ShardID: shardID, SequenceID: sequenceID,
-		},
-	})
-	return err
-}
-
-func infer(
-	ctx context.Context,
-	client workerproc.PersistentCaller,
-	command string,
-	shardID string,
-	sequenceID string,
-	position uint64,
-	inputKind string,
-	input workerproc.WireTensor,
-) (*workerproc.PersistentForwardResult, error) {
-	response, err := call(ctx, client, workerproc.PersistentRequest{
-		Command: command,
-		Forward: &workerproc.PersistentForwardRequest{
-			ShardID: shardID, SequenceID: sequenceID, Position: position,
-			InputKind: inputKind, Input: input,
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	if response.Result == nil || response.Result.Forward == nil {
-		return nil, fmt.Errorf("%s returned no tensor", command)
-	}
-	result := response.Result.Forward
-	if result.Operation != command || result.Position != position || result.KVCacheBytes == 0 {
-		return nil, fmt.Errorf(
-			"%s returned inconsistent metadata: operation=%s position=%d kv=%d",
-			command,
-			result.Operation,
-			result.Position,
-			result.KVCacheBytes,
-		)
-	}
-	return result, nil
-}
-
 func proveMutationReplay(
 	ctx context.Context,
 	client workerproc.PersistentCaller,
@@ -587,15 +454,15 @@ func proveMutationReplay(
 	input workerproc.WireTensor,
 	want *workerproc.PersistentForwardResult,
 ) error {
-	before, err := state(ctx, client)
+	before, err := smoke.State(ctx, client)
 	if err != nil {
 		return fmt.Errorf("state before replay: %w", err)
 	}
-	got, err := infer(ctx, client, command, shardID, sequenceID, position, inputKind, input)
+	got, err := smoke.Infer(ctx, client, command, shardID, sequenceID, position, inputKind, input)
 	if err != nil {
 		return err
 	}
-	after, err := state(ctx, client)
+	after, err := smoke.State(ctx, client)
 	if err != nil {
 		return fmt.Errorf("state after replay: %w", err)
 	}
@@ -629,28 +496,14 @@ func equalTensor(left workerproc.WireTensor, right workerproc.WireTensor) bool {
 		bytes.Equal(left.Data, right.Data)
 }
 
-func state(
-	ctx context.Context,
-	client workerproc.PersistentCaller,
-) (*workerproc.PersistentWorkerState, error) {
-	response, err := call(ctx, client, workerproc.PersistentRequest{Command: "state"})
-	if err != nil {
-		return nil, err
-	}
-	if response.Result == nil || response.Result.State == nil {
-		return nil, errors.New("state returned no snapshot")
-	}
-	return response.Result.State, nil
-}
-
 func provePositionValidation(
 	ctx context.Context,
 	producer workerproc.PersistentCaller,
 	consumer workerproc.PersistentCaller,
 	plan *sequencePlan,
 ) (bool, error) {
-	producerInput := tokenTensor([]int32{7})
-	probe, err := infer(
+	producerInput := smoke.TokenTensor([]int32{7})
+	probe, err := smoke.Infer(
 		ctx,
 		producer,
 		"forward",
@@ -669,14 +522,14 @@ func provePositionValidation(
 		request workerproc.PersistentRequest
 		want    string
 	}{
-		{producer, inferenceRequest("decode", producerShard, plan.id, plan.next-1, "tokens", producerInput), "expected"},
-		{producer, inferenceRequest("decode", producerShard, plan.id, plan.next+1, "tokens", producerInput), "expected"},
-		{producer, inferenceRequest("prefill", producerShard, plan.id, 0, "tokens", producerInput), "already prefilled"},
-		{producer, inferenceRequest("decode", producerShard, "unknown-sequence", 0, "tokens", producerInput), "is not open"},
-		{consumer, inferenceRequest("decode", consumerShard, plan.id, plan.next+1, "hidden", consumerInput), "expected"},
+		{producer, smoke.InferenceRequest("decode", producerShard, plan.id, plan.next-1, "tokens", producerInput), "expected"},
+		{producer, smoke.InferenceRequest("decode", producerShard, plan.id, plan.next+1, "tokens", producerInput), "expected"},
+		{producer, smoke.InferenceRequest("prefill", producerShard, plan.id, 0, "tokens", producerInput), "already prefilled"},
+		{producer, smoke.InferenceRequest("decode", producerShard, "unknown-sequence", 0, "tokens", producerInput), "is not open"},
+		{consumer, smoke.InferenceRequest("decode", consumerShard, plan.id, plan.next+1, "hidden", consumerInput), "expected"},
 	}
 	for _, check := range checks {
-		if !expectWorkerError(ctx, check.client, check.request, check.want) {
+		if !smoke.ExpectWorkerError(ctx, check.client, check.request, check.want) {
 			return false, fmt.Errorf(
 				"%s %s did not fail with %q",
 				check.request.Command,
@@ -694,14 +547,16 @@ func proveResourceLimits(
 	consumer workerproc.PersistentCaller,
 	plan *sequencePlan,
 ) (bool, error) {
+	producerTarget := smoke.SequenceTarget{Caller: producer, ShardID: producerShard}
+	consumerTarget := smoke.SequenceTarget{Caller: consumer, ShardID: consumerShard}
 	const cacheBudgetSequence = "cache-kv-budget"
-	if err := sequenceCommand(ctx, producer, "openSequence", producerShard, cacheBudgetSequence); err != nil {
+	if err := smoke.SequenceCommand(ctx, producerTarget, "openSequence", cacheBudgetSequence); err != nil {
 		return false, err
 	}
 	cacheBudgetOpen := true
 	defer func() {
 		if cacheBudgetOpen {
-			_ = sequenceCommand(ctx, producer, "closeSequence", producerShard, cacheBudgetSequence)
+			_ = smoke.SequenceCommand(ctx, producerTarget, "closeSequence", cacheBudgetSequence)
 		}
 	}()
 
@@ -709,26 +564,26 @@ func proveResourceLimits(
 	for index := range longPrompt {
 		longPrompt[index] = int32(index%128 + 1)
 	}
-	producerBefore, err := state(ctx, producer)
+	producerBefore, err := smoke.State(ctx, producer)
 	if err != nil {
 		return false, err
 	}
-	if !expectWorkerError(
+	if !smoke.ExpectWorkerError(
 		ctx,
 		producer,
-		inferenceRequest(
+		smoke.InferenceRequest(
 			"prefill",
 			producerShard,
 			cacheBudgetSequence,
 			0,
 			"tokens",
-			tokenTensor(longPrompt),
+			smoke.TokenTensor(longPrompt),
 		),
 		"retained sequence state",
 	) {
 		return false, errors.New("oversized initial rotating-cache write was not rejected")
 	}
-	producerAfter, err := state(ctx, producer)
+	producerAfter, err := smoke.State(ctx, producer)
 	if err != nil {
 		return false, err
 	}
@@ -737,19 +592,19 @@ func proveResourceLimits(
 		producerAfter.RetainedBytes != producerBefore.RetainedBytes {
 		return false, errors.New("rotating-cache budget rejection mutated worker state")
 	}
-	if err := sequenceCommand(ctx, producer, "closeSequence", producerShard, cacheBudgetSequence); err != nil {
+	if err := smoke.SequenceCommand(ctx, producerTarget, "closeSequence", cacheBudgetSequence); err != nil {
 		return false, err
 	}
 	cacheBudgetOpen = false
 
 	const budgetSequence = "cache-resource-budget"
-	if err := sequenceCommand(ctx, consumer, "openSequence", consumerShard, budgetSequence); err != nil {
+	if err := smoke.SequenceCommand(ctx, consumerTarget, "openSequence", budgetSequence); err != nil {
 		return false, err
 	}
 	budgetOpen := true
 	defer func() {
 		if budgetOpen {
-			_ = sequenceCommand(ctx, consumer, "closeSequence", consumerShard, budgetSequence)
+			_ = smoke.SequenceCommand(ctx, consumerTarget, "closeSequence", budgetSequence)
 		}
 	}()
 
@@ -757,7 +612,7 @@ func proveResourceLimits(
 	for index := range longTokens {
 		longTokens[index] = int32(index + 1)
 	}
-	boundary, err := infer(
+	boundary, err := smoke.Infer(
 		ctx,
 		producer,
 		"forward",
@@ -765,19 +620,19 @@ func proveResourceLimits(
 		plan.id,
 		0,
 		"tokens",
-		tokenTensor(longTokens),
+		smoke.TokenTensor(longTokens),
 	)
 	if err != nil {
 		return false, fmt.Errorf("build retained-budget input: %w", err)
 	}
-	before, err := state(ctx, consumer)
+	before, err := smoke.State(ctx, consumer)
 	if err != nil {
 		return false, err
 	}
-	if !expectWorkerError(
+	if !smoke.ExpectWorkerError(
 		ctx,
 		consumer,
-		inferenceRequest(
+		smoke.InferenceRequest(
 			"prefill",
 			consumerShard,
 			budgetSequence,
@@ -789,7 +644,7 @@ func proveResourceLimits(
 	) {
 		return false, errors.New("oversized retained state was not rejected")
 	}
-	after, err := state(ctx, consumer)
+	after, err := smoke.State(ctx, consumer)
 	if err != nil {
 		return false, err
 	}
@@ -797,12 +652,12 @@ func proveResourceLimits(
 		after.RetainedBytes != before.RetainedBytes {
 		return false, errors.New("retained-budget rejection mutated worker state")
 	}
-	if err := sequenceCommand(ctx, consumer, "closeSequence", consumerShard, budgetSequence); err != nil {
+	if err := smoke.SequenceCommand(ctx, consumerTarget, "closeSequence", budgetSequence); err != nil {
 		return false, err
 	}
 	budgetOpen = false
 
-	current, err := state(ctx, consumer)
+	current, err := smoke.State(ctx, consumer)
 	if err != nil {
 		return false, err
 	}
@@ -821,17 +676,17 @@ func proveResourceLimits(
 	extraIDs := make([]string, 0, extraCount)
 	defer func() {
 		for _, sequenceID := range extraIDs {
-			_ = sequenceCommand(ctx, consumer, "closeSequence", consumerShard, sequenceID)
+			_ = smoke.SequenceCommand(ctx, consumerTarget, "closeSequence", sequenceID)
 		}
 	}()
 	for index := 0; index < extraCount; index++ {
 		sequenceID := fmt.Sprintf("cache-sequence-limit-%d", index)
-		if err := sequenceCommand(ctx, consumer, "openSequence", consumerShard, sequenceID); err != nil {
+		if err := smoke.SequenceCommand(ctx, consumerTarget, "openSequence", sequenceID); err != nil {
 			return false, err
 		}
 		extraIDs = append(extraIDs, sequenceID)
 	}
-	if !expectWorkerError(ctx, consumer, workerproc.PersistentRequest{
+	if !smoke.ExpectWorkerError(ctx, consumer, workerproc.PersistentRequest{
 		Command: "openSequence",
 		Sequence: &workerproc.PersistentSequenceRequest{
 			ShardID: consumerShard, SequenceID: "cache-sequence-limit-overflow",
@@ -840,7 +695,7 @@ func proveResourceLimits(
 		return false, errors.New("open sequence limit was not enforced")
 	}
 	for _, sequenceID := range extraIDs {
-		if err := sequenceCommand(ctx, consumer, "closeSequence", consumerShard, sequenceID); err != nil {
+		if err := smoke.SequenceCommand(ctx, consumerTarget, "closeSequence", sequenceID); err != nil {
 			return false, err
 		}
 	}
@@ -860,44 +715,6 @@ func shardState(
 	return nil, fmt.Errorf("state did not contain shard %s", shardID)
 }
 
-func inferenceRequest(
-	command string,
-	shardID string,
-	sequenceID string,
-	position uint64,
-	inputKind string,
-	input workerproc.WireTensor,
-) workerproc.PersistentRequest {
-	return workerproc.PersistentRequest{
-		Command: command,
-		Forward: &workerproc.PersistentForwardRequest{
-			ShardID: shardID, SequenceID: sequenceID, Position: position,
-			InputKind: inputKind, Input: input,
-		},
-	}
-}
-
-func expectWorkerError(
-	ctx context.Context,
-	client workerproc.PersistentCaller,
-	request workerproc.PersistentRequest,
-	want string,
-) bool {
-	_, err := client.Call(ctx, request)
-	var responseError *workerproc.WorkerResponseError
-	return errors.As(err, &responseError) && strings.Contains(responseError.Message, want)
-}
-
-func tokenTensor(tokens []int32) workerproc.WireTensor {
-	data := make([]byte, len(tokens)*4)
-	for index, token := range tokens {
-		binary.LittleEndian.PutUint32(data[index*4:], uint32(token))
-	}
-	return workerproc.WireTensor{
-		Shape: []int{1, len(tokens)}, DType: "int32", Data: data,
-	}
-}
-
 func inputKind(shardID string) string {
 	if shardID == consumerShard {
 		return "hidden"
@@ -907,113 +724,7 @@ func inputKind(shardID string) string {
 
 func closedInput(shardID string, boundary workerproc.WireTensor) workerproc.WireTensor {
 	if shardID != consumerShard {
-		return tokenTensor([]int32{1})
+		return smoke.TokenTensor([]int32{1})
 	}
 	return boundary
-}
-
-func compareFinalLogits(
-	got workerproc.WireTensor,
-	want workerproc.WireTensor,
-	rtol float64,
-	atol float64,
-) (float64, float64, error) {
-	if len(got.Shape) == 0 || len(want.Shape) == 0 {
-		return 0, 0, errors.New("logit tensor has no dimensions")
-	}
-	if len(got.Shape) != len(want.Shape) {
-		return 0, 0, fmt.Errorf("rank mismatch: got %v want %v", got.Shape, want.Shape)
-	}
-	for index := range got.Shape {
-		if got.Shape[index] != want.Shape[index] {
-			return 0, 0, fmt.Errorf("shape mismatch: got %v want %v", got.Shape, want.Shape)
-		}
-	}
-	vocabulary := got.Shape[len(got.Shape)-1]
-	gotValues, err := finalValues(got, vocabulary)
-	if err != nil {
-		return 0, 0, fmt.Errorf("decode distributed logits: %w", err)
-	}
-	wantValues, err := finalValues(want, vocabulary)
-	if err != nil {
-		return 0, 0, fmt.Errorf("decode reference logits: %w", err)
-	}
-	maxAbsolute := 0.0
-	maxRelative := 0.0
-	for index := range gotValues {
-		actual := gotValues[index]
-		expected := wantValues[index]
-		if math.IsNaN(actual) || math.IsNaN(expected) {
-			return 0, 0, fmt.Errorf("NaN at vocabulary index %d", index)
-		}
-		absolute := math.Abs(actual - expected)
-		relative := absolute / math.Max(math.Abs(expected), math.SmallestNonzeroFloat64)
-		maxAbsolute = math.Max(maxAbsolute, absolute)
-		maxRelative = math.Max(maxRelative, relative)
-		if absolute > atol+rtol*math.Abs(expected) {
-			return maxAbsolute, maxRelative, fmt.Errorf(
-				"index %d differs: got=%g want=%g abs=%g tolerance=%g",
-				index,
-				actual,
-				expected,
-				absolute,
-				atol+rtol*math.Abs(expected),
-			)
-		}
-	}
-	return maxAbsolute, maxRelative, nil
-}
-
-func finalValues(tensor workerproc.WireTensor, count int) ([]float64, error) {
-	var elementBytes int
-	switch tensor.DType {
-	case "bfloat16", "float16":
-		elementBytes = 2
-	case "float32":
-		elementBytes = 4
-	default:
-		return nil, fmt.Errorf("unsupported logit dtype %q", tensor.DType)
-	}
-	required := count * elementBytes
-	if count <= 0 || len(tensor.Data) < required || len(tensor.Data)%elementBytes != 0 {
-		return nil, fmt.Errorf("invalid %s logit payload size %d", tensor.DType, len(tensor.Data))
-	}
-	data := tensor.Data[len(tensor.Data)-required:]
-	values := make([]float64, count)
-	for index := range values {
-		offset := index * elementBytes
-		switch tensor.DType {
-		case "bfloat16":
-			bits := uint32(binary.LittleEndian.Uint16(data[offset:])) << 16
-			values[index] = float64(math.Float32frombits(bits))
-		case "float16":
-			values[index] = float64(float16(binary.LittleEndian.Uint16(data[offset:])))
-		case "float32":
-			values[index] = float64(math.Float32frombits(binary.LittleEndian.Uint32(data[offset:])))
-		}
-	}
-	return values, nil
-}
-
-func float16(bits uint16) float32 {
-	sign := 1.0
-	if bits&0x8000 != 0 {
-		sign = -1
-	}
-	exponent := int(bits>>10) & 0x1f
-	fraction := int(bits & 0x03ff)
-	switch exponent {
-	case 0:
-		if fraction == 0 {
-			return float32(math.Copysign(0, sign))
-		}
-		return float32(sign * math.Ldexp(float64(fraction), -24))
-	case 0x1f:
-		if fraction == 0 {
-			return float32(math.Inf(int(sign)))
-		}
-		return float32(math.NaN())
-	}
-	value := math.Ldexp(1+float64(fraction)/1024, exponent-15)
-	return float32(sign * value)
 }

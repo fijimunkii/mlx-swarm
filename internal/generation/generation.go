@@ -11,6 +11,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/fijimunkii/mlx-swarm/internal/tensorcheck"
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
 
@@ -300,17 +301,17 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 			return result, fmt.Errorf("sample distributed logits: %w", err)
 		}
 		if result.Verification != nil {
-			absolute, relative, compareErr := compareFinalLogits(
+			difference, compareErr := tensorcheck.CompareFinalLogits(
 				distributedLogits, referenceLogits, s.config.RTol, s.config.ATol,
 			)
 			if compareErr != nil {
 				return result, fmt.Errorf("generation step %d logits: %w", len(result.GeneratedTokenIDs), compareErr)
 			}
 			result.Verification.MaxAbsoluteDifference = math.Max(
-				result.Verification.MaxAbsoluteDifference, absolute,
+				result.Verification.MaxAbsoluteDifference, difference.Absolute,
 			)
 			result.Verification.MaxRelativeDifference = math.Max(
-				result.Verification.MaxRelativeDifference, relative,
+				result.Verification.MaxRelativeDifference, difference.Relative,
 			)
 			referenceToken, sampleErr := greedyToken(referenceLogits)
 			if sampleErr != nil {
