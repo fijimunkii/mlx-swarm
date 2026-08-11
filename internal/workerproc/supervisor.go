@@ -62,6 +62,9 @@ func (supervisor *PersistentSupervisor) Call(
 		return PersistentResponse{}, err
 	}
 	defer supervisor.releaseCall()
+	if err := ctx.Err(); err != nil {
+		return PersistentResponse{}, err
+	}
 
 	supervisor.mu.Lock()
 	if supervisor.closed {
@@ -71,7 +74,8 @@ func (supervisor *PersistentSupervisor) Call(
 	client := supervisor.client
 	supervisor.mu.Unlock()
 	response, err := client.Call(ctx, request)
-	if err == nil || isWorkerRejection(err) || errors.Is(err, ErrInferenceDeadlineRequired) {
+	if err == nil || isWorkerRejection(err) || isNotDispatched(err) ||
+		errors.Is(err, ErrInferenceDeadlineRequired) {
 		return response, err
 	}
 	if errors.Is(err, context.Canceled) && !isInferenceCommand(request.Command) {

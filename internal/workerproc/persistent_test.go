@@ -245,6 +245,39 @@ while :; do :; done
 	}
 }
 
+func TestPersistentClientDoesNotKillInferenceThatWasNeverDispatched(t *testing.T) {
+	worker := writeWorkerScript(t, `#!/bin/sh
+while read request; do
+  printf '%s\n' '{"requestID":"request-1","ok":true,"result":{"status":"ok"}}'
+done
+`)
+	client, err := StartPersistent(worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = client.Kill()
+		waitContext, cancelWait := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancelWait()
+		_ = client.Wait(waitContext)
+	}()
+
+	expiredContext, cancelExpired := context.WithCancel(context.Background())
+	cancelExpired()
+	_, err = client.Call(expiredContext, PersistentRequest{
+		Command: "decode", DeadlineUnixMillis: time.Now().Add(time.Second).UnixMilli(),
+	})
+	if !errors.Is(err, context.Canceled) || !isNotDispatched(err) {
+		t.Fatalf("expired inference error = %v", err)
+	}
+
+	healthContext, cancelHealth := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelHealth()
+	if _, err := client.Call(healthContext, PersistentRequest{Command: "health"}); err != nil {
+		t.Fatalf("health after undispatched inference: %v", err)
+	}
+}
+
 func TestPersistentClientRejectsUnmatchedResponseID(t *testing.T) {
 	worker := writeWorkerScript(t, `#!/bin/sh
 read request

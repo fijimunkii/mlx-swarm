@@ -23,6 +23,22 @@ const (
 
 var errPersistentWorkerStopped = errors.New("persistent worker is stopped")
 
+type requestNotDispatchedError struct {
+	err error
+}
+
+func (err *requestNotDispatchedError) Error() string { return err.err.Error() }
+func (err *requestNotDispatchedError) Unwrap() error { return err.err }
+
+func notDispatched(err error) error {
+	return &requestNotDispatchedError{err: err}
+}
+
+func isNotDispatched(err error) bool {
+	var target *requestNotDispatchedError
+	return errors.As(err, &target)
+}
+
 type PersistentRequest struct {
 	RequestID          string                      `json:"requestID"`
 	Command            string                      `json:"command"`
@@ -275,10 +291,13 @@ func (c *PersistentClient) Call(
 		return PersistentResponse{}, errors.New("persistent worker command is empty")
 	}
 	if err := ctx.Err(); err != nil {
-		return PersistentResponse{}, err
+		return PersistentResponse{}, notDispatched(err)
 	}
 	callContext, cancel, prepared, err := RequestContext(ctx, request)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return PersistentResponse{}, notDispatched(err)
+		}
 		return PersistentResponse{}, err
 	}
 	defer cancel()
@@ -324,8 +343,7 @@ func (c *PersistentClient) Call(
 	}:
 	case <-ctx.Done():
 		c.removePending(request.RequestID)
-		c.abortTimedOutInference(request)
-		return PersistentResponse{}, ctx.Err()
+		return PersistentResponse{}, notDispatched(ctx.Err())
 	case <-c.done:
 		return PersistentResponse{}, c.callError()
 	}
