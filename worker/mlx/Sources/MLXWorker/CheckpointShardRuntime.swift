@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import HuggingFace
 import MLX
 import MLXHuggingFace
@@ -38,6 +39,7 @@ struct CheckpointShardResult: Codable {
 struct ResolvedCheckpoint {
     let modelID: String
     let modelType: String
+    let fingerprint: String
     let directory: URL
     let configData: Data
 }
@@ -388,8 +390,55 @@ enum CheckpointShardRuntime {
         return ResolvedCheckpoint(
             modelID: modelID,
             modelType: baseConfig.modelType,
+            fingerprint: try checkpointFingerprint(directory: directory),
             directory: directory,
             configData: configData
         )
+    }
+
+    private static func checkpointFingerprint(directory: URL) throws -> String {
+        let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: resourceKeys,
+            options: [.skipsHiddenFiles]
+        ) else {
+            throw CheckpointShardError.invalidBoundary(
+                "cannot enumerate checkpoint directory \(directory.path)"
+            )
+        }
+        let root = directory.standardizedFileURL.path + "/"
+        var files = [URL]()
+        for case let file as URL in enumerator {
+            let values = try file.resourceValues(forKeys: Set(resourceKeys))
+            if values.isRegularFile == true || values.isSymbolicLink == true {
+                files.append(file.standardizedFileURL)
+            }
+        }
+        files.sort { $0.path < $1.path }
+        guard !files.isEmpty else {
+            throw CheckpointShardError.invalidBoundary(
+                "checkpoint directory \(directory.path) contains no files"
+            )
+        }
+
+        var hasher = SHA256()
+        for file in files {
+            guard file.path.hasPrefix(root) else {
+                throw CheckpointShardError.invalidBoundary(
+                    "checkpoint file \(file.path) is outside \(directory.path)"
+                )
+            }
+            let relativePath = String(file.path.dropFirst(root.count))
+            hasher.update(data: Data(relativePath.utf8))
+            hasher.update(data: Data([0]))
+            let handle = try FileHandle(forReadingFrom: file)
+            while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+                hasher.update(data: chunk)
+            }
+            try handle.close()
+            hasher.update(data: Data([0xff]))
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }

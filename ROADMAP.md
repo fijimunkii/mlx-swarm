@@ -21,6 +21,7 @@
 - [x] send hidden state from worker A to worker B
 - [x] preserve per-shard KV cache
 - [x] compare final logits with single-node inference at an explicit tolerance
+- [x] tokenize prompts and generate user-visible text with cached greedy decode
 - [ ] measure p50/p95 latency, TTFT, and tokens/sec (single-run transfer/timing metrics exist)
 
 Current correctness proof (`mlx-community/gemma-3-270m-it-4bit`):
@@ -36,6 +37,9 @@ Current correctness proof (`mlx-community/gemma-3-270m-it-4bit`):
 - every distributed cached step matches the upstream full-checkpoint cached path at `rtol=atol=1e-4`; stale, skipped, conflicting, unknown, and closed sequence positions fail deterministically
 - KV memory is reported separately from resident weights and allocator cache; sequence teardown returns KV accounting to zero while the shard remains loaded
 - cached mutations are retry-safe by exact replay, and adapter-provided context/cache estimates enforce retained-state and open-sequence admission limits before inference
+- the Go generation session discovers the model's layer count, caches complementary shard assignments, tokenizes through the checkpoint tokenizer, and stops greedy decode on EOS or a configured maximum
+- generation requires identical resolved-checkpoint fingerprints across producer, consumer, and reference workers; private sequence owners make ambiguous cleanup safe under caller-supplied ID collisions
+- local and paired-macOS proofs generate 32 tokens whose complete greedy token sequence matches a cached full-checkpoint reference; a second request reuses the loaded shards and both requests release their sequence caches
 
 ## M3 — chaos harness
 

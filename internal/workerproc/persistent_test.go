@@ -11,6 +11,48 @@ import (
 	"time"
 )
 
+type recordingWriteCloser struct {
+	writes [][]byte
+}
+
+func (writer *recordingWriteCloser) Write(payload []byte) (int, error) {
+	writer.writes = append(writer.writes, append([]byte(nil), payload...))
+	return len(payload), nil
+}
+
+func (*recordingWriteCloser) Close() error { return nil }
+
+func TestPersistentWriteLoopDiscardsCanceledRequestBeforeWrite(t *testing.T) {
+	stdin := &recordingWriteCloser{}
+	client := &PersistentClient{
+		stdin: stdin, done: make(chan struct{}), writes: make(chan persistentWrite),
+		pending: map[string]chan PersistentResponse{
+			"canceled": make(chan PersistentResponse, 1),
+		},
+	}
+	go client.writeLoop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := make(chan error, 1)
+	client.writes <- persistentWrite{
+		ctx: ctx, requestID: "canceled", payload: []byte("late open\n"), result: result,
+	}
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("write result = %v, want context canceled", err)
+	}
+	client.mu.Lock()
+	_, pending := client.pending["canceled"]
+	client.mu.Unlock()
+	if pending {
+		t.Fatal("canceled unwritten request remained pending")
+	}
+	if len(stdin.writes) != 0 {
+		t.Fatalf("canceled request reached worker: %q", stdin.writes)
+	}
+	close(client.done)
+}
+
 func TestPersistentClientReportsUnexpectedEOF(t *testing.T) {
 	worker := writeWorkerScript(t, "#!/bin/sh\nexit 0\n")
 	client, err := StartPersistent(worker)

@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import MLX
+import Tokenizers
 
 struct PersistentWorkerRequest: Codable {
     let requestID: String
@@ -9,6 +10,8 @@ struct PersistentWorkerRequest: Codable {
     let shard: PersistentShardRequest?
     let sequence: PersistentSequenceRequest?
     let forward: PersistentForwardRequest?
+    let model: PersistentModelRequest?
+    let text: PersistentTextRequest?
 }
 
 private struct PersistentWorkerEnvelope: Decodable {
@@ -18,6 +21,7 @@ private struct PersistentWorkerEnvelope: Decodable {
 struct PersistentLoadShardRequest: Codable {
     let modelID: String
     let shardID: String
+    let checkpointFingerprint: String?
     let layerStart: Int
     let layerEnd: Int
     let ownsInput: Bool
@@ -31,6 +35,7 @@ struct PersistentShardRequest: Codable {
 struct PersistentSequenceRequest: Codable {
     let shardID: String
     let sequenceID: String
+    let ownerID: String?
 }
 
 struct PersistentForwardRequest: Codable {
@@ -39,6 +44,18 @@ struct PersistentForwardRequest: Codable {
     let position: UInt64
     let inputKind: String
     let input: WireTensor
+}
+
+struct PersistentModelRequest: Codable {
+    let modelID: String
+}
+
+struct PersistentTextRequest: Codable {
+    let modelID: String
+    let text: String?
+    let tokenIDs: [Int32]?
+    let addSpecialTokens: Bool?
+    let skipSpecialTokens: Bool?
 }
 
 struct PersistentWorkerResponse: Codable {
@@ -68,8 +85,24 @@ struct PersistentWorkerResult: Codable {
     var status: String?
     var shard: PersistentShardSnapshot?
     var forward: PersistentForwardResult?
+    var model: PersistentModelResult?
+    var text: PersistentTextResult?
     var state: PersistentWorkerState?
     var shutdown: Bool?
+}
+
+struct PersistentModelResult: Codable {
+    let modelID: String
+    let modelType: String
+    let layerCount: Int
+    let checkpointFingerprint: String
+}
+
+struct PersistentTextResult: Codable {
+    let modelID: String
+    let tokenIDs: [Int32]?
+    let text: String?
+    let eosTokenID: Int32?
 }
 
 struct PersistentForwardResult: Codable {
@@ -88,6 +121,7 @@ struct PersistentShardSnapshot: Codable {
     let shardID: String
     let modelID: String
     let modelType: String
+    let checkpointFingerprint: String
     let layerStart: Int
     let layerEnd: Int
     let ownsInput: Bool
@@ -119,6 +153,7 @@ private enum PersistentWorkerError: LocalizedError {
     case sequenceAlreadyOpen(String, String)
     case openSequenceLimit(String, Int)
     case sequenceNotFound(String, String)
+    case sequenceOwnerMismatch(String, String)
     case sequenceAlreadyPrefilled(String, String)
     case sequenceNotPrefilled(String, String)
     case invalidPosition(String, String, got: UInt64, expected: UInt64)
@@ -144,6 +179,8 @@ private enum PersistentWorkerError: LocalizedError {
             return "shard \(shardID) reached its open sequence limit of \(maximum)"
         case .sequenceNotFound(let shardID, let sequenceID):
             return "sequence \(sequenceID) is not open on shard \(shardID)"
+        case .sequenceOwnerMismatch(let shardID, let sequenceID):
+            return "sequence \(sequenceID) on shard \(shardID) is owned by another request"
         case .sequenceAlreadyPrefilled(let shardID, let sequenceID):
             return "sequence \(sequenceID) is already prefilled on shard \(shardID)"
         case .sequenceNotPrefilled(let shardID, let sequenceID):
@@ -166,12 +203,14 @@ private enum PersistentWorkerError: LocalizedError {
 
 private final class PersistentSequenceState {
     let cache: any CheckpointShardSequenceCache
+    let ownerID: String?
     var nextPosition = 0
     var prefilled = false
     var completedMutation: PersistentCompletedMutation?
 
-    init(cache: any CheckpointShardSequenceCache) {
+    init(cache: any CheckpointShardSequenceCache, ownerID: String?) {
         self.cache = cache
+        self.ownerID = ownerID
     }
 }
 
@@ -211,6 +250,7 @@ private struct PersistentCompletedMutation {
 private final class PersistentLoadedShard {
     let modelID: String
     let modelType: String
+    let checkpointFingerprint: String
     let layerRange: Range<Int>
     let ownsInput: Bool
     let ownsOutput: Bool
@@ -222,6 +262,7 @@ private final class PersistentLoadedShard {
     init(
         modelID: String,
         modelType: String,
+        checkpointFingerprint: String,
         layerRange: Range<Int>,
         ownsInput: Bool,
         ownsOutput: Bool,
@@ -230,6 +271,7 @@ private final class PersistentLoadedShard {
     ) {
         self.modelID = modelID
         self.modelType = modelType
+        self.checkpointFingerprint = checkpointFingerprint
         self.layerRange = layerRange
         self.ownsInput = ownsInput
         self.ownsOutput = ownsOutput
@@ -241,6 +283,8 @@ private final class PersistentLoadedShard {
 final class PersistentShardService {
     private let configuration: CheckpointShardRuntimeConfiguration
     private var shards = [String: PersistentLoadedShard]()
+    private var tokenizers = [String: any Tokenizer]()
+    private var checkpoints = [String: ResolvedCheckpoint]()
     private var loadCount = 0
     private var forwardCount = 0
 
@@ -256,6 +300,24 @@ final class PersistentShardService {
         switch request.command {
         case "health":
             return PersistentWorkerResult(status: "ok")
+
+        case "modelInfo":
+            guard let model = request.model else {
+                throw PersistentWorkerError.invalidRequest("modelInfo payload is missing")
+            }
+            return PersistentWorkerResult(model: try await modelInfo(model))
+
+        case "tokenize":
+            guard let text = request.text else {
+                throw PersistentWorkerError.invalidRequest("tokenize payload is missing")
+            }
+            return PersistentWorkerResult(text: try await tokenize(text))
+
+        case "detokenize":
+            guard let text = request.text else {
+                throw PersistentWorkerError.invalidRequest("detokenize payload is missing")
+            }
+            return PersistentWorkerResult(text: try await detokenize(text))
 
         case "loadShard":
             guard let load = request.loadShard else {
@@ -303,12 +365,120 @@ final class PersistentShardService {
 
         case "shutdown":
             shards.removeAll()
+            tokenizers.removeAll()
+            checkpoints.removeAll()
             Memory.clearCache()
             return PersistentWorkerResult(state: state(), shutdown: true)
 
         default:
             throw PersistentWorkerError.invalidRequest("unknown command \(request.command)")
         }
+    }
+
+    private func modelInfo(_ request: PersistentModelRequest) async throws -> PersistentModelResult {
+        guard !request.modelID.isEmpty else {
+            throw PersistentWorkerError.invalidRequest("modelID is empty")
+        }
+        let checkpoint = try await checkpoint(modelID: request.modelID)
+        let adapter = try configuration.adapterRegistry.adapter(for: checkpoint.modelType)
+        return PersistentModelResult(
+            modelID: request.modelID,
+            modelType: checkpoint.modelType,
+            layerCount: try adapter.layerCount(checkpoint: checkpoint),
+            checkpointFingerprint: checkpoint.fingerprint
+        )
+    }
+
+    private func tokenize(_ request: PersistentTextRequest) async throws -> PersistentTextResult {
+        guard !request.modelID.isEmpty else {
+            throw PersistentWorkerError.invalidRequest("modelID is empty")
+        }
+        guard let text = request.text else {
+            throw PersistentWorkerError.invalidRequest("tokenize text is missing")
+        }
+        guard request.tokenIDs == nil else {
+            throw PersistentWorkerError.invalidRequest("tokenize tokenIDs must be omitted")
+        }
+        try requireLoadedInputModel(request.modelID)
+        let tokenizer = try await tokenizer(modelID: request.modelID)
+        let encoded = tokenizer.encode(
+            text: text,
+            addSpecialTokens: request.addSpecialTokens ?? true
+        )
+        let tokenIDs = try int32Tokens(encoded)
+        return PersistentTextResult(
+            modelID: request.modelID,
+            tokenIDs: tokenIDs,
+            text: nil,
+            eosTokenID: try int32Token(tokenizer.eosTokenId)
+        )
+    }
+
+    private func detokenize(_ request: PersistentTextRequest) async throws -> PersistentTextResult {
+        guard !request.modelID.isEmpty else {
+            throw PersistentWorkerError.invalidRequest("modelID is empty")
+        }
+        guard request.text == nil else {
+            throw PersistentWorkerError.invalidRequest("detokenize text must be omitted")
+        }
+        guard let tokenIDs = request.tokenIDs else {
+            throw PersistentWorkerError.invalidRequest("detokenize tokenIDs are missing")
+        }
+        try requireLoadedInputModel(request.modelID)
+        let tokenizer = try await tokenizer(modelID: request.modelID)
+        return PersistentTextResult(
+            modelID: request.modelID,
+            tokenIDs: nil,
+            text: tokenizer.decode(
+                tokens: tokenIDs.map(Int.init),
+                skipSpecialTokens: request.skipSpecialTokens ?? true
+            ),
+            eosTokenID: try int32Token(tokenizer.eosTokenId)
+        )
+    }
+
+    private func tokenizer(modelID: String) async throws -> any Tokenizer {
+        if let tokenizer = tokenizers[modelID] {
+            return tokenizer
+        }
+        let checkpoint = try await checkpoint(modelID: modelID)
+        let tokenizer = try await AutoTokenizer.from(modelFolder: checkpoint.directory)
+        tokenizers[modelID] = tokenizer
+        return tokenizer
+    }
+
+    private func checkpoint(modelID: String) async throws -> ResolvedCheckpoint {
+        if let checkpoint = checkpoints[modelID] {
+            return checkpoint
+        }
+        let resolved = try await CheckpointShardRuntime.resolveCheckpoint(modelID: modelID)
+        checkpoints[modelID] = resolved
+        return resolved
+    }
+
+    private func requireLoadedInputModel(_ modelID: String) throws {
+        guard shards.values.contains(where: { $0.modelID == modelID && $0.ownsInput }) else {
+            throw PersistentWorkerError.invalidRequest(
+                "model \(modelID) has no loaded input-owning shard"
+            )
+        }
+    }
+
+    private func int32Tokens(_ tokens: [Int]) throws -> [Int32] {
+        try tokens.map { token in
+            guard let value = Int32(exactly: token), value >= 0 else {
+                throw PersistentWorkerError.invalidRequest("token ID \(token) is outside int32")
+            }
+            return value
+        }
+    }
+
+    private func int32Token(_ token: Int?) throws -> Int32? {
+        guard let token else { return nil }
+        guard let value = Int32(exactly: token), value >= 0 else {
+            throw PersistentWorkerError.invalidRequest("token ID \(token) is outside int32")
+        }
+        return value
     }
 
     private func loadShard(
@@ -324,7 +494,14 @@ final class PersistentShardService {
             throw PersistentWorkerError.invalidRequest("layer range is invalid")
         }
 
-        let checkpoint = try await CheckpointShardRuntime.resolveCheckpoint(modelID: request.modelID)
+        let checkpoint = try await checkpoint(modelID: request.modelID)
+        if let expectedFingerprint = request.checkpointFingerprint,
+           expectedFingerprint != checkpoint.fingerprint
+        {
+            throw PersistentWorkerError.invalidRequest(
+                "checkpoint fingerprint \(checkpoint.fingerprint) does not match expected \(expectedFingerprint)"
+            )
+        }
         let adapter = try configuration.adapterRegistry.adapter(for: checkpoint.modelType)
         let layerCount = try adapter.layerCount(checkpoint: checkpoint)
         let range = request.layerStart ..< request.layerEnd
@@ -348,6 +525,7 @@ final class PersistentShardService {
         let loaded = PersistentLoadedShard(
             modelID: request.modelID,
             modelType: checkpoint.modelType,
+            checkpointFingerprint: checkpoint.fingerprint,
             layerRange: range,
             ownsInput: request.ownsInput,
             ownsOutput: request.ownsOutput,
@@ -360,13 +538,18 @@ final class PersistentShardService {
     }
 
     private func unloadShard(_ shardID: String) throws {
-        guard let openSequenceCount = shards[shardID]?.sequences.count else {
+        guard let openSequenceCount = shards[shardID]?.sequences.count,
+              let modelID = shards[shardID]?.modelID
+        else {
             throw PersistentWorkerError.shardNotFound(shardID)
         }
         guard openSequenceCount == 0 else {
             throw PersistentWorkerError.shardHasOpenSequences(shardID, openSequenceCount)
         }
         shards.removeValue(forKey: shardID)
+        if !shards.values.contains(where: { $0.modelID == modelID }) {
+            tokenizers.removeValue(forKey: modelID)
+        }
         Memory.clearCache()
     }
 
@@ -377,7 +560,10 @@ final class PersistentShardService {
         guard let shard = shards[request.shardID] else {
             throw PersistentWorkerError.shardNotFound(request.shardID)
         }
-        guard shard.sequences[request.sequenceID] == nil else {
+        if let existing = shard.sequences[request.sequenceID] {
+            if let ownerID = request.ownerID, existing.ownerID == ownerID {
+                return
+            }
             throw PersistentWorkerError.sequenceAlreadyOpen(request.shardID, request.sequenceID)
         }
         guard shard.sequences.count < configuration.maxOpenSequencesPerShard else {
@@ -387,7 +573,8 @@ final class PersistentShardService {
             )
         }
         shard.sequences[request.sequenceID] = PersistentSequenceState(
-            cache: shard.stage.makeSequenceCache()
+            cache: shard.stage.makeSequenceCache(),
+            ownerID: request.ownerID
         )
     }
 
@@ -395,9 +582,13 @@ final class PersistentShardService {
         guard let shard = shards[request.shardID] else {
             throw PersistentWorkerError.shardNotFound(request.shardID)
         }
-        guard shard.sequences.removeValue(forKey: request.sequenceID) != nil else {
+        guard let sequence = shard.sequences[request.sequenceID] else {
             throw PersistentWorkerError.sequenceNotFound(request.shardID, request.sequenceID)
         }
+        if let ownerID = request.ownerID, sequence.ownerID != ownerID {
+            throw PersistentWorkerError.sequenceOwnerMismatch(request.shardID, request.sequenceID)
+        }
+        shard.sequences.removeValue(forKey: request.sequenceID)
         Memory.clearCache()
     }
 
@@ -701,6 +892,7 @@ final class PersistentShardService {
             shardID: shardID,
             modelID: shard.modelID,
             modelType: shard.modelType,
+            checkpointFingerprint: shard.checkpointFingerprint,
             layerStart: shard.layerRange.lowerBound,
             layerEnd: shard.layerRange.upperBound,
             ownsInput: shard.ownsInput,

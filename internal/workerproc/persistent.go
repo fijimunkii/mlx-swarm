@@ -30,15 +30,18 @@ type PersistentRequest struct {
 	Shard     *PersistentShardRequest     `json:"shard,omitempty"`
 	Sequence  *PersistentSequenceRequest  `json:"sequence,omitempty"`
 	Forward   *PersistentForwardRequest   `json:"forward,omitempty"`
+	Model     *PersistentModelRequest     `json:"model,omitempty"`
+	Text      *PersistentTextRequest      `json:"text,omitempty"`
 }
 
 type PersistentLoadShardRequest struct {
-	ModelID    string `json:"modelID"`
-	ShardID    string `json:"shardID"`
-	LayerStart int    `json:"layerStart"`
-	LayerEnd   int    `json:"layerEnd"`
-	OwnsInput  bool   `json:"ownsInput"`
-	OwnsOutput bool   `json:"ownsOutput"`
+	ModelID               string `json:"modelID"`
+	ShardID               string `json:"shardID"`
+	CheckpointFingerprint string `json:"checkpointFingerprint,omitempty"`
+	LayerStart            int    `json:"layerStart"`
+	LayerEnd              int    `json:"layerEnd"`
+	OwnsInput             bool   `json:"ownsInput"`
+	OwnsOutput            bool   `json:"ownsOutput"`
 }
 
 type PersistentShardRequest struct {
@@ -48,6 +51,7 @@ type PersistentShardRequest struct {
 type PersistentSequenceRequest struct {
 	ShardID    string `json:"shardID"`
 	SequenceID string `json:"sequenceID"`
+	OwnerID    string `json:"ownerID,omitempty"`
 }
 
 type PersistentForwardRequest struct {
@@ -56,6 +60,18 @@ type PersistentForwardRequest struct {
 	Position   uint64     `json:"position"`
 	InputKind  string     `json:"inputKind"`
 	Input      WireTensor `json:"input"`
+}
+
+type PersistentModelRequest struct {
+	ModelID string `json:"modelID"`
+}
+
+type PersistentTextRequest struct {
+	ModelID           string  `json:"modelID"`
+	Text              *string `json:"text,omitempty"`
+	TokenIDs          []int32 `json:"tokenIDs,omitempty"`
+	AddSpecialTokens  *bool   `json:"addSpecialTokens,omitempty"`
+	SkipSpecialTokens *bool   `json:"skipSpecialTokens,omitempty"`
 }
 
 type WireTensor struct {
@@ -75,8 +91,24 @@ type PersistentWorkerResult struct {
 	Status   string                   `json:"status,omitempty"`
 	Shard    *PersistentShardSnapshot `json:"shard,omitempty"`
 	Forward  *PersistentForwardResult `json:"forward,omitempty"`
+	Model    *PersistentModelResult   `json:"model,omitempty"`
+	Text     *PersistentTextResult    `json:"text,omitempty"`
 	State    *PersistentWorkerState   `json:"state,omitempty"`
 	Shutdown bool                     `json:"shutdown,omitempty"`
+}
+
+type PersistentModelResult struct {
+	ModelID               string `json:"modelID"`
+	ModelType             string `json:"modelType"`
+	LayerCount            int    `json:"layerCount"`
+	CheckpointFingerprint string `json:"checkpointFingerprint"`
+}
+
+type PersistentTextResult struct {
+	ModelID    string  `json:"modelID"`
+	TokenIDs   []int32 `json:"tokenIDs,omitempty"`
+	Text       *string `json:"text,omitempty"`
+	EOSTokenID *int32  `json:"eosTokenID,omitempty"`
 }
 
 type PersistentForwardResult struct {
@@ -92,20 +124,21 @@ type PersistentForwardResult struct {
 }
 
 type PersistentShardSnapshot struct {
-	ShardID              string      `json:"shardID"`
-	ModelID              string      `json:"modelID"`
-	ModelType            string      `json:"modelType"`
-	LayerStart           int         `json:"layerStart"`
-	LayerEnd             int         `json:"layerEnd"`
-	OwnsInput            bool        `json:"ownsInput"`
-	OwnsOutput           bool        `json:"ownsOutput"`
-	WeightKeyCount       int         `json:"weightKeyCount"`
-	OpenSequenceCount    int         `json:"openSequenceCount"`
-	MaxOpenSequenceCount int         `json:"maxOpenSequenceCount"`
-	ForwardCount         int         `json:"forwardCount"`
-	KVCacheBytes         int         `json:"kvCacheBytes"`
-	RetainedBytes        int         `json:"retainedBytes"`
-	LoadedMemory         StageMemory `json:"loadedMemory"`
+	ShardID               string      `json:"shardID"`
+	ModelID               string      `json:"modelID"`
+	ModelType             string      `json:"modelType"`
+	CheckpointFingerprint string      `json:"checkpointFingerprint"`
+	LayerStart            int         `json:"layerStart"`
+	LayerEnd              int         `json:"layerEnd"`
+	OwnsInput             bool        `json:"ownsInput"`
+	OwnsOutput            bool        `json:"ownsOutput"`
+	WeightKeyCount        int         `json:"weightKeyCount"`
+	OpenSequenceCount     int         `json:"openSequenceCount"`
+	MaxOpenSequenceCount  int         `json:"maxOpenSequenceCount"`
+	ForwardCount          int         `json:"forwardCount"`
+	KVCacheBytes          int         `json:"kvCacheBytes"`
+	RetainedBytes         int         `json:"retainedBytes"`
+	LoadedMemory          StageMemory `json:"loadedMemory"`
 }
 
 type PersistentWorkerState struct {
@@ -186,8 +219,10 @@ type PersistentClient struct {
 }
 
 type persistentWrite struct {
-	payload []byte
-	result  chan error
+	ctx       context.Context
+	requestID string
+	payload   []byte
+	result    chan error
 }
 
 func StartPersistent(path string) (*PersistentClient, error) {
@@ -269,7 +304,9 @@ func (c *PersistentClient) Call(
 
 	writeResult := make(chan error, 1)
 	select {
-	case c.writes <- persistentWrite{payload: payload, result: writeResult}:
+	case c.writes <- persistentWrite{
+		ctx: ctx, requestID: request.RequestID, payload: payload, result: writeResult,
+	}:
 	case <-ctx.Done():
 		c.removePending(request.RequestID)
 		return PersistentResponse{}, ctx.Err()
@@ -307,6 +344,14 @@ func (c *PersistentClient) writeLoop() {
 	for {
 		select {
 		case write := <-c.writes:
+			// A later request may already be queued after the caller stops
+			// waiting. Never let this canceled write overtake that request when
+			// the worker becomes writable again.
+			if err := write.ctx.Err(); err != nil {
+				c.removePending(write.requestID)
+				write.result <- err
+				continue
+			}
 			written, err := c.stdin.Write(write.payload)
 			if err == nil && written != len(write.payload) {
 				err = io.ErrShortWrite

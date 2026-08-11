@@ -11,7 +11,10 @@ on:
       - 'cmd/swarm-net/**'
       - 'cmd/swarm-session-smoke/**'
       - 'cmd/swarm-cache-smoke/**'
+      - 'cmd/swarm-generate/**'
+      - 'cmd/swarm-generate-smoke/**'
       - 'cmd/swarmd/**'
+      - 'internal/generation/**'
       - 'internal/workerproc/**'
       - 'go.mod'
       - '.github/workflows/mlx.yml'
@@ -23,7 +26,10 @@ on:
       - 'cmd/swarm-net/**'
       - 'cmd/swarm-session-smoke/**'
       - 'cmd/swarm-cache-smoke/**'
+      - 'cmd/swarm-generate/**'
+      - 'cmd/swarm-generate-smoke/**'
       - 'cmd/swarmd/**'
+      - 'internal/generation/**'
       - 'internal/workerproc/**'
       - 'go.mod'
       - '.github/workflows/mlx.yml'
@@ -86,6 +92,10 @@ jobs:
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
           go run ./cmd/swarm-cache-smoke -worker "$worker"
+      - name: Generate verified text locally
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          go run ./cmd/swarm-generate-smoke -worker "$worker"
 
   mlx-receiver-macos:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -189,6 +199,10 @@ jobs:
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
           go run ./cmd/swarm-cache-smoke -worker "$worker"
+      - name: Generate verified text locally
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          go run ./cmd/swarm-generate-smoke -worker "$worker"
       - name: Connect producer to Tailscale
         uses: tailscale/github-action@v4
         with:
@@ -257,6 +271,20 @@ jobs:
             exit 1
           fi
 
+          generation_json="$(go run ./cmd/swarm-generate-smoke \
+            -worker "$worker" \
+            -peer "http://${peer_ip}:8080")"
+          printf '%s\n' "$generation_json"
+
+          if [ "$(printf '%s' "$generation_json" | jq -r '.greedyTokenIDsMatch and (.generatedTokenCount >= 32)')" != "true" ]; then
+            echo "Distributed generation did not match the full-checkpoint token sequence" >&2
+            exit 1
+          fi
+          if [ "$(printf '%s' "$generation_json" | jq -r '.repeatedRequestValidated and .sequenceTeardownValidated')" != "true" ]; then
+            echo "Distributed generation did not reuse shards or release sequence state" >&2
+            exit 1
+          fi
+
           network_json="$(go run ./cmd/swarm-net \
             -worker "$worker" \
             -peer "http://${peer_ip}:8080")"
@@ -303,6 +331,9 @@ jobs:
             printf '| Cached final-logit correctness | **%s** |\n' "$(printf '%s' "$cache_json" | jq -r 'if .allFinalLogitsMatch then "MATCH" else "MISMATCH" end')"
             printf '| Producer / consumer KV cache | %.3f / %.3f MiB |\n' "$(printf '%s' "$cache_json" | jq -r '.producerKVCacheBytes / 1048576')" "$(printf '%s' "$cache_json" | jq -r '.consumerKVCacheBytes / 1048576')"
             printf '| KV bytes after sequence teardown | %s / %s |\n' "$(printf '%s' "$cache_json" | jq -r '.producerAfterTeardownBytes')" "$(printf '%s' "$cache_json" | jq -r '.consumerAfterTeardownBytes')"
+            printf '| Generated tokens | %s |\n' "$(printf '%s' "$generation_json" | jq -r '.generatedTokenCount')"
+            printf '| Greedy generation correctness | **%s** |\n' "$(printf '%s' "$generation_json" | jq -r 'if .greedyTokenIDsMatch then "MATCH" else "MISMATCH" end')"
+            printf '| Repeated request / teardown | **%s / %s** |\n' "$(printf '%s' "$generation_json" | jq -r 'if .repeatedRequestValidated then "PASS" else "FAIL" end')" "$(printf '%s' "$generation_json" | jq -r 'if .sequenceTeardownValidated then "PASS" else "FAIL" end')"
             echo
             echo "Route probe: \`$route_line\`"
           } >> "$GITHUB_STEP_SUMMARY"
