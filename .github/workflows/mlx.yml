@@ -55,7 +55,7 @@ jobs:
           fingerprint="$(printf '%s\n' "$toolchain" | shasum -a 256 | awk '{print $1}')"
           printf 'fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
       - name: Restore MLX build cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             worker/mlx/.build/source-packages
