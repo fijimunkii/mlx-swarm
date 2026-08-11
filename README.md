@@ -112,9 +112,11 @@ go run ./cmd/swarm-generate \
   -max-tokens 32
 ```
 
-Stable model-derived shard IDs make later commands reuse matching loaded
-stages. Every request still receives a fresh sequence ID and closes its KV
-state on EOS, maximum length, cancellation, or failure. The deterministic
+Stable model-and-checkpoint-derived shard IDs make later commands reuse matching
+loaded stages. Setup fingerprints each resolved checkpoint and rejects a
+producer/consumer revision mismatch before composing their weights. Every
+request receives a fresh sequence owner and closes only its own KV state on
+EOS, maximum length, cancellation, or failure. The deterministic
 generation smoke opens two sessions against the same retained workers and
 requires the complete 32-token distributed sequence to match the cached
 single-node path:

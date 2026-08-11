@@ -36,6 +36,7 @@ message LoadShardRequest {
   uint32 layer_end = 4;
   bool owns_input = 5;
   bool owns_output = 6;
+  string checkpoint_fingerprint = 7;
 }
 
 message LoadShardResponse {
@@ -50,6 +51,7 @@ message UnloadShardRequest {
 message SequenceRequest {
   string shard_id = 1;
   string sequence_id = 2;
+  string owner_id = 3;
 }
 
 message ModelInfoRequest {
@@ -61,6 +63,7 @@ message ModelInfoResponse {
   string model_type = 2;
   uint32 layer_count = 3;
   string error = 4;
+  string checkpoint_fingerprint = 5;
 }
 
 message TokenizeRequest {
@@ -129,6 +132,7 @@ message ShardState {
   uint64 cache_memory_bytes = 12;
   uint64 peak_memory_bytes = 13;
   uint64 kv_cache_memory_bytes = 14;
+  string checkpoint_fingerprint = 15;
 }
 
 message WorkerStateResponse {

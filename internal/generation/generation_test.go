@@ -96,7 +96,7 @@ func TestOpenResponseFailureClosesAttemptedSequence(t *testing.T) {
 
 func TestRejectedOpenDoesNotCloseExistingSequence(t *testing.T) {
 	producer, consumer, reference := fakeSwarm([]int32{3})
-	consumer.sequences["shared"] = true
+	consumer.sequences["shared"] = "another-owner"
 	session := newFakeSession(t, producer, consumer, reference)
 
 	_, err := session.Generate(context.Background(), Request{
@@ -110,16 +110,73 @@ func TestRejectedOpenDoesNotCloseExistingSequence(t *testing.T) {
 	producerCount := len(producer.sequences)
 	producer.mu.Unlock()
 	consumer.mu.Lock()
-	consumerRetained := consumer.sequences["shared"]
+	consumerOwner, consumerRetained := consumer.sequences["shared"]
 	consumerCount := len(consumer.sequences)
 	consumer.mu.Unlock()
-	if producerCount != 0 || !consumerRetained || consumerCount != 1 {
+	if producerCount != 0 || !consumerRetained || consumerOwner != "another-owner" || consumerCount != 1 {
 		t.Fatalf(
 			"unexpected sequence cleanup: producer=%d consumer=%d retained=%t",
 			producerCount, consumerCount, consumerRetained,
 		)
 	}
 	assertNoFakeSequences(t, producer, reference)
+}
+
+func TestAmbiguousRejectedOpenCannotCloseExistingSequence(t *testing.T) {
+	producer, consumer, reference := fakeSwarm([]int32{3})
+	consumer.sequences["shared"] = "another-owner"
+	consumer.loseOpenRejection = true
+	session := newFakeSession(t, producer, consumer, reference)
+
+	_, err := session.Generate(context.Background(), Request{
+		Prompt: "hello", MaxTokens: 1, SequenceID: "shared",
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected lost rejection response, got %v", err)
+	}
+	producer.mu.Lock()
+	producerCount := len(producer.sequences)
+	producer.mu.Unlock()
+	consumer.mu.Lock()
+	consumerOwner, consumerRetained := consumer.sequences["shared"]
+	consumerCount := len(consumer.sequences)
+	consumer.mu.Unlock()
+	if producerCount != 0 || !consumerRetained || consumerOwner != "another-owner" || consumerCount != 1 {
+		t.Fatalf(
+			"ambiguous cleanup changed another sequence: producer=%d consumer=%d owner=%q",
+			producerCount, consumerCount, consumerOwner,
+		)
+	}
+	assertNoFakeSequences(t, producer, reference)
+}
+
+func TestNewSessionRejectsCheckpointFingerprintMismatch(t *testing.T) {
+	producer, consumer, _ := fakeSwarm([]int32{3})
+	consumer.checkpointFingerprint = "different-checkpoint"
+	_, err := NewSession(
+		context.Background(), producer, consumer, nil,
+		SessionConfig{Model: "test/model", RTol: 1e-4, ATol: 1e-4},
+	)
+	if err == nil {
+		t.Fatal("expected checkpoint fingerprint mismatch")
+	}
+	if producer.loadCount != 0 || consumer.loadCount != 0 {
+		t.Fatalf("mismatched checkpoints loaded shards: producer=%d consumer=%d", producer.loadCount, consumer.loadCount)
+	}
+}
+
+func TestNewSessionReusesConcurrentlyLoadedShard(t *testing.T) {
+	producer, consumer, _ := fakeSwarm([]int32{3})
+	consumer.concurrentLoad = true
+	if _, err := NewSession(
+		context.Background(), producer, consumer, nil,
+		SessionConfig{Model: "test/model", RTol: 1e-4, ATol: 1e-4},
+	); err != nil {
+		t.Fatalf("reuse concurrently loaded shard: %v", err)
+	}
+	if consumer.loadCount != 1 || len(consumer.shards) != 1 {
+		t.Fatalf("consumer load state: count=%d shards=%d", consumer.loadCount, len(consumer.shards))
+	}
 }
 
 func TestGreedyTokenUsesFinalPositionAndLowestTie(t *testing.T) {
@@ -203,9 +260,16 @@ func newFakeSession(
 }
 
 func fakeSwarm(tokens []int32) (*fakeWorker, *fakeWorker, *fakeWorker) {
-	return &fakeWorker{role: "producer", tokens: tokens, sequences: map[string]bool{}},
-		&fakeWorker{role: "consumer", tokens: tokens, sequences: map[string]bool{}},
-		&fakeWorker{role: "reference", tokens: tokens, sequences: map[string]bool{}}
+	return newFakeWorker("producer", tokens),
+		newFakeWorker("consumer", tokens),
+		newFakeWorker("reference", tokens)
+}
+
+func newFakeWorker(role string, tokens []int32) *fakeWorker {
+	return &fakeWorker{
+		role: role, tokens: tokens, sequences: map[string]string{},
+		checkpointFingerprint: "test-checkpoint",
+	}
 }
 
 func assertNoFakeSequences(t *testing.T, workers ...*fakeWorker) {
@@ -221,16 +285,19 @@ func assertNoFakeSequences(t *testing.T, workers ...*fakeWorker) {
 }
 
 type fakeWorker struct {
-	mu          sync.Mutex
-	role        string
-	tokens      []int32
-	sequences   map[string]bool
-	shards      []workerproc.PersistentShardSnapshot
-	loadCount   int
-	logitIndex  int
-	tokenizeErr error
-	openErr     error
-	blockDecode bool
+	mu                    sync.Mutex
+	role                  string
+	tokens                []int32
+	sequences             map[string]string
+	shards                []workerproc.PersistentShardSnapshot
+	checkpointFingerprint string
+	loadCount             int
+	logitIndex            int
+	tokenizeErr           error
+	openErr               error
+	loseOpenRejection     bool
+	concurrentLoad        bool
+	blockDecode           bool
 }
 
 func (worker *fakeWorker) Call(
@@ -247,6 +314,7 @@ func (worker *fakeWorker) Call(
 	case "modelInfo":
 		result.Model = &workerproc.PersistentModelResult{
 			ModelID: request.Model.ModelID, ModelType: "test", LayerCount: 2,
+			CheckpointFingerprint: worker.checkpointFingerprint,
 		}
 	case "state":
 		kv := 0
@@ -261,11 +329,19 @@ func (worker *fakeWorker) Call(
 		load := request.LoadShard
 		snapshot := workerproc.PersistentShardSnapshot{
 			ShardID: load.ShardID, ModelID: load.ModelID,
-			LayerStart: load.LayerStart, LayerEnd: load.LayerEnd,
+			CheckpointFingerprint: worker.checkpointFingerprint,
+			LayerStart:            load.LayerStart, LayerEnd: load.LayerEnd,
 			OwnsInput: load.OwnsInput, OwnsOutput: load.OwnsOutput,
 		}
 		worker.shards = append(worker.shards, snapshot)
 		worker.loadCount++
+		if worker.concurrentLoad {
+			worker.concurrentLoad = false
+			return workerproc.PersistentResponse{}, &workerproc.WorkerResponseError{
+				RequestID: request.RequestID,
+				Message:   "shard is already loaded",
+			}
+		}
 		result.Shard = &snapshot
 	case "tokenize":
 		if worker.tokenizeErr != nil {
@@ -279,17 +355,36 @@ func (worker *fakeWorker) Call(
 		text := "decoded"
 		result.Text = &workerproc.PersistentTextResult{ModelID: request.Text.ModelID, Text: &text}
 	case "openSequence":
-		if worker.sequences[request.Sequence.SequenceID] {
+		if ownerID, exists := worker.sequences[request.Sequence.SequenceID]; exists {
+			if request.Sequence.OwnerID != "" && ownerID == request.Sequence.OwnerID {
+				break
+			}
+			if worker.loseOpenRejection {
+				return workerproc.PersistentResponse{}, context.DeadlineExceeded
+			}
 			return workerproc.PersistentResponse{}, &workerproc.WorkerResponseError{
 				RequestID: request.RequestID,
 				Message:   "sequence is already open",
 			}
 		}
-		worker.sequences[request.Sequence.SequenceID] = true
+		worker.sequences[request.Sequence.SequenceID] = request.Sequence.OwnerID
 		if worker.openErr != nil {
 			return workerproc.PersistentResponse{}, worker.openErr
 		}
 	case "closeSequence":
+		ownerID, exists := worker.sequences[request.Sequence.SequenceID]
+		if !exists {
+			return workerproc.PersistentResponse{}, &workerproc.WorkerResponseError{
+				RequestID: request.RequestID,
+				Message:   "sequence is not open",
+			}
+		}
+		if request.Sequence.OwnerID != "" && ownerID != request.Sequence.OwnerID {
+			return workerproc.PersistentResponse{}, &workerproc.WorkerResponseError{
+				RequestID: request.RequestID,
+				Message:   "sequence is owned by another request",
+			}
+		}
 		delete(worker.sequences, request.Sequence.SequenceID)
 	case "prefill", "decode":
 		if request.Command == "decode" && worker.blockDecode {

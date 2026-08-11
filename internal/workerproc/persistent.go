@@ -35,12 +35,13 @@ type PersistentRequest struct {
 }
 
 type PersistentLoadShardRequest struct {
-	ModelID    string `json:"modelID"`
-	ShardID    string `json:"shardID"`
-	LayerStart int    `json:"layerStart"`
-	LayerEnd   int    `json:"layerEnd"`
-	OwnsInput  bool   `json:"ownsInput"`
-	OwnsOutput bool   `json:"ownsOutput"`
+	ModelID               string `json:"modelID"`
+	ShardID               string `json:"shardID"`
+	CheckpointFingerprint string `json:"checkpointFingerprint,omitempty"`
+	LayerStart            int    `json:"layerStart"`
+	LayerEnd              int    `json:"layerEnd"`
+	OwnsInput             bool   `json:"ownsInput"`
+	OwnsOutput            bool   `json:"ownsOutput"`
 }
 
 type PersistentShardRequest struct {
@@ -50,6 +51,7 @@ type PersistentShardRequest struct {
 type PersistentSequenceRequest struct {
 	ShardID    string `json:"shardID"`
 	SequenceID string `json:"sequenceID"`
+	OwnerID    string `json:"ownerID,omitempty"`
 }
 
 type PersistentForwardRequest struct {
@@ -96,9 +98,10 @@ type PersistentWorkerResult struct {
 }
 
 type PersistentModelResult struct {
-	ModelID    string `json:"modelID"`
-	ModelType  string `json:"modelType"`
-	LayerCount int    `json:"layerCount"`
+	ModelID               string `json:"modelID"`
+	ModelType             string `json:"modelType"`
+	LayerCount            int    `json:"layerCount"`
+	CheckpointFingerprint string `json:"checkpointFingerprint"`
 }
 
 type PersistentTextResult struct {
@@ -121,20 +124,21 @@ type PersistentForwardResult struct {
 }
 
 type PersistentShardSnapshot struct {
-	ShardID              string      `json:"shardID"`
-	ModelID              string      `json:"modelID"`
-	ModelType            string      `json:"modelType"`
-	LayerStart           int         `json:"layerStart"`
-	LayerEnd             int         `json:"layerEnd"`
-	OwnsInput            bool        `json:"ownsInput"`
-	OwnsOutput           bool        `json:"ownsOutput"`
-	WeightKeyCount       int         `json:"weightKeyCount"`
-	OpenSequenceCount    int         `json:"openSequenceCount"`
-	MaxOpenSequenceCount int         `json:"maxOpenSequenceCount"`
-	ForwardCount         int         `json:"forwardCount"`
-	KVCacheBytes         int         `json:"kvCacheBytes"`
-	RetainedBytes        int         `json:"retainedBytes"`
-	LoadedMemory         StageMemory `json:"loadedMemory"`
+	ShardID               string      `json:"shardID"`
+	ModelID               string      `json:"modelID"`
+	ModelType             string      `json:"modelType"`
+	CheckpointFingerprint string      `json:"checkpointFingerprint"`
+	LayerStart            int         `json:"layerStart"`
+	LayerEnd              int         `json:"layerEnd"`
+	OwnsInput             bool        `json:"ownsInput"`
+	OwnsOutput            bool        `json:"ownsOutput"`
+	WeightKeyCount        int         `json:"weightKeyCount"`
+	OpenSequenceCount     int         `json:"openSequenceCount"`
+	MaxOpenSequenceCount  int         `json:"maxOpenSequenceCount"`
+	ForwardCount          int         `json:"forwardCount"`
+	KVCacheBytes          int         `json:"kvCacheBytes"`
+	RetainedBytes         int         `json:"retainedBytes"`
+	LoadedMemory          StageMemory `json:"loadedMemory"`
 }
 
 type PersistentWorkerState struct {

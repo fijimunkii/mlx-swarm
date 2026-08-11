@@ -59,23 +59,24 @@ type Verification struct {
 }
 
 type Result struct {
-	Model                string        `json:"model"`
-	ModelType            string        `json:"modelType"`
-	ShardPlan            ShardPlan     `json:"shardPlan"`
-	SequenceID           string        `json:"sequenceID"`
-	Prompt               string        `json:"prompt"`
-	PromptTokenIDs       []int32       `json:"promptTokenIDs"`
-	GeneratedTokenIDs    []int32       `json:"generatedTokenIDs"`
-	Text                 string        `json:"text"`
-	MaxTokens            int           `json:"maxTokens"`
-	StopReason           string        `json:"stopReason"`
-	EOSTokenID           *int32        `json:"eosTokenID,omitempty"`
-	RTol                 float64       `json:"rtol"`
-	ATol                 float64       `json:"atol"`
-	ProducerKVCacheBytes int           `json:"producerKVCacheBytes"`
-	ConsumerKVCacheBytes int           `json:"consumerKVCacheBytes"`
-	Timing               Timing        `json:"timing"`
-	Verification         *Verification `json:"verification,omitempty"`
+	Model                 string        `json:"model"`
+	ModelType             string        `json:"modelType"`
+	CheckpointFingerprint string        `json:"checkpointFingerprint"`
+	ShardPlan             ShardPlan     `json:"shardPlan"`
+	SequenceID            string        `json:"sequenceID"`
+	Prompt                string        `json:"prompt"`
+	PromptTokenIDs        []int32       `json:"promptTokenIDs"`
+	GeneratedTokenIDs     []int32       `json:"generatedTokenIDs"`
+	Text                  string        `json:"text"`
+	MaxTokens             int           `json:"maxTokens"`
+	StopReason            string        `json:"stopReason"`
+	EOSTokenID            *int32        `json:"eosTokenID,omitempty"`
+	RTol                  float64       `json:"rtol"`
+	ATol                  float64       `json:"atol"`
+	ProducerKVCacheBytes  int           `json:"producerKVCacheBytes"`
+	ConsumerKVCacheBytes  int           `json:"consumerKVCacheBytes"`
+	Timing                Timing        `json:"timing"`
+	Verification          *Verification `json:"verification,omitempty"`
 }
 
 type Session struct {
@@ -125,7 +126,7 @@ func NewSession(
 	}
 
 	split := producerModel.LayerCount / 2
-	modelHash := sha256.Sum256([]byte(config.Model))
+	modelHash := sha256.Sum256([]byte(config.Model + "\x00" + producerModel.CheckpointFingerprint))
 	suffix := hex.EncodeToString(modelHash[:6])
 	plan := ShardPlan{
 		Producer: Shard{ID: "generate-producer-" + suffix, LayerStart: 0, LayerEnd: split},
@@ -133,13 +134,15 @@ func NewSession(
 	}
 	if _, err := ensureShard(ctx, producer, workerproc.PersistentLoadShardRequest{
 		ModelID: config.Model, ShardID: plan.Producer.ID,
-		LayerStart: plan.Producer.LayerStart, LayerEnd: plan.Producer.LayerEnd, OwnsInput: true,
+		CheckpointFingerprint: producerModel.CheckpointFingerprint,
+		LayerStart:            plan.Producer.LayerStart, LayerEnd: plan.Producer.LayerEnd, OwnsInput: true,
 	}); err != nil {
 		return nil, fmt.Errorf("producer shard: %w", err)
 	}
 	if _, err := ensureShard(ctx, consumer, workerproc.PersistentLoadShardRequest{
 		ModelID: config.Model, ShardID: plan.Consumer.ID,
-		LayerStart: plan.Consumer.LayerStart, LayerEnd: plan.Consumer.LayerEnd, OwnsOutput: true,
+		CheckpointFingerprint: producerModel.CheckpointFingerprint,
+		LayerStart:            plan.Consumer.LayerStart, LayerEnd: plan.Consumer.LayerEnd, OwnsOutput: true,
 	}); err != nil {
 		return nil, fmt.Errorf("consumer shard: %w", err)
 	}
@@ -156,7 +159,8 @@ func NewSession(
 		referenceShard = "generate-reference-" + suffix
 		if _, err := ensureShard(ctx, reference, workerproc.PersistentLoadShardRequest{
 			ModelID: config.Model, ShardID: referenceShard,
-			LayerStart: 0, LayerEnd: producerModel.LayerCount, OwnsInput: true, OwnsOutput: true,
+			CheckpointFingerprint: producerModel.CheckpointFingerprint,
+			LayerStart:            0, LayerEnd: producerModel.LayerCount, OwnsInput: true, OwnsOutput: true,
 		}); err != nil {
 			return nil, fmt.Errorf("reference shard: %w", err)
 		}
@@ -188,9 +192,14 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 		}
 		request.SequenceID = sequenceID
 	}
+	ownerID, err := randomIdentifier("generation-owner-")
+	if err != nil {
+		return Result{}, err
+	}
 
 	result = Result{
-		Model: s.config.Model, ModelType: s.model.ModelType, ShardPlan: s.plan,
+		Model: s.config.Model, ModelType: s.model.ModelType,
+		CheckpointFingerprint: s.model.CheckpointFingerprint, ShardPlan: s.plan,
 		SequenceID: request.SequenceID, Prompt: request.Prompt, MaxTokens: request.MaxTokens,
 		RTol: s.config.RTol, ATol: s.config.ATol,
 		Timing: Timing{SessionSetupMicros: s.setupMicros},
@@ -217,7 +226,7 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 	}
 	opened := make([]sequenceTarget, 0, len(targets))
 	defer func() {
-		cleanupErr := closeSequences(opened, request.SequenceID)
+		cleanupErr := closeSequences(opened, request.SequenceID, ownerID)
 		if cleanupErr != nil {
 			if returnErr == nil {
 				returnErr = cleanupErr
@@ -227,7 +236,9 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 		}
 	}()
 	for _, target := range targets {
-		err := sequenceCommand(ctx, target.caller, "openSequence", target.shardID, request.SequenceID)
+		err := sequenceCommand(
+			ctx, target.caller, "openSequence", target.shardID, request.SequenceID, ownerID,
+		)
 		var workerResponseErr *workerproc.WorkerResponseError
 		// Transport failures are ambiguous: the worker may apply the open after
 		// the caller stops waiting. A worker response is definitive, though, and
@@ -372,12 +383,14 @@ type sequenceTarget struct {
 	shardID string
 }
 
-func closeSequences(targets []sequenceTarget, sequenceID string) error {
+func closeSequences(targets []sequenceTarget, sequenceID string, ownerID string) error {
 	var result error
 	for index := len(targets) - 1; index >= 0; index-- {
 		target := targets[index]
 		ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-		if err := sequenceCommand(ctx, target.caller, "closeSequence", target.shardID, sequenceID); err != nil {
+		if err := sequenceCommand(
+			ctx, target.caller, "closeSequence", target.shardID, sequenceID, ownerID,
+		); err != nil {
 			result = errors.Join(result, fmt.Errorf("close %s sequence: %w", target.name, err))
 		}
 		cancel()
@@ -400,7 +413,7 @@ func modelInfo(
 		return nil, errors.New("modelInfo returned no model metadata")
 	}
 	if response.Result.Model.ModelID != modelID || response.Result.Model.ModelType == "" ||
-		response.Result.Model.LayerCount <= 0 {
+		response.Result.Model.LayerCount <= 0 || response.Result.Model.CheckpointFingerprint == "" {
 		return nil, fmt.Errorf("modelInfo returned invalid metadata: %+v", *response.Result.Model)
 	}
 	return response.Result.Model, nil
@@ -408,7 +421,8 @@ func modelInfo(
 
 func matchModel(expected, actual *workerproc.PersistentModelResult, role string) error {
 	if expected.ModelID != actual.ModelID || expected.ModelType != actual.ModelType ||
-		expected.LayerCount != actual.LayerCount {
+		expected.LayerCount != actual.LayerCount ||
+		expected.CheckpointFingerprint != actual.CheckpointFingerprint {
 		return fmt.Errorf(
 			"%s model mismatch: producer=%+v %s=%+v", role, *expected, role, *actual,
 		)
@@ -425,26 +439,61 @@ func ensureShard(
 	if err != nil {
 		return nil, err
 	}
-	for index := range state.LoadedShards {
-		shard := &state.LoadedShards[index]
-		if shard.ShardID != request.ShardID {
-			continue
-		}
-		if shard.ModelID != request.ModelID || shard.LayerStart != request.LayerStart ||
-			shard.LayerEnd != request.LayerEnd || shard.OwnsInput != request.OwnsInput ||
-			shard.OwnsOutput != request.OwnsOutput {
-			return nil, fmt.Errorf("loaded shard %s does not match requested plan", request.ShardID)
-		}
-		return shard, nil
+	if shard, found, err := findLoadedShard(state, request); found || err != nil {
+		return shard, err
 	}
 	response, err := call(ctx, caller, workerproc.PersistentRequest{Command: "loadShard", LoadShard: &request})
 	if err != nil {
+		var workerResponseErr *workerproc.WorkerResponseError
+		if errors.As(err, &workerResponseErr) {
+			// A stable shard may have been loaded after the state snapshot by a
+			// concurrent session. Reconcile any explicit worker rejection with
+			// current state before failing this session.
+			if refreshed, stateErr := workerState(ctx, caller); stateErr == nil {
+				if shard, found, validationErr := findLoadedShard(refreshed, request); found || validationErr != nil {
+					return shard, validationErr
+				}
+			}
+		}
 		return nil, err
 	}
 	if response.Result == nil || response.Result.Shard == nil {
 		return nil, errors.New("loadShard returned no shard snapshot")
 	}
+	if err := validateLoadedShard(response.Result.Shard, request); err != nil {
+		return nil, err
+	}
 	return response.Result.Shard, nil
+}
+
+func findLoadedShard(
+	state *workerproc.PersistentWorkerState,
+	request workerproc.PersistentLoadShardRequest,
+) (*workerproc.PersistentShardSnapshot, bool, error) {
+	for index := range state.LoadedShards {
+		shard := &state.LoadedShards[index]
+		if shard.ShardID != request.ShardID {
+			continue
+		}
+		if err := validateLoadedShard(shard, request); err != nil {
+			return nil, true, err
+		}
+		return shard, true, nil
+	}
+	return nil, false, nil
+}
+
+func validateLoadedShard(
+	shard *workerproc.PersistentShardSnapshot,
+	request workerproc.PersistentLoadShardRequest,
+) error {
+	if shard.ModelID != request.ModelID ||
+		shard.CheckpointFingerprint != request.CheckpointFingerprint ||
+		shard.LayerStart != request.LayerStart || shard.LayerEnd != request.LayerEnd ||
+		shard.OwnsInput != request.OwnsInput || shard.OwnsOutput != request.OwnsOutput {
+		return fmt.Errorf("loaded shard %s does not match requested plan", request.ShardID)
+	}
+	return nil
 }
 
 func tokenize(
@@ -526,10 +575,13 @@ func sequenceCommand(
 	command string,
 	shardID string,
 	sequenceID string,
+	ownerID string,
 ) error {
 	_, err := call(ctx, caller, workerproc.PersistentRequest{
-		Command:  command,
-		Sequence: &workerproc.PersistentSequenceRequest{ShardID: shardID, SequenceID: sequenceID},
+		Command: command,
+		Sequence: &workerproc.PersistentSequenceRequest{
+			ShardID: shardID, SequenceID: sequenceID, OwnerID: ownerID,
+		},
 	})
 	return err
 }
@@ -588,9 +640,13 @@ func tokenTensor(tokens []int32) workerproc.WireTensor {
 }
 
 func randomSequenceID() (string, error) {
+	return randomIdentifier("generation-")
+}
+
+func randomIdentifier(prefix string) (string, error) {
 	bytes := make([]byte, 12)
 	if _, err := rand.Read(bytes); err != nil {
 		return "", fmt.Errorf("generate sequence ID: %w", err)
 	}
-	return "generation-" + hex.EncodeToString(bytes), nil
+	return prefix + hex.EncodeToString(bytes), nil
 }

@@ -65,8 +65,11 @@ Decode(model, shard, sequence, next_position, tensor) -> tensor
 A shard is initially a contiguous transformer layer range. The worker owns its
 weights while it is assigned. Opening a sequence creates an adapter-owned cache
 with the correct concrete type for every layer in that shard. The worker keys
-that cache by `(shardID, sequenceID)`, enforces contiguous positions, and drops
-only the sequence cache on close. Model-family adapters implement cached
+that cache by `(shardID, sequenceID)`, associates generation requests with a
+private sequence owner, enforces contiguous positions, and drops only
+owner-matching sequence state on close. Before shards are composed, the Go
+coordinator also requires an exact fingerprint match for the resolved
+checkpoint contents on every worker. Model-family adapters implement cached
 prefill/decode and attention-mask semantics behind an opaque cache interface;
 the Go control plane never handles cache tensors.
 
@@ -87,8 +90,8 @@ prompt -> tokenize -> producer prefill -> consumer prefill -> argmax
 ```
 
 The default split is derived from the adapter-reported layer count rather than
-from a model-family constant. Stable model-derived shard IDs let independent
-commands reuse stages already retained by `swarmd`; request-specific sequence
+from a model-family constant. Stable model-and-checkpoint-derived shard IDs let
+independent commands reuse stages already retained by `swarmd`; request-specific sequence
 IDs isolate and bound KV state. A local reference worker is optional in normal
 use and mandatory in the deterministic CI proof, where every distributed
 logit vector must be within tolerance and every greedy token must match.

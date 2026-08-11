@@ -31,7 +31,7 @@ The supported commands are:
 | Command | Payload | Effect |
 |---|---|---|
 | `health` | none | Proves the child is responsive. |
-| `modelInfo` | `model` | Resolves `modelID`, selects its adapter, and reports model type and layer count for architecture-neutral planning. |
+| `modelInfo` | `model` | Resolves `modelID`, selects its adapter, and reports model type, layer count, and checkpoint fingerprint for architecture-neutral planning. |
 | `tokenize` | `text` | Loads/caches the checkpoint tokenizer and converts text to token IDs, including special tokens by default. |
 | `detokenize` | `text` | Uses the cached checkpoint tokenizer to convert generated token IDs to text, skipping special tokens by default. |
 | `loadShard` | `loadShard` | Resolves `modelID`, selects its registered `model_type` adapter, loads the requested layer range, and retains it under `shardID`. |
@@ -44,7 +44,12 @@ The supported commands are:
 | `state` | none | Reports loaded ranges, adapter/model type, sequence and reuse counts, KV bytes, and MLX allocator memory. |
 | `shutdown` | none | Releases all shards, clears the MLX cache, acknowledges shutdown, and exits cleanly. Only the supervising daemon sends it. |
 
-`modelInfo` keeps the Go planner independent of model-family layer counts.
+`modelInfo` keeps the Go planner independent of model-family layer counts and
+fingerprints the resolved checkpoint contents. The coordinator requires the
+producer, consumer, and optional reference fingerprints to match, pins that
+fingerprint in each `loadShard` request, and validates it when reusing a stable
+shard ID. This prevents stages from different cached checkpoint revisions from
+being composed silently.
 `tokenize` accepts `modelID`, `text`, and `addSpecialTokens`; its result carries
 the encoded `tokenIDs` and optional `eosTokenID`. `detokenize` accepts
 `modelID`, `tokenIDs`, and `skipSpecialTokens`, and returns `text`. Tokenizer
@@ -61,6 +66,13 @@ or `hidden` for an intermediate stage. A forward also carries `shardID`,
 `sequenceID`, and `position`; the worker rejects an unknown shard or a sequence
 that was not opened on that shard. Token and hidden tensors represent one
 logical sequence and therefore require batch size one.
+
+Sequence requests may carry an `ownerID`. An open using the same non-empty
+owner is idempotent; a close carrying an owner only removes state created by
+that owner. The generation coordinator uses a fresh private owner for every
+request so cleanup after an ambiguous transport failure cannot close another
+request that happens to use the same public `sequenceID`. Owner-less requests
+remain available to the protocol smoke tools.
 
 `prefill` requires position zero and may carry one or more prompt positions.
 It is rejected after a sequence has already been prefilled. `decode` requires a
