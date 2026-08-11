@@ -44,6 +44,29 @@ worker="worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
 
 Checkpoint resolution, boundary transport, correctness checks, memory budgeting, safetensor selection, and partial module updates are architecture-neutral. Model-family adapters own parameter paths and execution details such as embedding scaling, attention masks, caches, final normalization, and output heads.
 
+### Persistent shard worker
+
+`swarmd` starts and supervises one long-lived Swift worker. A shard is loaded
+once, retained for repeated forwards, and explicitly unloaded after its open
+sequences are closed. The worker reports its registered adapter/model type,
+loaded ranges, reuse counters, sequence count, and live MLX memory.
+
+Run the real-checkpoint lifecycle proof directly:
+
+```bash
+worker="$PWD/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+go run ./cmd/swarm-session-smoke -worker "$worker"
+```
+
+The smoke performs 100 forwards through one retained stage, alternates two
+sequence IDs, rejects incorrect shard/sequence routing, unloads the stage, and
+proves clean shutdown plus bounded crash reporting. Its default checkpoint is
+the current CI fixture; the protocol and loader select arbitrary registered
+model-family adapters by checkpoint `model_type`.
+
+The framed request contract is documented in
+[`docs/persistent-worker-protocol.md`](docs/persistent-worker-protocol.md).
+
 ### Go-relayed two-process proof
 
 ```bash
@@ -95,7 +118,8 @@ Only after correctness is established do we add hedged execution, dynamic placem
 cmd/swarmd/              Go daemon / debug network receiver
 cmd/swarm-local/         local two-worker orchestration
 cmd/swarm-net/           two-machine shard experiment client
-internal/                Go control-plane and worker-process packages
+cmd/swarm-session-smoke/ persistent shard lifecycle and reuse proof
+internal/workerproc/     supervised local and HTTP persistent-worker clients
 proto/                   language-neutral protocol definitions
 worker/mlx/              Swift MLX worker
   CheckpointShardRuntime generic orchestration and adapter registry
@@ -108,4 +132,4 @@ ROADMAP.md                staged experimental plan
 
 ## Status
 
-The M2 real-checkpoint pipeline is implemented and enforced in paired macOS CI runners over Tailscale. Remaining M2 work is decode-time KV-cache ownership and statistically useful latency/throughput measurement; see [ROADMAP.md](ROADMAP.md).
+The M2 real-checkpoint pipeline and persistent shard lifecycle are implemented and enforced in paired macOS CI runners. Remaining M2 work is decode-time KV-cache ownership and statistically useful latency/throughput measurement; see [ROADMAP.md](ROADMAP.md).

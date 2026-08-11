@@ -333,7 +333,7 @@ enum CheckpointShardRuntime {
         )
     }
 
-    private static func resolveCheckpoint(modelID: String) async throws -> ResolvedCheckpoint {
+    static func resolveCheckpoint(modelID: String) async throws -> ResolvedCheckpoint {
         let resolved = try await resolve(
             configuration: ModelConfiguration(id: modelID),
             from: #hubDownloader(),
