@@ -141,8 +141,8 @@ func run() error {
 	if *timeout <= 0 {
 		return errors.New("-timeout must be positive")
 	}
-	if *forwardTimeout <= 0 {
-		return errors.New("-forward-timeout must be positive")
+	if *forwardTimeout < time.Millisecond {
+		return errors.New("-forward-timeout must be at least 1ms")
 	}
 	if *route == "" {
 		if *peer == "" {

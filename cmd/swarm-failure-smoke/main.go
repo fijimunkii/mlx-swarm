@@ -31,8 +31,8 @@ func run() error {
 	scenarioBound := flag.Duration("scenario-bound", 2*time.Second, "maximum allowed generation termination time")
 	timeout := flag.Duration("timeout", 30*time.Second, "overall harness timeout")
 	flag.Parse()
-	if *forwardDeadline <= 0 {
-		return errors.New("-forward-deadline must be positive")
+	if *forwardDeadline < time.Millisecond {
+		return errors.New("-forward-deadline must be at least 1ms")
 	}
 	if *scenarioBound <= *forwardDeadline {
 		return errors.New("-scenario-bound must exceed -forward-deadline")

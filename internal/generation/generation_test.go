@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -289,6 +290,20 @@ func TestNewSessionRejectsNonFiniteTolerances(t *testing.T) {
 				t.Fatal("expected non-finite tolerance error")
 			}
 		})
+	}
+}
+
+func TestNewSessionRejectsSubMillisecondForwardTimeout(t *testing.T) {
+	producer, consumer, _ := fakeSwarm([]int32{3})
+	_, err := NewSession(
+		context.Background(), producer, consumer, nil,
+		SessionConfig{
+			Model: "test/model", RTol: 1e-4, ATol: 1e-4,
+			ForwardTimeout: 500 * time.Microsecond,
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "at least 1ms") {
+		t.Fatalf("sub-millisecond timeout error = %v", err)
 	}
 }
 

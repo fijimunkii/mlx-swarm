@@ -200,6 +200,9 @@ func NewSession(
 	if config.ForwardTimeout < 0 {
 		return nil, errors.New("forward timeout must be non-negative")
 	}
+	if config.ForwardTimeout > 0 && config.ForwardTimeout < time.Millisecond {
+		return nil, errors.New("forward timeout must be at least 1ms")
+	}
 	if config.ForwardTimeout == 0 {
 		config.ForwardTimeout = DefaultForwardTimeout
 	}

@@ -38,7 +38,7 @@ func TestPersistentWriteLoopDiscardsCanceledRequestBeforeWrite(t *testing.T) {
 	client.writes <- persistentWrite{
 		ctx: ctx, requestID: "canceled", payload: []byte("late open\n"), result: result,
 	}
-	if err := <-result; !errors.Is(err, context.Canceled) {
+	if err := <-result; !errors.Is(err, context.Canceled) || !isNotDispatched(err) {
 		t.Fatalf("write result = %v, want context canceled", err)
 	}
 	client.mu.Lock()

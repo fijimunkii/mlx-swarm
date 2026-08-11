@@ -240,6 +240,7 @@ type persistentWrite struct {
 	requestID string
 	payload   []byte
 	result    chan error
+	started   chan struct{}
 }
 
 func StartPersistent(path string) (*PersistentClient, error) {
@@ -337,9 +338,11 @@ func (c *PersistentClient) Call(
 	payload = append(payload, '\n')
 
 	writeResult := make(chan error, 1)
+	writeStarted := make(chan struct{})
 	select {
 	case c.writes <- persistentWrite{
-		ctx: ctx, requestID: request.RequestID, payload: payload, result: writeResult,
+		ctx: ctx, requestID: request.RequestID, payload: payload,
+		result: writeResult, started: writeStarted,
 	}:
 	case <-ctx.Done():
 		c.removePending(request.RequestID)
@@ -354,15 +357,26 @@ func (c *PersistentClient) Call(
 			return PersistentResponse{}, fmt.Errorf("write persistent worker request: %w", err)
 		}
 	case <-ctx.Done():
-		c.abortTimedOutInference(request)
-		return PersistentResponse{}, ctx.Err()
+		select {
+		case err := <-writeResult:
+			if err != nil {
+				return PersistentResponse{}, fmt.Errorf("write persistent worker request: %w", err)
+			}
+			c.abortTimedOutInference(request)
+			return PersistentResponse{}, ctx.Err()
+		case <-writeStarted:
+			c.abortTimedOutInference(request)
+			return PersistentResponse{}, ctx.Err()
+		case <-c.done:
+			return PersistentResponse{}, c.callError()
+		}
 	case <-c.done:
 		return PersistentResponse{}, c.callError()
 	}
 
 	select {
 	case result := <-response:
-		if err := ctx.Err(); err != nil {
+		if err := contextCompletionError(ctx); err != nil {
 			c.abortTimedOutInference(request)
 			return PersistentResponse{}, err
 		}
@@ -373,7 +387,7 @@ func (c *PersistentClient) Call(
 	case <-c.done:
 		select {
 		case result := <-response:
-			if err := ctx.Err(); err != nil {
+			if err := contextCompletionError(ctx); err != nil {
 				c.abortTimedOutInference(request)
 				return PersistentResponse{}, err
 			}
@@ -399,8 +413,11 @@ func (c *PersistentClient) writeLoop() {
 			// the worker becomes writable again.
 			if err := write.ctx.Err(); err != nil {
 				c.removePending(write.requestID)
-				write.result <- err
+				write.result <- notDispatched(err)
 				continue
+			}
+			if write.started != nil {
+				close(write.started)
 			}
 			written, err := c.stdin.Write(write.payload)
 			if err == nil && written != len(write.payload) {

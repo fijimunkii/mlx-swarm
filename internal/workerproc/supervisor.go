@@ -62,7 +62,7 @@ func (supervisor *PersistentSupervisor) Call(
 		return PersistentResponse{}, err
 	}
 	defer supervisor.releaseCall()
-	if err := ctx.Err(); err != nil {
+	if err := contextCompletionError(ctx); err != nil {
 		return PersistentResponse{}, err
 	}
 

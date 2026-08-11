@@ -57,3 +57,21 @@ func TestRequestContextAlignsCallerDeadlineToWirePrecision(t *testing.T) {
 		t.Fatalf("deadline = %v, request=%d, want %v", deadline, request.DeadlineUnixMillis, want)
 	}
 }
+
+type delayedDeadlineContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func (ctx delayedDeadlineContext) Deadline() (time.Time, bool) {
+	return ctx.deadline, true
+}
+
+func TestContextCompletionErrorObservesDeadlineBeforeTimerCallback(t *testing.T) {
+	ctx := delayedDeadlineContext{
+		Context: context.Background(), deadline: time.Now().Add(-time.Millisecond),
+	}
+	if err := contextCompletionError(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("context completion error = %v", err)
+	}
+}

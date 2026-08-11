@@ -54,7 +54,7 @@ func (c *HTTPPersistentClient) Call(
 	if request.Command == "" {
 		return PersistentResponse{}, fmt.Errorf("persistent worker command is empty")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := contextCompletionError(ctx); err != nil {
 		return PersistentResponse{}, err
 	}
 	callContext, cancel, prepared, err := RequestContext(ctx, request)
@@ -93,7 +93,7 @@ func (c *HTTPPersistentClient) Call(
 	if err != nil {
 		return PersistentResponse{}, fmt.Errorf("read swarmd persistent worker response: %w", err)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := contextCompletionError(ctx); err != nil {
 		return PersistentResponse{}, err
 	}
 	if len(body) > maxPersistentResponseBytes {

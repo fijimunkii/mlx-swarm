@@ -54,7 +54,10 @@ func Run(
 	if executable == "" {
 		return Summary{}, errors.New("fault worker executable is required")
 	}
-	if forwardDeadline <= 0 || scenarioBound <= forwardDeadline {
+	if forwardDeadline < time.Millisecond {
+		return Summary{}, errors.New("forward deadline must be at least 1ms")
+	}
+	if scenarioBound <= forwardDeadline {
 		return Summary{}, errors.New("scenario bound must exceed the positive forward deadline")
 	}
 	summary := Summary{

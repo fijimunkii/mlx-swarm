@@ -9,6 +9,18 @@ import (
 
 var ErrInferenceDeadlineRequired = errors.New("inference request requires a deadline")
 
+// contextCompletionError observes an elapsed wall-clock deadline even when
+// the context timer callback has not yet been scheduled.
+func contextCompletionError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !deadline.After(time.Now()) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
 // RequestContext applies the earliest caller or wire deadline and writes it
 // back to inference requests before they cross a process or network boundary.
 func RequestContext(
