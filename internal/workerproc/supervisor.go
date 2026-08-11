@@ -18,6 +18,7 @@ type PersistentStarter func() (*PersistentClient, error)
 // session must reload its shards and start a fresh sequence.
 type PersistentSupervisor struct {
 	mu           sync.Mutex
+	callGate     chan struct{}
 	starter      PersistentStarter
 	client       *PersistentClient
 	closed       bool
@@ -38,7 +39,9 @@ func NewPersistentSupervisor(starter PersistentStarter) (*PersistentSupervisor, 
 	if err != nil {
 		return nil, err
 	}
-	return &PersistentSupervisor{starter: starter, client: client}, nil
+	return &PersistentSupervisor{
+		callGate: make(chan struct{}, 1), starter: starter, client: client,
+	}, nil
 }
 
 func (supervisor *PersistentSupervisor) Call(
@@ -48,23 +51,40 @@ func (supervisor *PersistentSupervisor) Call(
 	if request.Command == "" {
 		return PersistentResponse{}, errors.New("persistent worker command is empty")
 	}
+	callContext, cancel, prepared, err := RequestContext(ctx, request)
+	if err != nil {
+		return PersistentResponse{}, err
+	}
+	defer cancel()
+	ctx = callContext
+	request = prepared
+	if err := supervisor.acquireCall(ctx); err != nil {
+		return PersistentResponse{}, err
+	}
+	defer supervisor.releaseCall()
+
 	supervisor.mu.Lock()
-	defer supervisor.mu.Unlock()
 	if supervisor.closed {
+		supervisor.mu.Unlock()
 		return PersistentResponse{}, errPersistentWorkerStopped
 	}
-	response, err := supervisor.client.Call(ctx, request)
+	client := supervisor.client
+	supervisor.mu.Unlock()
+	response, err := client.Call(ctx, request)
 	if err == nil || isWorkerRejection(err) || errors.Is(err, ErrInferenceDeadlineRequired) {
 		return response, err
 	}
 	if errors.Is(err, context.Canceled) && !isInferenceCommand(request.Command) {
 		return response, err
 	}
-	if restartErr := supervisor.restartLocked(); restartErr != nil {
+	if restartErr := supervisor.restart(client); restartErr != nil {
 		return response, errors.Join(err, fmt.Errorf("restart persistent worker: %w", restartErr))
 	}
 	if isSafeSupervisorRetry(request.Command) && ctx.Err() == nil {
-		return supervisor.client.Call(ctx, request)
+		supervisor.mu.Lock()
+		retryClient := supervisor.client
+		supervisor.mu.Unlock()
+		return retryClient.Call(ctx, request)
 	}
 	return response, err
 }
@@ -76,15 +96,26 @@ func (supervisor *PersistentSupervisor) RestartCount() int {
 }
 
 func (supervisor *PersistentSupervisor) Shutdown(ctx context.Context) error {
-	supervisor.mu.Lock()
-	defer supervisor.mu.Unlock()
-	if supervisor.closed {
-		return nil
-	}
-	if err := supervisor.client.Shutdown(ctx); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := supervisor.acquireCall(ctx); err != nil {
+		return err
+	}
+	defer supervisor.releaseCall()
+	supervisor.mu.Lock()
+	if supervisor.closed {
+		supervisor.mu.Unlock()
+		return nil
+	}
+	client := supervisor.client
+	supervisor.mu.Unlock()
+	if err := client.Shutdown(ctx); err != nil {
+		return err
+	}
+	supervisor.mu.Lock()
 	supervisor.closed = true
+	supervisor.mu.Unlock()
 	return nil
 }
 
@@ -107,8 +138,31 @@ func (supervisor *PersistentSupervisor) Wait(ctx context.Context) error {
 	return client.Wait(ctx)
 }
 
-func (supervisor *PersistentSupervisor) restartLocked() error {
+func (supervisor *PersistentSupervisor) acquireCall(ctx context.Context) error {
+	select {
+	case supervisor.callGate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (supervisor *PersistentSupervisor) releaseCall() {
+	<-supervisor.callGate
+}
+
+func (supervisor *PersistentSupervisor) restart(failed *PersistentClient) error {
+	supervisor.mu.Lock()
+	if supervisor.closed {
+		supervisor.mu.Unlock()
+		return errPersistentWorkerStopped
+	}
+	if supervisor.client != failed {
+		supervisor.mu.Unlock()
+		return nil
+	}
 	old := supervisor.client
+	supervisor.mu.Unlock()
 	if old != nil {
 		killErr := old.Kill()
 		reapContext, cancel := context.WithTimeout(context.Background(), supervisorReapTimeout)
@@ -125,8 +179,10 @@ func (supervisor *PersistentSupervisor) restartLocked() error {
 	if err != nil {
 		return err
 	}
+	supervisor.mu.Lock()
 	supervisor.client = client
 	supervisor.restartCount++
+	supervisor.mu.Unlock()
 	return nil
 }
 
