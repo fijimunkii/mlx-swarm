@@ -16,14 +16,28 @@ import (
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
 
-type shardResult struct {
-	Model              string `json:"model"`
-	Layers             int    `json:"layers"`
-	SplitLayer         int    `json:"splitLayer"`
-	BoundaryBytes      int    `json:"boundaryBytes"`
-	BoundaryDType      string `json:"boundaryDType"`
-	OutputShape        []int  `json:"outputShape"`
-	MatchesSingleRange bool   `json:"matchesSingleRange"`
+type stageMemory struct {
+	ActiveBytes int `json:"activeBytes"`
+	CacheBytes  int `json:"cacheBytes"`
+	PeakBytes   int `json:"peakBytes"`
+}
+
+type checkpointShardResult struct {
+	Model                      string      `json:"model"`
+	ModelType                  string      `json:"modelType"`
+	Layers                     int         `json:"layers"`
+	SplitLayer                 int         `json:"splitLayer"`
+	WorkerBudgetBytes          int         `json:"workerBudgetBytes"`
+	FullCheckpointAfterForward stageMemory `json:"fullCheckpointAfterForward"`
+	FirstStageAfterForward     stageMemory `json:"firstStageAfterForward"`
+	SecondStageAfterForward    stageMemory `json:"secondStageAfterForward"`
+	BoundaryBytes              int         `json:"boundaryBytes"`
+	BoundaryDType              string      `json:"boundaryDType"`
+	OutputShape                []int       `json:"outputShape"`
+	Rtol                       float64     `json:"rtol"`
+	Atol                       float64     `json:"atol"`
+	MatchesFullCheckpoint      bool        `json:"matchesFullCheckpoint"`
+	PassesMemoryProof          bool        `json:"passesMemoryProof"`
 }
 
 type networkSummary struct {
@@ -37,11 +51,20 @@ type networkSummary struct {
 	TransportOverheadMillis float64 `json:"transportOverheadMillis"`
 	TotalMillis             float64 `json:"totalMillis"`
 	WireEffectiveMBps       float64 `json:"wireEffectiveMBps"`
-	MatchesSingleRange      bool    `json:"matchesSingleRange"`
+	MatchesFullCheckpoint   bool    `json:"matchesFullCheckpoint"`
+	PassesMemoryProof       bool    `json:"passesMemoryProof"`
 	Model                   string  `json:"model"`
+	ModelType               string  `json:"modelType"`
 	Layers                  int     `json:"layers"`
 	SplitLayer              int     `json:"splitLayer"`
 	BoundaryDType           string  `json:"boundaryDType"`
+	OutputShape             []int   `json:"outputShape"`
+	WorkerBudgetBytes       int     `json:"workerBudgetBytes"`
+	FullCheckpointPeakBytes int     `json:"fullCheckpointPeakBytes"`
+	FirstStagePeakBytes     int     `json:"firstStagePeakBytes"`
+	SecondStagePeakBytes    int     `json:"secondStagePeakBytes"`
+	Rtol                    float64 `json:"rtol"`
+	Atol                    float64 `json:"atol"`
 }
 
 func main() {
@@ -54,17 +77,17 @@ func main() {
 	defer cancel()
 
 	local := workerproc.Client{Path: *worker}
-	producer, err := local.Run(ctx, []string{"shard-produce-stdio"}, nil)
+	producer, err := local.Run(ctx, []string{"checkpoint-shard-produce-stdio"}, nil)
 	if err != nil {
 		fatalf("local producer failed: %v", err)
 	}
 
-	endpoint := strings.TrimRight(*peer, "/") + "/v1/debug/shard/finish"
+	endpoint := strings.TrimRight(*peer, "/") + "/v1/debug/checkpoint-shard/finish"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(producer.Output))
 	if err != nil {
 		fatalf("create request: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/vnd.mlx-swarm.wiretensor+json")
+	req.Header.Set("Content-Type", "application/vnd.mlx-swarm.checkpoint-boundary+json")
 
 	start := time.Now()
 	resp, err := (&http.Client{}).Do(req)
@@ -82,12 +105,15 @@ func main() {
 		fatalf("remote returned %s: %s", resp.Status, bytes.TrimSpace(body))
 	}
 
-	var result shardResult
+	var result checkpointShardResult
 	if err := json.Unmarshal(bytes.TrimSpace(body), &result); err != nil {
 		fatalf("decode remote result: %v; output=%q", err, body)
 	}
-	if !result.MatchesSingleRange {
-		fatalf("remote sharded result did not match single-range reference")
+	if !result.MatchesFullCheckpoint {
+		fatalf("remote checkpoint shards did not match full-checkpoint logits")
+	}
+	if !result.PassesMemoryProof {
+		fatalf("remote checkpoint shards did not pass the configured memory-budget proof")
 	}
 
 	producerMillis := millis(producer.Duration)
@@ -110,11 +136,20 @@ func main() {
 		TransportOverheadMillis: transportOverheadMillis,
 		TotalMillis:             producerMillis + networkMillis,
 		WireEffectiveMBps:       effectiveMBps(len(producer.Output), networkDuration),
-		MatchesSingleRange:      result.MatchesSingleRange,
+		MatchesFullCheckpoint:   result.MatchesFullCheckpoint,
+		PassesMemoryProof:       result.PassesMemoryProof,
 		Model:                   result.Model,
+		ModelType:               result.ModelType,
 		Layers:                  result.Layers,
 		SplitLayer:              result.SplitLayer,
 		BoundaryDType:           result.BoundaryDType,
+		OutputShape:             result.OutputShape,
+		WorkerBudgetBytes:       result.WorkerBudgetBytes,
+		FullCheckpointPeakBytes: result.FullCheckpointAfterForward.PeakBytes,
+		FirstStagePeakBytes:     result.FirstStageAfterForward.PeakBytes,
+		SecondStagePeakBytes:    result.SecondStageAfterForward.PeakBytes,
+		Rtol:                    result.Rtol,
+		Atol:                    result.Atol,
 	}
 
 	encoded, err := json.Marshal(summary)

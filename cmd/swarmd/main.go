@@ -56,33 +56,14 @@ func main() {
 	// complementary worker range on another machine. It is intentionally not
 	// the final public protocol and has no authentication or encryption.
 	mux.HandleFunc("POST /v1/debug/shard/finish", func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, maxDebugTensorPayload)
-		payload, err := io.ReadAll(r.Body)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		if len(payload) == 0 {
-			writeError(w, http.StatusBadRequest, io.ErrUnexpectedEOF)
-			return
-		}
+		finishShard(w, r, worker, []string{"shard-finish-stdio"}, exitAfterDebugShard, debugShardComplete)
+	})
 
-		result, err := worker.Run(r.Context(), []string{"shard-finish-stdio"}, payload)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-MLX-Swarm-Worker-Micros", strconv.FormatInt(result.Duration.Microseconds(), 10))
-		_, _ = w.Write(result.Output)
-
-		if exitAfterDebugShard {
-			select {
-			case debugShardComplete <- struct{}{}:
-			default:
-			}
-		}
+	// Real-checkpoint counterpart to the deterministic fixture above. The
+	// producer envelope carries its hidden state and memory measurements; this
+	// machine independently loads the complementary range plus norm/lm_head.
+	mux.HandleFunc("POST /v1/debug/checkpoint-shard/finish", func(w http.ResponseWriter, r *http.Request) {
+		finishShard(w, r, worker, []string{"checkpoint-shard-finish-stdio"}, exitAfterDebugShard, debugShardComplete)
 	})
 
 	server := &http.Server{
@@ -108,6 +89,43 @@ func main() {
 	log.Printf("swarmd listening on %s", addr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
+	}
+}
+
+func finishShard(
+	w http.ResponseWriter,
+	r *http.Request,
+	worker workerproc.Client,
+	workerArgs []string,
+	exitAfter bool,
+	complete chan<- struct{},
+) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxDebugTensorPayload)
+	payload, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(payload) == 0 {
+		writeError(w, http.StatusBadRequest, io.ErrUnexpectedEOF)
+		return
+	}
+
+	result, err := worker.Run(r.Context(), workerArgs, payload)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-MLX-Swarm-Worker-Micros", strconv.FormatInt(result.Duration.Microseconds(), 10))
+	_, _ = w.Write(result.Output)
+
+	if exitAfter {
+		select {
+		case complete <- struct{}{}:
+		default:
+		}
 	}
 }
 

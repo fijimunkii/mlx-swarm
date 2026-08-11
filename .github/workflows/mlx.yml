@@ -72,6 +72,10 @@ jobs:
       # needs ordinary github.com DNS while fetching mlx-swift-lm.
       - name: Build MLX worker and Metal library
         run: ./scripts/build-mlx-worker.sh
+      - name: Cache and verify the real checkpoint before Tailscale changes DNS
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          "$worker" checkpoint-shard-smoke
       - name: Connect receiver to Tailscale
         uses: tailscale/github-action@v4
         with:
@@ -173,8 +177,12 @@ jobs:
             -peer "http://${peer_ip}:8080")"
           printf '%s\n' "$network_json"
 
-          if [ "$(printf '%s' "$network_json" | jq -r '.matchesSingleRange')" != "true" ]; then
-            echo "Distributed output did not match reference" >&2
+          if [ "$(printf '%s' "$network_json" | jq -r '.matchesFullCheckpoint')" != "true" ]; then
+            echo "Distributed final logits did not match the full checkpoint" >&2
+            exit 1
+          fi
+          if [ "$(printf '%s' "$network_json" | jq -r '.passesMemoryProof')" != "true" ]; then
+            echo "Distributed workers did not pass the configured memory proof" >&2
             exit 1
           fi
 
@@ -186,10 +194,16 @@ jobs:
             echo "| Metric | Value |"
             echo "|---|---:|"
             printf '| Model | `%s` |\n' "$(printf '%s' "$network_json" | jq -r '.model')"
+            printf '| Adapter model type | `%s` |\n' "$(printf '%s' "$network_json" | jq -r '.modelType')"
             printf '| Layers | %s (split at %s) |\n' "$(printf '%s' "$network_json" | jq -r '.layers')" "$(printf '%s' "$network_json" | jq -r '.splitLayer')"
             printf '| Boundary dtype | `%s` |\n' "$(printf '%s' "$network_json" | jq -r '.boundaryDType')"
+            printf '| Output shape | `%s` |\n' "$(printf '%s' "$network_json" | jq -c '.outputShape')"
             printf '| Tensor bytes | %s |\n' "$(printf '%s' "$network_json" | jq -r '.boundaryTensorBytes')"
             printf '| Wire bytes | %s |\n' "$(printf '%s' "$network_json" | jq -r '.boundaryWireBytes')"
+            printf '| Worker budget | %.2f MiB |\n' "$(printf '%s' "$network_json" | jq -r '.workerBudgetBytes / 1048576')"
+            printf '| Full checkpoint peak | %.2f MiB |\n' "$(printf '%s' "$network_json" | jq -r '.fullCheckpointPeakBytes / 1048576')"
+            printf '| Producer shard peak | %.2f MiB |\n' "$(printf '%s' "$network_json" | jq -r '.firstStagePeakBytes / 1048576')"
+            printf '| Consumer shard peak | %.2f MiB |\n' "$(printf '%s' "$network_json" | jq -r '.secondStagePeakBytes / 1048576')"
             printf '| Producer | %.3f ms |\n' "$(printf '%s' "$network_json" | jq -r '.producerMillis')"
             printf '| Network round trip | %.3f ms |\n' "$(printf '%s' "$network_json" | jq -r '.networkMillis')"
             printf '| Remote worker | %.3f ms |\n' "$(printf '%s' "$network_json" | jq -r '.remoteWorkerMillis')"
@@ -197,7 +211,9 @@ jobs:
             printf '| Total producer + remote | %.3f ms |\n' "$(printf '%s' "$network_json" | jq -r '.totalMillis')"
             printf '| Effective wire throughput | %.3f MB/s |\n' "$(printf '%s' "$network_json" | jq -r '.wireEffectiveMBps')"
             printf '| Tailscale route | `%s` |\n' "$route"
-            printf '| Correctness | **%s** |\n' "$(printf '%s' "$network_json" | jq -r 'if .matchesSingleRange then "MATCH" else "MISMATCH" end')"
+            printf '| Logit tolerance | `rtol=%s, atol=%s` |\n' "$(printf '%s' "$network_json" | jq -r '.rtol')" "$(printf '%s' "$network_json" | jq -r '.atol')"
+            printf '| Final-logit correctness | **%s** |\n' "$(printf '%s' "$network_json" | jq -r 'if .matchesFullCheckpoint then "MATCH" else "MISMATCH" end')"
+            printf '| Memory proof | **%s** |\n' "$(printf '%s' "$network_json" | jq -r 'if .passesMemoryProof then "PASS" else "FAIL" end')"
             echo
             echo "Route probe: \`$route_line\`"
           } >> "$GITHUB_STEP_SUMMARY"

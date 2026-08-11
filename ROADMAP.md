@@ -4,23 +4,32 @@
 
 - [x] establish Go control-plane / Swift worker boundary
 - [x] define initial wire messages
-- [ ] build `swarmd` and `mlx-worker` in CI
-- [ ] add local worker health handshake
+- [x] build `swarmd` and `mlx-worker` in CI
+- [x] add local worker health/capability handshake
 
 ## M1 — one machine, one worker
 
-- [ ] load a small supported model through MLX Swift LM
-- [ ] expose worker capabilities and memory information
-- [ ] run local prefill/decode through the worker API
-- [ ] establish deterministic reference outputs
+- [x] load a small supported model through MLX Swift LM
+- [x] expose worker capabilities and memory information
+- [x] run local prefill/decode through the worker command API
+- [x] establish deterministic reference outputs
 
 ## M2 — two-Mac pipeline
 
-- [ ] load complementary contiguous layer ranges
-- [ ] send hidden state from worker A to worker B
+- [x] load complementary contiguous layer ranges from a real checkpoint
+- [x] send hidden state from worker A to worker B
 - [ ] preserve per-shard KV cache
-- [ ] compare final logits with single-node inference
-- [ ] measure transfer size, p50/p95 latency, TTFT, and tokens/sec
+- [x] compare final logits with single-node inference at an explicit tolerance
+- [ ] measure p50/p95 latency, TTFT, and tokens/sec (single-run transfer/timing metrics exist)
+
+Current correctness proof (`mlx-community/gemma-3-270m-it-4bit`):
+
+- layers 0–8 run on the producer; layers 9–17 plus final norm/head run on the consumer
+- the `bfloat16` boundary is 7,680 tensor bytes; output logits are `[1, 6, 262144]`
+- distributed logits match full-checkpoint inference at `rtol=atol=1e-4`
+- under a configured 128 MiB worker budget, measured peaks are about 119 MiB and 121 MiB while full-checkpoint inference peaks near 150 MiB
+- paired macOS CI runners exercise the boundary over Tailscale and require both correctness and memory proofs
+- checkpoint orchestration and filtered loading are architecture-neutral; `model_type` selects a registered adapter, with Gemma 3 as the first validated family
 
 ## M3 — chaos harness
 
@@ -51,6 +60,8 @@
 - [ ] select a model that cannot fit on either Mac individually
 - [ ] host it across multiple workers
 - [ ] demonstrate generation and controlled worker failure
+
+The M2 checkpoint proof establishes the loader and budget accounting needed for M6, but does not claim that the 270M validation model exceeds either Mac's physical memory.
 
 ## Later
 

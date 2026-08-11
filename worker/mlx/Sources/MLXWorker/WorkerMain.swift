@@ -15,6 +15,8 @@ private enum WorkerCommand {
     case shardFinish(path: String)
     case shardProduceStdio
     case shardFinishStdio
+    case checkpointShardProduceStdio
+    case checkpointShardFinishStdio
     case generate(prompt: String)
 
     init(arguments: [String]) throws {
@@ -37,7 +39,7 @@ private enum WorkerCommand {
             self = .checkpointShardSmoke(
                 modelID: arguments.count == 2
                     ? arguments[1]
-                    : Gemma3CheckpointShard.defaultModelID
+                    : WorkerCheckpointShards.defaultModelID
             )
         case "shard-produce":
             guard arguments.count == 2 else {
@@ -53,6 +55,10 @@ private enum WorkerCommand {
             self = .shardProduceStdio
         case "shard-finish-stdio":
             self = .shardFinishStdio
+        case "checkpoint-shard-produce-stdio":
+            self = .checkpointShardProduceStdio
+        case "checkpoint-shard-finish-stdio":
+            self = .checkpointShardFinishStdio
         case "generate":
             let prompt = arguments.dropFirst().joined(separator: " ")
             guard !prompt.isEmpty else {
@@ -73,7 +79,7 @@ private enum WorkerError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .usage(let message):
-            return "\(message)\nusage: mlx-worker [health | capabilities | shard-smoke | checkpoint-shard-smoke [model-id] | shard-produce <path> | shard-finish <path> | shard-produce-stdio | shard-finish-stdio | generate <prompt>]"
+            return "\(message)\nusage: mlx-worker [health | capabilities | shard-smoke | checkpoint-shard-smoke [model-id] | shard-produce <path> | shard-finish <path> | shard-produce-stdio | shard-finish-stdio | checkpoint-shard-produce-stdio | checkpoint-shard-finish-stdio | generate <prompt>]"
         case .shardMismatch:
             return "sharded output did not match the single-range reference"
         case .checkpointShardMismatch:
@@ -85,6 +91,7 @@ private enum WorkerError: LocalizedError {
 private struct WorkerCapabilities: Codable {
     let runtime: String
     let device: String
+    let checkpointShardModelTypes: [String]
     let physicalMemoryBytes: UInt64
     let mlxActiveMemoryBytes: Int
     let mlxCacheMemoryBytes: Int
@@ -104,6 +111,8 @@ struct MLXWorker {
             let capabilities = WorkerCapabilities(
                 runtime: "mlx-swift",
                 device: Device.defaultDevice().deviceType?.rawValue ?? "unknown",
+                checkpointShardModelTypes: WorkerCheckpointShards.configuration
+                    .adapterRegistry.supportedModelTypes,
                 physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
                 mlxActiveMemoryBytes: Memory.activeMemory,
                 mlxCacheMemoryBytes: Memory.cacheMemory
@@ -118,8 +127,11 @@ struct MLXWorker {
             print(String(decoding: try encoder.encode(result), as: UTF8.self))
 
         case .checkpointShardSmoke(let modelID):
-            let result = try await Gemma3CheckpointShard.run(modelID: modelID)
-            guard result.matchesFullCheckpoint else {
+            let result = try await CheckpointShardRuntime.run(
+                modelID: modelID,
+                configuration: WorkerCheckpointShards.configuration
+            )
+            guard result.matchesFullCheckpoint, result.passesMemoryProof else {
                 throw WorkerError.checkpointShardMismatch
             }
             print(String(decoding: try encoder.encode(result), as: UTF8.self))
@@ -147,6 +159,27 @@ struct MLXWorker {
             let payload = FileHandle.standardInput.readDataToEndOfFile()
             let result = try Gemma3ShardSmoke.finishBoundary(from: payload)
             try printShardResult(result, encoder: encoder)
+
+        case .checkpointShardProduceStdio:
+            // The envelope includes the real checkpoint boundary plus producer
+            // memory measurements for the remote consumer's proof.
+            FileHandle.standardOutput.write(
+                try await CheckpointShardRuntime.produceBoundaryPayload(
+                    modelID: WorkerCheckpointShards.defaultModelID,
+                    configuration: WorkerCheckpointShards.configuration
+                )
+            )
+
+        case .checkpointShardFinishStdio:
+            let payload = FileHandle.standardInput.readDataToEndOfFile()
+            let result = try await CheckpointShardRuntime.finishBoundary(
+                from: payload,
+                configuration: WorkerCheckpointShards.configuration
+            )
+            guard result.matchesFullCheckpoint, result.passesMemoryProof else {
+                throw WorkerError.checkpointShardMismatch
+            }
+            print(String(decoding: try encoder.encode(result), as: UTF8.self))
 
         case .generate(let prompt):
             let configuration = LLMRegistry.smolLM_135M_4bit
