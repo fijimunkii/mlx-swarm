@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import MLX
 
 struct PersistentWorkerRequest: Codable {
@@ -154,9 +155,43 @@ private final class PersistentSequenceState {
     let cache: any CheckpointShardSequenceCache
     var nextPosition = 0
     var prefilled = false
+    var completedMutation: PersistentCompletedMutation?
 
     init(cache: any CheckpointShardSequenceCache) {
         self.cache = cache
+    }
+}
+
+private struct PersistentCompletedMutation {
+    let operation: String
+    let position: UInt64
+    let inputKind: String
+    let inputShape: [Int]
+    let inputDType: WireTensor.ElementType
+    let inputDigest: Data
+    let result: PersistentForwardResult
+
+    init(
+        operation: String,
+        request: PersistentForwardRequest,
+        result: PersistentForwardResult
+    ) {
+        self.operation = operation
+        self.position = request.position
+        self.inputKind = request.inputKind
+        self.inputShape = request.input.shape
+        self.inputDType = request.input.dtype
+        self.inputDigest = Data(SHA256.hash(data: request.input.data))
+        self.result = result
+    }
+
+    func matches(operation: String, request: PersistentForwardRequest) -> Bool {
+        self.operation == operation
+            && position == request.position
+            && inputKind == request.inputKind
+            && inputShape == request.input.shape
+            && inputDType == request.input.dtype
+            && inputDigest == Data(SHA256.hash(data: request.input.data))
     }
 }
 
@@ -357,6 +392,12 @@ final class PersistentShardService {
         guard let sequence = shard.sequences[request.sequenceID] else {
             throw PersistentWorkerError.sequenceNotFound(request.shardID, request.sequenceID)
         }
+        if operation != "forward",
+           let completed = sequence.completedMutation,
+           completed.matches(operation: operation, request: request)
+        {
+            return completed.result
+        }
 
         let input: MLXArray
         let inputLength: Int
@@ -443,7 +484,7 @@ final class PersistentShardService {
         let elapsed = DispatchTime.now().uptimeNanoseconds - start
         shard.forwardCount += 1
         forwardCount += 1
-        return PersistentForwardResult(
+        let result = PersistentForwardResult(
             shardID: request.shardID,
             sequenceID: request.sequenceID,
             operation: operation,
@@ -454,6 +495,14 @@ final class PersistentShardService {
             kvCacheBytes: sequence.cache.memoryBytes,
             memory: CheckpointMemory.snapshot()
         )
+        if operation == "prefill" || operation == "decode" {
+            sequence.completedMutation = PersistentCompletedMutation(
+                operation: operation,
+                request: request,
+                result: result
+            )
+        }
+        return result
     }
 
     private func validatePosition(

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -45,6 +47,7 @@ type smokeSummary struct {
 	MaxRelativeDifference       float64 `json:"maxRelativeDifference"`
 	AllFinalLogitsMatch         bool    `json:"allFinalLogitsMatch"`
 	PositionsValidated          bool    `json:"positionsValidated"`
+	MutationReplayValidated     bool    `json:"mutationReplayValidated"`
 	SequenceIsolationValidated  bool    `json:"sequenceIsolationValidated"`
 	ProducerKVCacheBytes        int     `json:"producerKVCacheBytes"`
 	ConsumerKVCacheBytes        int     `json:"consumerKVCacheBytes"`
@@ -182,6 +185,7 @@ func run() error {
 	maxAbsolute := 0.0
 	maxRelative := 0.0
 	var lastBoundary workerproc.WireTensor
+	mutationReplayValidated := true
 	for _, plan := range plans {
 		prompt := tokenTensor(plan.prompt)
 		producerResult, err := infer(
@@ -189,6 +193,12 @@ func run() error {
 		)
 		if err != nil {
 			return err
+		}
+		if err := proveMutationReplay(
+			ctx, producer.caller, "prefill", producerShard, plan.id, 0, "tokens", prompt,
+			producerResult,
+		); err != nil {
+			return fmt.Errorf("producer prefill replay for %s: %w", plan.id, err)
 		}
 		lastBoundary = producerResult.Output
 		consumerResult, err := infer(
@@ -198,11 +208,23 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		if err := proveMutationReplay(
+			ctx, consumer.caller, "prefill", consumerShard, plan.id, 0, "hidden",
+			producerResult.Output, consumerResult,
+		); err != nil {
+			return fmt.Errorf("consumer prefill replay for %s: %w", plan.id, err)
+		}
 		referenceResult, err := infer(
 			ctx, reference.caller, "prefill", referenceShard, plan.id, 0, "tokens", prompt,
 		)
 		if err != nil {
 			return err
+		}
+		if err := proveMutationReplay(
+			ctx, reference.caller, "prefill", referenceShard, plan.id, 0, "tokens", prompt,
+			referenceResult,
+		); err != nil {
+			return fmt.Errorf("reference prefill replay for %s: %w", plan.id, err)
 		}
 		absolute, relative, err := compareFinalLogits(
 			consumerResult.Output,
@@ -259,6 +281,14 @@ func run() error {
 			if err != nil {
 				return fmt.Errorf("producer decode %s step %d: %w", plan.id, step, err)
 			}
+			if step == 0 {
+				if err := proveMutationReplay(
+					ctx, producer.caller, "decode", producerShard, plan.id, plan.next, "tokens",
+					token, producerResult,
+				); err != nil {
+					return fmt.Errorf("producer decode replay for %s: %w", plan.id, err)
+				}
+			}
 			lastBoundary = producerResult.Output
 			consumerResult, err := infer(
 				ctx, consumer.caller, "decode", consumerShard, plan.id, plan.next, "hidden",
@@ -267,11 +297,27 @@ func run() error {
 			if err != nil {
 				return fmt.Errorf("consumer decode %s step %d: %w", plan.id, step, err)
 			}
+			if step == 0 {
+				if err := proveMutationReplay(
+					ctx, consumer.caller, "decode", consumerShard, plan.id, plan.next, "hidden",
+					producerResult.Output, consumerResult,
+				); err != nil {
+					return fmt.Errorf("consumer decode replay for %s: %w", plan.id, err)
+				}
+			}
 			referenceResult, err := infer(
 				ctx, reference.caller, "decode", referenceShard, plan.id, plan.next, "tokens", token,
 			)
 			if err != nil {
 				return fmt.Errorf("reference decode %s step %d: %w", plan.id, step, err)
+			}
+			if step == 0 {
+				if err := proveMutationReplay(
+					ctx, reference.caller, "decode", referenceShard, plan.id, plan.next, "tokens",
+					token, referenceResult,
+				); err != nil {
+					return fmt.Errorf("reference decode replay for %s: %w", plan.id, err)
+				}
 			}
 			absolute, relative, err := compareFinalLogits(
 				consumerResult.Output,
@@ -402,6 +448,7 @@ func run() error {
 		MaxRelativeDifference:       maxRelative,
 		AllFinalLogitsMatch:         true,
 		PositionsValidated:          positionsValidated,
+		MutationReplayValidated:     mutationReplayValidated,
 		SequenceIsolationValidated:  sequenceIsolation,
 		ProducerKVCacheBytes:        producerAfterDecode.KVCacheBytes,
 		ConsumerKVCacheBytes:        consumerAfterDecode.KVCacheBytes,
@@ -516,6 +563,59 @@ func infer(
 		)
 	}
 	return result, nil
+}
+
+func proveMutationReplay(
+	ctx context.Context,
+	client workerproc.PersistentCaller,
+	command string,
+	shardID string,
+	sequenceID string,
+	position uint64,
+	inputKind string,
+	input workerproc.WireTensor,
+	want *workerproc.PersistentForwardResult,
+) error {
+	before, err := state(ctx, client)
+	if err != nil {
+		return fmt.Errorf("state before replay: %w", err)
+	}
+	got, err := infer(ctx, client, command, shardID, sequenceID, position, inputKind, input)
+	if err != nil {
+		return err
+	}
+	after, err := state(ctx, client)
+	if err != nil {
+		return fmt.Errorf("state after replay: %w", err)
+	}
+	if got.ShardID != want.ShardID || got.SequenceID != want.SequenceID ||
+		got.Operation != want.Operation || got.Position != want.Position ||
+		got.NextPosition != want.NextPosition || got.ComputeMicros != want.ComputeMicros ||
+		got.KVCacheBytes != want.KVCacheBytes || got.Memory != want.Memory ||
+		!equalTensor(got.Output, want.Output) {
+		return errors.New("replayed mutation returned a different result")
+	}
+	if after.ForwardCount != before.ForwardCount {
+		return fmt.Errorf(
+			"replayed mutation advanced forward count from %d to %d",
+			before.ForwardCount,
+			after.ForwardCount,
+		)
+	}
+	if after.KVCacheBytes != before.KVCacheBytes {
+		return fmt.Errorf(
+			"replayed mutation changed KV bytes from %d to %d",
+			before.KVCacheBytes,
+			after.KVCacheBytes,
+		)
+	}
+	return nil
+}
+
+func equalTensor(left workerproc.WireTensor, right workerproc.WireTensor) bool {
+	return left.DType == right.DType &&
+		slices.Equal(left.Shape, right.Shape) &&
+		bytes.Equal(left.Data, right.Data)
 }
 
 func state(

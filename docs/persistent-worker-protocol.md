@@ -57,6 +57,13 @@ as are decode-before-prefill and requests for unknown or closed sequences. The
 response echoes the operation and input position, reports `nextPosition`, and
 includes that sequence's logical `kvCacheBytes`.
 
+The most recently completed `prefill` or `decode` on each sequence is
+retry-safe. Repeating the same operation, position, input kind, shape, dtype,
+and tensor bytes returns the retained result without running inference again or
+advancing the cache. This content-based replay also works when a transport
+retry uses a new `requestID`. A stale request with different input remains an
+error. Advancing to the next position replaces the retained replay result.
+
 The worker obtains cache objects from the selected architecture adapter. The
 Gemma 3 adapter uses rotating caches for sliding-window layers and standard
 caches for global-attention layers, including when a shard begins in the
