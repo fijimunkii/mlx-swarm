@@ -97,6 +97,7 @@ struct PersistentModelResult: Codable {
     let modelType: String
     let layerCount: Int
     let checkpointFingerprint: String
+    let checkpointBytes: UInt64
 }
 
 struct PersistentTextResult: Codable {
@@ -143,6 +144,9 @@ struct PersistentWorkerState: Codable {
     let kvCacheBytes: Int
     let retainedBytes: Int
     let retainedByteBudget: Int
+    let physicalMemoryBytes: UInt64
+    let mlxMemoryLimitBytes: Int
+    let mlxCacheLimitBytes: Int
     let memory: StageMemory
 }
 
@@ -413,7 +417,8 @@ final class PersistentShardService {
             modelID: request.modelID,
             modelType: checkpoint.modelType,
             layerCount: try adapter.layerCount(checkpoint: checkpoint),
-            checkpointFingerprint: checkpoint.fingerprint
+            checkpointFingerprint: checkpoint.fingerprint,
+            checkpointBytes: checkpoint.checkpointBytes
         )
     }
 
@@ -908,6 +913,9 @@ final class PersistentShardService {
             kvCacheBytes: shards.values.reduce(0) { $0 + cacheBytes(shard: $1) },
             retainedBytes: retainedBytes(),
             retainedByteBudget: configuration.workerBudgetBytes,
+            physicalMemoryBytes: WorkerRuntimeMemory.physicalMemoryBytes,
+            mlxMemoryLimitBytes: Memory.memoryLimit,
+            mlxCacheLimitBytes: Memory.cacheLimit,
             memory: CheckpointMemory.snapshot()
         )
     }

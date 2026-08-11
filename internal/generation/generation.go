@@ -103,6 +103,7 @@ type Result struct {
 	Model                 string        `json:"model"`
 	ModelType             string        `json:"modelType"`
 	CheckpointFingerprint string        `json:"checkpointFingerprint"`
+	CheckpointBytes       uint64        `json:"checkpointBytes"`
 	ShardPlan             ShardPlan     `json:"shardPlan"`
 	SequenceID            string        `json:"sequenceID"`
 	Prompt                string        `json:"prompt"`
@@ -291,7 +292,8 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 	}
 	result = Result{
 		Model: s.config.Model, ModelType: s.model.ModelType,
-		CheckpointFingerprint: s.model.CheckpointFingerprint, ShardPlan: s.plan,
+		CheckpointFingerprint: s.model.CheckpointFingerprint,
+		CheckpointBytes:       s.model.CheckpointBytes, ShardPlan: s.plan,
 		SequenceID: request.SequenceID, Prompt: request.Prompt, MaxTokens: request.MaxTokens,
 		RTol: s.config.RTol, ATol: s.config.ATol,
 		ForwardTimeoutMillis: s.config.ForwardTimeout.Milliseconds(),
@@ -564,7 +566,8 @@ func modelInfo(
 		return nil, errors.New("modelInfo returned no model metadata")
 	}
 	if response.Result.Model.ModelID != modelID || response.Result.Model.ModelType == "" ||
-		response.Result.Model.LayerCount <= 0 || response.Result.Model.CheckpointFingerprint == "" {
+		response.Result.Model.LayerCount <= 0 || response.Result.Model.CheckpointFingerprint == "" ||
+		response.Result.Model.CheckpointBytes == 0 {
 		return nil, fmt.Errorf("modelInfo returned invalid metadata: %+v", *response.Result.Model)
 	}
 	return response.Result.Model, nil
@@ -573,7 +576,8 @@ func modelInfo(
 func matchModel(expected, actual *workerproc.PersistentModelResult, role string) error {
 	if expected.ModelID != actual.ModelID || expected.ModelType != actual.ModelType ||
 		expected.LayerCount != actual.LayerCount ||
-		expected.CheckpointFingerprint != actual.CheckpointFingerprint {
+		expected.CheckpointFingerprint != actual.CheckpointFingerprint ||
+		expected.CheckpointBytes != actual.CheckpointBytes {
 		return fmt.Errorf(
 			"%s model mismatch: producer=%+v %s=%+v", role, *expected, role, *actual,
 		)
@@ -710,14 +714,7 @@ func workerState(
 	ctx context.Context,
 	caller workerproc.PersistentCaller,
 ) (*workerproc.PersistentWorkerState, error) {
-	response, err := call(ctx, caller, workerproc.PersistentRequest{Command: "state"})
-	if err != nil {
-		return nil, err
-	}
-	if response.Result == nil || response.Result.State == nil {
-		return nil, errors.New("state returned no worker snapshot")
-	}
-	return response.Result.State, nil
+	return workerproc.State(ctx, caller)
 }
 
 func measuredInfer(

@@ -382,7 +382,7 @@ func (worker *fakeWorker) Call(
 	case "modelInfo":
 		result.Model = &workerproc.PersistentModelResult{
 			ModelID: request.Model.ModelID, ModelType: "test", LayerCount: 2,
-			CheckpointFingerprint: worker.checkpointFingerprint,
+			CheckpointFingerprint: worker.checkpointFingerprint, CheckpointBytes: 1,
 		}
 	case "state":
 		kv := 0

@@ -40,6 +40,7 @@ struct ResolvedCheckpoint {
     let modelID: String
     let modelType: String
     let fingerprint: String
+    let checkpointBytes: UInt64
     let directory: URL
     let configData: Data
 }
@@ -387,17 +388,24 @@ enum CheckpointShardRuntime {
         let directory = resolved.modelDirectory
         let configData = try Data(contentsOf: directory.appendingPathComponent("config.json"))
         let baseConfig = try JSONDecoder().decode(BaseConfiguration.self, from: configData)
+        let identity = try checkpointIdentity(directory: directory)
         return ResolvedCheckpoint(
             modelID: modelID,
             modelType: baseConfig.modelType,
-            fingerprint: try checkpointFingerprint(directory: directory),
+            fingerprint: identity.fingerprint,
+            checkpointBytes: identity.bytes,
             directory: directory,
             configData: configData
         )
     }
 
-    private static func checkpointFingerprint(directory: URL) throws -> String {
-        let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
+    private static func checkpointIdentity(
+        directory: URL
+    ) throws -> (fingerprint: String, bytes: UInt64) {
+        let resourceKeys: [URLResourceKey] = [
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+        ]
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
             includingPropertiesForKeys: resourceKeys,
@@ -423,6 +431,7 @@ enum CheckpointShardRuntime {
         }
 
         var hasher = SHA256()
+        var totalBytes: UInt64 = 0
         for file in files {
             guard file.path.hasPrefix(root) else {
                 throw CheckpointShardError.invalidBoundary(
@@ -435,10 +444,20 @@ enum CheckpointShardRuntime {
             let handle = try FileHandle(forReadingFrom: file)
             while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
                 hasher.update(data: chunk)
+                let (nextTotal, overflow) = totalBytes.addingReportingOverflow(UInt64(chunk.count))
+                guard !overflow else {
+                    throw CheckpointShardError.invalidBoundary(
+                        "checkpoint byte count overflows UInt64"
+                    )
+                }
+                totalBytes = nextTotal
             }
             try handle.close()
             hasher.update(data: Data([0xff]))
         }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return (
+            hasher.finalize().map { String(format: "%02x", $0) }.joined(),
+            totalBytes
+        )
     }
 }

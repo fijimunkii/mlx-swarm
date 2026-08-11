@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "model": "mlx-community/gemma-3-text-12b-it-4bit",
+  "modelType": "gemma3",
+  "layerCount": 48,
+  "checkpointFingerprint": "768a1be0202b088d531630c6b7ff26fad1988e1fb1e402c625de7b71dd2904b0",
+  "checkpointBytes": 7220708353,
+  "prompt": "Write a short story about two computers working together:",
+  "promptTokenIDs": [
+    2,
+    6974,
+    496,
+    2822,
+    3925,
+    1003,
+    1156,
+    19443,
+    2844,
+    3075,
+    236787
+  ],
+  "generatedTokenIDs": [
+    108,
+    10011,
+    236743,
+    236832,
+    236800,
+    236812,
+    236764,
+    496,
+    96473,
+    8971,
+    165967,
+    236764,
+    2346,
+    1992,
+    607,
+    506,
+    16932,
+    34824,
+    529,
+    13013,
+    529,
+    15621,
+    236761,
+    1293,
+    691,
+    496,
+    70509,
+    529,
+    13179,
+    236764,
+    496,
+    20387
+  ],
+  "generatedText": "\n\nUnit 734, a hulking mainframe, hummed with the steady rhythm of decades of calculations. He was a fortress of logic, a repository",
+  "stopReason": "max_tokens",
+  "fullCheckpointMemory": {
+    "load": {
+      "activeBytes": 7188280112,
+      "cacheBytes": 0,
+      "peakBytes": 7188280112
+    },
+    "prefill": {
+      "activeBytes": 7265104752,
+      "cacheBytes": 17237511,
+      "peakBytes": 7280949158
+    },
+    "decode": {
+      "activeBytes": 7343747912,
+      "cacheBytes": 49081779,
+      "peakBytes": 7367322516
+    },
+    "maxObservedBytes": 7416404295
+  },
+  "sourceHardware": {
+    "runtime": "mlx-swift",
+    "device": "gpu",
+    "checkpointShardModelTypes": [
+      "gemma3",
+      "gemma3_text"
+    ],
+    "physicalMemoryBytes": 25769803776,
+    "mlxMemoryLimitBytes": 24481313587,
+    "mlxCacheLimitBytes": 24481313587
+  },
+  "referenceVerification": {
+    "greedyTokenIDsMatch": true,
+    "comparedTokens": 32,
+    "maxAbsoluteDifference": 0,
+    "maxRelativeDifference": 0
+  }
+}

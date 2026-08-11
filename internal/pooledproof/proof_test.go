@@ -1,0 +1,102 @@
+package pooledproof
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+
+	"github.com/fijimunkii/mlx-swarm/internal/generation"
+	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
+)
+
+func TestCheckedInReferenceIsValid(t *testing.T) {
+	reference, err := LoadReference(filepath.Join(
+		"..", "..", "testdata", "pooled-memory", "gemma-3-text-12b-it-4bit.json",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reference.Model != DefaultModelID {
+		t.Fatalf("model = %q, want %q", reference.Model, DefaultModelID)
+	}
+	if reference.FullCheckpointMemory.MaxObservedBytes <= DefaultWorkerMemoryLimit {
+		t.Fatalf(
+			"full checkpoint uses %d bytes, want more than %d",
+			reference.FullCheckpointMemory.MaxObservedBytes,
+			DefaultWorkerMemoryLimit,
+		)
+	}
+}
+
+func TestRemoteCapabilities(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/debug/worker/capabilities" {
+			t.Fatalf("path = %q", request.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{
+			"runtime":"mlx-swift",
+			"device":"gpu",
+			"physicalMemoryBytes":7516192768,
+			"mlxMemoryLimitBytes":6442450944,
+			"mlxCacheLimitBytes":67108864
+		}`))
+	}))
+	defer server.Close()
+
+	capabilities, err := remoteCapabilities(context.Background(), server.Client(), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &workerproc.PersistentWorkerState{
+		PhysicalMemoryBytes: capabilities.PhysicalMemoryBytes,
+		MLXMemoryLimitBytes: capabilities.MLXMemoryLimitBytes,
+		MLXCacheLimitBytes:  capabilities.MLXCacheLimitBytes,
+	}
+	if !configuredLimit(capabilities, state, DefaultWorkerMemoryLimit) {
+		t.Fatalf("capabilities did not preserve configured limit: %+v", capabilities)
+	}
+}
+
+func TestMemoryEvidenceUsesPeakPlusCache(t *testing.T) {
+	evidence := MemoryEvidence{Load: workerproc.StageMemory{ActiveBytes: 40, PeakBytes: 40}}
+	updateMaxObserved(&evidence, evidence.Load)
+	observePhase(&evidence, "prefill", workerproc.StageMemory{
+		ActiveBytes: 50, CacheBytes: 7, PeakBytes: 100,
+	})
+	observePhase(&evidence, "decode", workerproc.StageMemory{
+		ActiveBytes: 80, CacheBytes: 9, PeakBytes: 120,
+	})
+	if evidence.MaxObservedBytes != 129 {
+		t.Fatalf("max observed = %d, want 129", evidence.MaxObservedBytes)
+	}
+	if evidence.Prefill.PeakBytes != 100 || evidence.Decode.PeakBytes != 120 {
+		t.Fatalf("unexpected phase evidence: %+v", evidence)
+	}
+	if !completeMemoryEvidence(evidence) {
+		t.Fatalf("complete evidence was rejected: %+v", evidence)
+	}
+}
+
+func TestComplementaryShardsRejectsFullModel(t *testing.T) {
+	plan := generation.ShardPlan{
+		Producer: generation.Shard{ID: "producer", LayerStart: 0, LayerEnd: 24},
+		Consumer: generation.Shard{ID: "consumer", LayerStart: 24, LayerEnd: 48},
+	}
+	producer := &workerproc.PersistentWorkerState{LoadedShards: []workerproc.PersistentShardSnapshot{{
+		ShardID: "producer", LayerStart: 0, LayerEnd: 48, OwnsInput: true, OwnsOutput: true,
+	}}}
+	consumer := &workerproc.PersistentWorkerState{LoadedShards: []workerproc.PersistentShardSnapshot{{
+		ShardID: "consumer", LayerStart: 24, LayerEnd: 48, OwnsOutput: true,
+	}}}
+	if complementaryShards(producer, consumer, plan, 48) {
+		t.Fatal("full-model producer was accepted as a complementary shard")
+	}
+
+	producer.LoadedShards[0].LayerEnd = 24
+	producer.LoadedShards[0].OwnsOutput = false
+	if !complementaryShards(producer, consumer, plan, 48) {
+		t.Fatal("valid complementary shards were rejected")
+	}
+}
