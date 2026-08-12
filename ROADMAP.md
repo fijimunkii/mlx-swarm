@@ -1,5 +1,21 @@
 # Roadmap
 
+## v0 MVP release gate
+
+- [x] retain complementary real-checkpoint shards in supervised workers
+- [x] generate tokenizer-backed text with per-shard KV-cached prefill/decode
+- [x] match a cached full-checkpoint reference at explicit tolerances
+- [x] publish reproducible latency, throughput, transfer, and memory evidence
+- [x] characterize bounded deadline, process, and transport failures
+- [x] prove 32-token generation from a model that cannot fit on either serving worker
+- [x] provide one clean-checkout, two-Mac verification runbook with machine-readable gates
+- [ ] finish the integrated review and merge MVP PR #1 to `main`
+
+The first seven items are implemented on `bootstrap/v0`. The final release gate
+is the review and green integrated run of PR #1 using
+[`docs/mvp-runbook.md`](docs/mvp-runbook.md). Items explicitly marked
+post-MVP below do not block v0.
+
 ## M0 — bootstrap
 
 - [x] establish Go control-plane / Swift worker boundary
@@ -48,7 +64,7 @@ Current correctness proof (`mlx-community/gemma-3-270m-it-4bit`):
 ## M3 — chaos harness
 
 - [x] inject latency and jitter
-- [ ] throttle bandwidth
+- [ ] post-MVP: throttle bandwidth
 - [x] pause/kill worker processes
 - [x] disconnect/reconnect a peer
 - [x] record recovery behavior and failed-token rate
@@ -60,7 +76,7 @@ Current failure proof:
 - the deterministic, model-free harness injects process pause, process kill, long delay, bounded jitter, and a loopback HTTP disconnect without using the public network
 - pause, kill, delay, and disconnect fail the active sequence with its shard, phase, position, and last accepted token; every scenario proves bounded termination, released sequence state, worker reuse for a new sequence, and a machine-readable failed-token rate in CI
 
-## M4 — fault-tolerant scheduler
+## M4 — fault-tolerant scheduler (post-MVP)
 
 - [ ] worker health scoring
 - [x] request deadlines
@@ -69,7 +85,7 @@ Current failure proof:
 - [ ] first-valid-result selection
 - [ ] KV recovery strategy
 
-## M5 — residential WAN
+## M5 — residential WAN (post-MVP)
 
 - [ ] connect the two Macs to remote consumer GPU workers
 - [ ] validate MLX CUDA worker path on RTX hardware
@@ -93,6 +109,10 @@ Current pooled-memory proof (`mlx-community/gemma-3-12b-it-4bit`):
 
 The independent failure proof in M3 covers bounded worker loss and
 next-sequence recovery. Transparent same-sequence recovery remains post-MVP.
+
+Terminal-shard sampling landed after the MVP proof was defined. It is included
+in the integrated branch and validated by paired full-logit/token-only
+benchmarks, but it does not expand the v0 release gate.
 
 ## Later
 

@@ -4,6 +4,21 @@
 
 Test whether a dynamic pool of heterogeneous consumer devices can provide useful distributed LLM inference over ordinary networks without treating every participant as a reliable cluster member.
 
+## v0 proof boundary
+
+The v0 MVP is an evidence milestone, not a production serving architecture. It
+proves a two-Mac, contiguous-shard pipeline with deterministic correctness,
+retained KV state, measured warm performance, bounded next-sequence recovery,
+and a physically pooled 12B checkpoint. The authoritative supported hardware,
+checkpoint revisions, shard plans, acceptance predicates, and clean-checkout
+procedure live in [`docs/mvp-runbook.md`](docs/mvp-runbook.md).
+
+Terminal-shard sampling is included because it removes full-vocabulary logits
+from the normal serving hot path, but it is a performance optimization rather
+than part of the central pooled-memory claim. Public membership, automatic
+placement, replicated execution, same-sequence recovery, and heterogeneous GPU
+workers remain post-MVP.
+
 ## Boundary: swarm vs. MLX
 
 `mlx-swarm` should add distributed-systems behavior, not duplicate the ML stack.
@@ -131,6 +146,13 @@ sequence, then records the failed-token rate as a JSON artifact.
 ## Network model
 
 The global network is dynamic. A worker may disappear at any point. We therefore do not model the public swarm as one `mx.distributed.Group`.
+
+The implemented v0 network is narrower than that direction: `swarmd` exposes
+an unauthenticated, unencrypted HTTP debug API for a private LAN or tailnet.
+It provides no peer identity, authorization, confidentiality, integrity
+protection, malicious-worker defense, NAT traversal, or multi-tenant resource
+isolation. Binding that endpoint to a public interface is outside the v0 trust
+model.
 
 Stable local groups may later use MLX Ring/JACCL/NCCL internally, while the swarm treats each group as an execution island.
 

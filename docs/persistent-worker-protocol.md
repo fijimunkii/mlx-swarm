@@ -192,3 +192,10 @@ The HTTP proxy is currently unauthenticated and unencrypted. Bind it only to a
 loopback or trusted LAN/tailnet address. `swarmd` limits request bodies to 64
 MiB, and the Go clients limit responses to 128 MiB. Public membership,
 authentication, and transport encryption are outside the MVP.
+
+This protocol also provides no peer identity, authorization, malicious-worker
+verification, tenant isolation, or hard operating-system memory sandbox. Its
+worker admission budgets bound retained MLX state for cooperating clients; they
+do not turn the debug endpoint into a safe public service. The authoritative
+private-network startup, daemon-restart, evidence, and release procedure is the
+[`v0 MVP verification runbook`](mvp-runbook.md).

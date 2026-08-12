@@ -13,6 +13,18 @@ Community-scale, fault-tolerant distributed inference on heterogeneous consumer 
 - **Consumer nodes are disposable.** The design assumes workers can slow down, sleep, disconnect, or disappear.
 - **Measure before optimizing.** v0 exists to establish correctness and characterize latency/failure behavior.
 
+## v0 MVP
+
+The v0 release candidate proves that two Apple-silicon workers can retain
+complementary shards, generate deterministic text through per-shard KV caches,
+characterize warm latency and bounded worker failures, and serve a 12B
+checkpoint whose full inference footprint cannot fit on either 7 GiB worker.
+
+Follow the [v0 MVP verification runbook](docs/mvp-runbook.md) for the single
+authoritative clean-checkout procedure. It records machine-readable generation,
+correctness, benchmark, failure, and pooled-memory evidence and states the
+hardware, checkpoint, tolerance, trust, and release limits in one place.
+
 ## Building the MLX worker on macOS
 
 MLX's Metal shader library is built by Xcode, not command-line SwiftPM. Use the repository helper:
@@ -295,6 +307,7 @@ worker/mlx/              Swift MLX worker
   Gemma3CheckpointShard first model-family adapter
 ARCHITECTURE.md           design boundaries and execution model
 ROADMAP.md                staged experimental plan
+docs/mvp-runbook.md       authoritative clean-checkout MVP release procedure
 ```
 
 ## Status
@@ -307,6 +320,7 @@ memory evidence. Deterministic CI now characterizes deadline, process, and
 transport failures with bounded cleanup and next-sequence recovery. The
 pooled-memory workflow serves a 12B checkpoint across two 6 GiB MLX budgets,
 matches a separately recorded full-model reference, and emits phase memory
-evidence without loading an oracle on either serving runner. Final MVP
-integration and clean-machine documentation remain in issue #11; see
-[ROADMAP.md](ROADMAP.md).
+evidence without loading an oracle on either serving runner. The
+[MVP runbook](docs/mvp-runbook.md) joins those proofs into one auditable release
+procedure. Scheduler resilience, public networking, trust, and heterogeneous
+GPU participation remain post-MVP; see [ROADMAP.md](ROADMAP.md).

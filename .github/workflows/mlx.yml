@@ -24,6 +24,7 @@ on:
       - 'internal/smoke/**'
       - 'internal/tensorcheck/**'
       - 'internal/workerproc/**'
+      - 'docs/mvp-runbook.md'
       - 'go.mod'
       - '.github/workflows/mlx.yml'
   pull_request:
@@ -47,6 +48,7 @@ on:
       - 'internal/smoke/**'
       - 'internal/tensorcheck/**'
       - 'internal/workerproc/**'
+      - 'docs/mvp-runbook.md'
       - 'go.mod'
       - '.github/workflows/mlx.yml'
 
