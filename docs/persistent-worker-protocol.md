@@ -109,10 +109,18 @@ when a transport retry uses a new `requestID`. A stale request with different
 input remains an error. Advancing to the next position replaces the retained
 replay result.
 
+If terminal sampling rejects already-computed logits, the worker retains that
+failure under the same mutation identity. An exact retry returns the same error
+without rerunning inference; any different mutation is rejected until the
+caller closes the poisoned sequence. This keeps post-inference validation from
+silently advancing generation past a token that was never returned.
+
 Admission is bounded before cache-mutating inference. Each architecture adapter
 reports its maximum context and conservatively estimates cache and output bytes;
-the worker rejects a mutation whose aggregate retained KV plus replay result
-would exceed the configured worker budget. It also caps open sequences per
+the worker rejects a mutation whose aggregate retained sequence state plus the
+pending stage output would exceed the configured worker budget. Token-only
+requests still budget the full pre-sampling output as transient memory, then
+retain only the returned token after success. It also caps open sequences per
 shard (16 in the current composition root), including empty sequences. State
 snapshots expose `retainedBytes`, `retainedByteBudget`, and each shard's
 `maxOpenSequenceCount` so the coordinator can observe these limits.
