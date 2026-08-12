@@ -62,10 +62,10 @@ same-sequence recovery, heterogeneous GPU execution, or MoE expert placement.
 |---|---|---|
 | M0–M6 | Distributed Inference Proof | Complete in PR #1 |
 | M7 | Immutable `v0.1.0-proof` release baseline | [#24](https://github.com/fijimunkii/mlx-swarm/issues/24) |
-| M8 | Three-or-more-node Dynamic Trusted Mesh | [#25](https://github.com/fijimunkii/mlx-swarm/issues/25) |
+| M8 | Dynamic Trusted Mesh: N-stage execution, five-Mac scale, automatic placement, and control-plane churn | [#25](https://github.com/fijimunkii/mlx-swarm/issues/25), [#31](https://github.com/fijimunkii/mlx-swarm/issues/31), [#32](https://github.com/fijimunkii/mlx-swarm/issues/32), [#34](https://github.com/fijimunkii/mlx-swarm/issues/34) |
 | M9 | Persistent binary tensor transport | [#26](https://github.com/fijimunkii/mlx-swarm/issues/26) |
 | M10 | Same-sequence recovery by deterministic replay | [#27](https://github.com/fijimunkii/mlx-swarm/issues/27) |
-| M11 | Mixed Apple/NVIDIA inference through a second backend | [#28](https://github.com/fijimunkii/mlx-swarm/issues/28) |
+| M11 | Linux execution: CPU first, then CUDA/NVIDIA mixed hardware | [#33](https://github.com/fijimunkii/mlx-swarm/issues/33) → [#28](https://github.com/fijimunkii/mlx-swarm/issues/28) |
 | M12 | Measured topology-aware MoE placement experiment | [#29](https://github.com/fijimunkii/mlx-swarm/issues/29) |
 
 ## Completed milestones
@@ -144,27 +144,129 @@ and worker implementations.
 
 ## M8 — Dynamic Trusted Mesh
 
-Tracking: [#25](https://github.com/fijimunkii/mlx-swarm/issues/25)
+Parent milestone: [#25](https://github.com/fijimunkii/mlx-swarm/issues/25)
 
 Turn the fixed two-node experiment into a trusted-LAN or private-tailnet mesh
-that automatically constructs plans across three or more unequal workers.
+that can use all available Apple-silicon inference slots, automatically choose a
+valid plan, and remain understandable under larger membership sets.
+
+M8 is intentionally split into focused deliverables. The roadmap PR defines the
+sequence; implementation should land through a dedicated draft **Dynamic
+Trusted Mesh** integration PR, with component PRs stacked into that integration
+branch when they depend on shared in-progress interfaces.
+
+### M8.1 — arbitrary N-stage execution
+
+Tracking: [#31](https://github.com/fijimunkii/mlx-swarm/issues/31)
+
+Remove the current producer/consumer assumption before adding scheduling policy.
+
+- [ ] represent an execution plan as an ordered list of stages rather than one
+  producer and one consumer
+- [ ] support explicit 2-, 3-, 4-, and 5-stage plans without worker-count-specific
+  generation code
+- [ ] validate contiguous layer coverage, ownership, checkpoint identity, and
+  terminal output semantics before inference
+- [ ] run prefill and cached decode through every planned stage in order
+- [ ] make multi-stage sequence open/close transactional and rollback-safe
+- [ ] generalize KV, memory, timing, and transfer observations to per-stage data
+- [ ] preserve full-reference correctness and the existing two-stage proof as a
+  regression path
+
+### M8.2 — five real Mac workers with a Linux coordinator
+
+Tracking: [#32](https://github.com/fijimunkii/mlx-swarm/issues/32)
+
+Use Linux for orchestration so every available macOS slot can perform real MLX
+inference.
+
+```text
+Linux coordinator
+       |
+       +-- Mac worker 0: input + early layers
+       +-- Mac worker 1: middle layers
+       +-- Mac worker 2: middle layers
+       +-- Mac worker 3: middle layers
+       +-- Mac worker 4: late layers + output head
+```
+
+- [ ] start five independent Apple-silicon `swarmd` workers plus one Linux
+  coordinator in one private-tailnet workflow
+- [ ] prove five-stage 270M generation with reference-matched logits and tokens
+- [ ] reuse the same five-worker pool to measure 2-, 3-, 4-, and 5-stage plans
+  under one fixed model/prompt/token plan
+- [ ] record stage count versus per-worker memory, load time, TTFT, inter-token
+  latency, throughput, boundary bytes, wire bytes, and failure surface
+- [ ] run the 12B pooled-memory proof across all five serving Macs using a
+  memory-aware split rather than equal layer counts by assumption
+- [ ] keep the full-model oracle off the serving Macs and preserve physical
+  memory evidence for every worker
+- [ ] guarantee all worker jobs exit after success or bounded failure so scarce
+  macOS concurrency is released
+
+The expected benefit of more serial stages is **capacity and lower per-worker
+memory**, not automatically lower single-sequence latency. The scaling curve is
+an explicit measurement deliverable.
+
+### M8.3 — membership and automatic placement
+
+Parent tracking: [#25](https://github.com/fijimunkii/mlx-swarm/issues/25)
+
+Once explicit N-stage execution is correct, let the control plane build the plan.
 
 - [ ] define a versioned capability and inventory record
 - [ ] register workers and expire stale membership through heartbeats
 - [ ] measure or ingest compute latency, RTT, bandwidth, memory, health, and
   retained-shard state
-- [ ] represent execution plans independently from a fixed two-node split
-- [ ] place complementary ranges subject to memory, adapter, fingerprint, and
-  output-head constraints
-- [ ] score plans by observed compute, transfer cost, health, and shard reuse
+- [ ] represent plan constraints independently from a fixed worker count or
+  backend
+- [ ] place complementary ranges subject to memory, adapter, fingerprint,
+  topology, input/output ownership, and retained-state constraints
+- [ ] score plans by observed compute, transfer cost, health, memory pressure,
+  and shard reuse
 - [ ] replan between sequences when workers join, leave, slow down, or fail
-- [ ] prove correct pooled-memory generation across at least three unequal nodes
-- [ ] emit plan decisions, topology, shard ownership, and cleanup as
-  machine-readable evidence
+- [ ] emit selected stages plus rejected-node reasons as machine-readable evidence
 
 The first scheduler should prefer a simple valid contiguous-layer plan over a
 clever opaque one. A worker may be excluded from a request when using it would
 make that execution plan worse.
+
+### M8.4 — control-plane scale and churn
+
+Tracking: [#34](https://github.com/fijimunkii/mlx-swarm/issues/34)
+
+Use Linux concurrency to test a much larger membership set without consuming
+additional macOS inference slots.
+
+- [ ] create protocol-compatible synthetic workers with configurable memory,
+  backend, adapter, fingerprint, latency, topology, retained shards, and health
+- [ ] handle at least 32 concurrently visible worker records without fixed-size
+  assumptions
+- [ ] exercise join, expiry, rejoin, duplicate identity, slowdown, and
+  incompatible capability changes
+- [ ] bound network probing and scheduler work as membership grows
+- [ ] record candidate rejection reasons and scheduler decision latency
+- [ ] combine real Mac serving workers with many synthetic Linux peers and prove
+  the chosen real plan still generates reference-correct output
+
+Synthetic membership tests control-plane behavior; they do not claim that every
+Linux peer performs model math.
+
+### M8 acceptance boundary
+
+M8 is complete only when all of the following are true:
+
+- arbitrary 2–5 stage execution is correct and regression-tested;
+- five real Mac workers generate correct text under a Linux coordinator;
+- the 2/3/4/5-stage scaling curve is published as machine-readable evidence;
+- the scheduler automatically chooses a valid plan from current capabilities and
+  topology rather than consuming a hard-coded split;
+- join/leave/replan behavior is bounded between sequences; and
+- at least 32 visible worker records are handled with deterministic placement
+  rejection and scheduling evidence.
+
+Linux **model execution** is deliberately the next milestone rather than an M8
+merge gate.
 
 ## M9 — persistent binary tensor transport
 
@@ -186,7 +288,8 @@ performance as representative of the architecture.
   model outputs or failure bounds
 
 M8 and M9 may proceed in parallel after M7, but membership and transport should
-share stable peer and connection abstractions.
+share stable peer and connection abstractions. Final network-performance claims
+for later milestones should use M9.
 
 ## M10 — recover an interrupted sequence by replay
 
@@ -211,28 +314,52 @@ replicating live KV tensors.
 This milestone establishes correctness-first same-sequence recovery. Replicated
 KV caches and near-zero-latency failover remain later optimizations.
 
-## M11 — second worker backend and mixed hardware
+## M11 — Linux execution and mixed hardware
+
+Linux should become a real inference participant in two steps: prove the current
+MLX Swift worker on ordinary Linux CPU first, then extend the same protocol path
+to NVIDIA/CUDA.
+
+### M11.1 — Linux MLX CPU worker
+
+Tracking: [#33](https://github.com/fijimunkii/mlx-swarm/issues/33)
+
+- [ ] build the existing Swift `MLXWorker` on Linux in MLX CPU mode
+- [ ] run health, capability, checkpoint metadata, retained-shard, cache, and
+  memory proofs on a standard Linux runner
+- [ ] retain only an assigned checkpoint range rather than a full model
+- [ ] compose at least one Linux CPU middle stage with macOS Metal stages
+- [ ] match mixed-plan logits at an explicit tolerance and at least 32 exact
+  greedy tokens
+- [ ] report Linux CPU as a valid but potentially low-priority scheduler resource
+  using measured compute and topology rather than OS labels
+- [ ] compare mixed Linux/macOS performance with an Apple-only plan under the
+  same prompt and token sequence
+
+Linux CPU participation is useful even if it is too slow for latency-critical
+decode. The scheduler should include it only when its memory or capacity has
+positive marginal value for that plan.
+
+### M11.2 — Linux MLX CUDA / NVIDIA worker
 
 Tracking: [#28](https://github.com/fijimunkii/mlx-swarm/issues/28)
 
-Prove that `swarmd` coordinates protocol-compatible execution services rather
-than only one Swift implementation.
-
-- [ ] select an NVIDIA-capable backend after measuring partial loading,
-  quantization, cache, deterministic execution, and memory-accounting support
-- [ ] implement the common lifecycle, capability, shard, prefill, decode,
-  deadline, and cleanup contract
-- [ ] load only the assigned checkpoint range on the new backend
-- [ ] normalize checkpoint identity, tokenizer, dtype, shape, layout, and
-  sampling behavior across runtimes
-- [ ] place complementary stages across Apple-silicon and NVIDIA workers
+- [ ] extend the Linux worker path to NVIDIA/CUDA after #33 proves portability
+- [ ] prefer MLX CUDA when model support, partial loading, quantization, KV-cache,
+  deterministic execution, and memory accounting satisfy the proof contract
+- [ ] advertise CUDA device and memory capabilities through the same inventory
+- [ ] load only the assigned checkpoint range on the NVIDIA worker
+- [ ] place complementary stages across Apple Metal and NVIDIA CUDA workers
 - [ ] match reference logits at an explicit tolerance and at least 32 exact
   greedy tokens
-- [ ] publish mixed-backend hardware, versions, placement, memory, transfer,
-  correctness, performance, and failure evidence
+- [ ] publish mixed-hardware versions, placement, memory, transfer, correctness,
+  performance, and failure evidence
 
-MLX CUDA is preferred when it satisfies the proof contract, but the protocol
-must not require every backend to share one local runtime implementation.
+Standard GitHub-hosted Linux jobs are appropriate for the CPU proof and control
+plane but do not provide the NVIDIA device required for this CUDA validation.
+Use a documented self-hosted or external GPU workflow for the hardware proof.
+The Go control plane must remain backend-neutral if a runtime fallback is ever
+required.
 
 ## M12 — topology-aware Mixture-of-Experts experiment
 
@@ -260,19 +387,45 @@ networks.
 
 ```text
 M7 proof release
+│
 ├── M8 Dynamic Trusted Mesh
-│   ├── M10 replay recovery
-│   └── M11 mixed hardware
-└── M9 binary transport
-    ├── strengthens M10 recovery performance
-    └── joins M8 as a foundation for M11
+│   ├── #31 N-stage execution
+│   ├── #32 five-Mac + Linux coordinator proof
+│   ├── automatic membership / placement (#25)
+│   └── #34 32-node control-plane scale
+│
+└── M9 binary transport (#26)
 
-M8 + M9 + M11 -> M12 MoE placement experiment
+M8 -> M10 replay recovery (#27)
+M8 -> M11.1 Linux CPU execution (#33) -> M11.2 CUDA/NVIDIA (#28)
+M9 strengthens M10 and is the long-term transport for M11
+M8 + M9 + M11 -> M12 MoE placement experiment (#29)
 ```
 
 Correctness work for M10 may start once M8 can select replacement workers; final
-performance characterization should use M9. M11 should consume the stable
-membership and transport contracts rather than adding a separate control path.
+performance characterization should use M9. Linux CPU execution consumes the
+stable M8 worker/capability/placement contracts rather than adding a separate
+control path, and CUDA extends that same Linux worker direction.
+
+## CI scale strategy
+
+Use runner classes according to what they prove:
+
+- **macOS jobs:** scarce real MLX/Metal inference workers; use up to five
+  concurrently for the M8 scale proof.
+- **Linux coordinator:** run the Go control plane, discovery, plan submission,
+  assertions, artifact aggregation, and teardown without spending a macOS slot.
+- **Linux CPU worker:** after M8, prove real model participation through MLX CPU
+  in #33.
+- **Linux synthetic workers:** use larger inexpensive concurrency to exercise
+  membership churn, capability incompatibility, health changes, and scheduler
+  candidate scale without pretending each node performs model math.
+- **NVIDIA Linux:** use a self-hosted or external GPU runner for #28; keep the
+  same worker and swarm protocol where possible.
+
+Hosted CI is evidence infrastructure, not the production topology. Every result
+must record the actual hardware, route, model, plan, and revision that produced
+it.
 
 ## Cross-cutting release gates
 
@@ -293,6 +446,9 @@ Every milestone must continue to satisfy these rules:
 7. **The mesh may decline work.** Membership does not guarantee placement on a
    request when a node would violate correctness, memory, health, or latency
    constraints.
+8. **Scale claims distinguish control plane from execution.** Synthetic Linux
+   membership may prove scheduler scale, but only real model workers count as
+   pooled inference capacity.
 
 ## Later
 
