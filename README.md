@@ -11,16 +11,16 @@ Community-scale, fault-tolerant distributed inference on heterogeneous consumer 
 - **Swift owns MLX execution.** The first worker uses MLX Swift and MLX Swift LM for model loading and inference.
 - **The WAN is not an MLX process group.** Arbitrary peers communicate through a language-neutral swarm protocol; MLX distributed primitives may be used inside stable high-speed execution islands.
 - **Consumer nodes are disposable.** The design assumes workers can slow down, sleep, disconnect, or disappear.
-- **Measure before optimizing.** v0 exists to establish correctness and characterize latency/failure behavior.
+- **Measure before optimizing.** Establish correctness and characterize latency and failure behavior first.
 
-## v0 MVP
+## Distributed Inference Proof
 
-The v0 release candidate proves that two Apple-silicon workers can retain
+The current deliverable proves that two Apple-silicon workers can retain
 complementary shards, generate deterministic text through per-shard KV caches,
 characterize warm latency and bounded worker failures, and serve a 12B
 checkpoint whose full inference footprint cannot fit on either 7 GiB worker.
 
-Follow the [v0 MVP verification runbook](docs/mvp-runbook.md) for the single
+Follow the [validation runbook](docs/distributed-inference-proof.md) for the single
 authoritative clean-checkout procedure. It records machine-readable generation,
 correctness, benchmark, failure, and pooled-memory evidence and states the
 hardware, checkpoint, tolerance, trust, and release limits in one place.
@@ -240,7 +240,7 @@ prints a readable table without performance pass/fail thresholds.
 
 ### Physically pooled-memory generation
 
-The MVP proof uses `mlx-community/gemma-3-12b-it-4bit`, a 48-layer,
+The proof uses `mlx-community/gemma-3-12b-it-4bit`, a 48-layer,
 8,063,329,713-byte checkpoint, across two independent 7 GiB workers. The
 checkpoint and a separately measured 7,647,434,848-byte full-model macOS
 process peak each exceed either worker's physical memory; the full-model MLX
@@ -277,7 +277,7 @@ The current boundary representation is `shape + dtype + contiguous bytes`. JSON/
 7. Kill or pause a worker and characterize failure behavior.
 
 With correctness and pooled memory established, hedged execution, dynamic
-placement, and public membership remain post-MVP work.
+placement, and public membership remain future work.
 
 ## Repository layout
 
@@ -307,7 +307,7 @@ worker/mlx/              Swift MLX worker
   Gemma3CheckpointShard first model-family adapter
 ARCHITECTURE.md           design boundaries and execution model
 ROADMAP.md                staged experimental plan
-docs/mvp-runbook.md       authoritative clean-checkout MVP release procedure
+docs/distributed-inference-proof.md authoritative clean-checkout proof procedure
 ```
 
 ## Status
@@ -321,6 +321,7 @@ transport failures with bounded cleanup and next-sequence recovery. The
 pooled-memory workflow serves a 12B checkpoint across two 6 GiB MLX budgets,
 matches a separately recorded full-model reference, and emits phase memory
 evidence without loading an oracle on either serving runner. The
-[MVP runbook](docs/mvp-runbook.md) joins those proofs into one auditable release
-procedure. Scheduler resilience, public networking, trust, and heterogeneous
-GPU participation remain post-MVP; see [ROADMAP.md](ROADMAP.md).
+[validation runbook](docs/distributed-inference-proof.md) joins those proofs into
+one auditable validation procedure. Scheduler resilience, public networking,
+trust, and heterogeneous GPU participation remain future work; see
+[ROADMAP.md](ROADMAP.md).

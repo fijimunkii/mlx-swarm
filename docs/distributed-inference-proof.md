@@ -1,6 +1,7 @@
-# v0 MVP verification runbook
+# Distributed Inference Proof validation runbook
 
-This is the authoritative release procedure for the `mlx-swarm` v0 MVP. It
+This is the authoritative validation procedure for the `mlx-swarm`
+Distributed Inference Proof. It
 takes two Apple-silicon Macs from clean checkouts to distributed generated text
 and produces machine-readable correctness, performance, failure, and
 physically pooled-memory evidence.
@@ -16,7 +17,7 @@ open sequences.
 
 ## Trust boundary
 
-The v0 HTTP transport is unauthenticated and unencrypted. Use a private LAN or
+The HTTP transport is unauthenticated and unencrypted. Use a private LAN or
 private tailnet, bind the consumer to its private address, and block port 8080
 from the public Internet. Do not run these commands on an untrusted network or
 with untrusted clients. The worker API is an experimental proof interface, not
@@ -24,7 +25,7 @@ a multi-tenant resource sandbox.
 
 ## Supported release configuration
 
-| Item | v0 configuration |
+| Item | Validated configuration |
 |---|---|
 | Serving hardware | Two Apple-silicon Macs running macOS 14 or later |
 | Control plane | Go 1.24 or newer |
@@ -54,21 +55,21 @@ same Hugging Face checkpoint contents before the serving run.
 ## 1. Check out one exact revision on both Macs
 
 Choose the exact commit under review, not a moving branch name. Run the
-following on both Macs, replacing `MVP_REVISION` with the same full commit SHA:
+following on both Macs, replacing `PROOF_REVISION` with the same full commit SHA:
 
 ```bash
-export MVP_REVISION="<40-character candidate commit>"
+export PROOF_REVISION="<40-character candidate commit>"
 git clone https://github.com/fijimunkii/mlx-swarm.git
 cd mlx-swarm
-git checkout --detach "$MVP_REVISION"
-test "$(git rev-parse HEAD)" = "$MVP_REVISION"
+git checkout --detach "$PROOF_REVISION"
+test "$(git rev-parse HEAD)" = "$PROOF_REVISION"
 test -z "$(git status --porcelain)"
 ```
 
 Record the environment on each machine:
 
 ```bash
-mkdir -p mvp-evidence
+mkdir -p validation-evidence
 {
   git rev-parse HEAD
   sw_vers
@@ -78,7 +79,7 @@ mkdir -p mvp-evidence
   xcodebuild -version
   swift --version
   jq --version
-} > mvp-evidence/environment.txt
+} > validation-evidence/environment.txt
 ```
 
 The commit IDs in the two `environment.txt` files must be identical and both
@@ -93,11 +94,11 @@ go test ./...
 ./scripts/build-mlx-worker.sh
 export MLX_SWARM_WORKER="$PWD/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
 "$MLX_SWARM_WORKER" health
-"$MLX_SWARM_WORKER" capabilities | tee mvp-evidence/capabilities.json
+"$MLX_SWARM_WORKER" capabilities | tee validation-evidence/capabilities.json
 "$MLX_SWARM_WORKER" checkpoint-info mlx-community/gemma-3-270m-it-4bit \
-  | tee mvp-evidence/gemma-3-270m-checkpoint.json
+  | tee validation-evidence/gemma-3-270m-checkpoint.json
 "$MLX_SWARM_WORKER" checkpoint-info mlx-community/gemma-3-12b-it-4bit \
-  | tee mvp-evidence/gemma-3-12b-checkpoint.json
+  | tee validation-evidence/gemma-3-12b-checkpoint.json
 ```
 
 Prefetching on both machines ensures later setup cannot silently select
@@ -151,7 +152,7 @@ go run ./cmd/swarm-generate \
   -model mlx-community/gemma-3-270m-it-4bit \
   -prompt "Write a short story about two computers working together:" \
   -max-tokens 32 \
-  > mvp-evidence/generation.json
+  > validation-evidence/generation.json
 
 jq -e '
   (.model == "mlx-community/gemma-3-270m-it-4bit") and
@@ -162,7 +163,7 @@ jq -e '
   (.shardPlan.consumer.layerEnd == 18) and
   ((.generatedTokenIDs | length) > 0) and
   (.failure == null)
-' mvp-evidence/generation.json
+' validation-evidence/generation.json
 ```
 
 Normal generation asks the terminal shard to sample greedily and returns only
@@ -179,14 +180,14 @@ the retained shards, and requires all sequence state to be released:
 go run ./cmd/swarm-generate-smoke \
   -worker "$MLX_SWARM_WORKER" \
   -peer "http://${CONSUMER_IP}:8080" \
-  > mvp-evidence/generation-proof.json
+  > validation-evidence/generation-proof.json
 
 jq -e '
   .greedyTokenIDsMatch and
   (.generatedTokenCount >= 32) and
   .repeatedRequestValidated and
   .sequenceTeardownValidated
-' mvp-evidence/generation-proof.json
+' validation-evidence/generation-proof.json
 ```
 
 For the stronger full-logit and cache-position proof:
@@ -195,7 +196,7 @@ For the stronger full-logit and cache-position proof:
 go run ./cmd/swarm-cache-smoke \
   -worker "$MLX_SWARM_WORKER" \
   -peer "http://${CONSUMER_IP}:8080" \
-  > mvp-evidence/cache-proof.json
+  > validation-evidence/cache-proof.json
 
 jq -e '
   .allFinalLogitsMatch and
@@ -204,11 +205,11 @@ jq -e '
   (.producerAfterTeardownBytes == 0) and
   (.consumerAfterTeardownBytes == 0) and
   (.referenceAfterTeardownBytes == 0)
-' mvp-evidence/cache-proof.json
+' validation-evidence/cache-proof.json
 ```
 
 The comparison uses `rtol=atol=1e-4`. A successful command with a false
-predicate is not an MVP pass; the `jq -e` checks are part of the procedure.
+predicate is not a valid proof; the `jq -e` checks are part of the procedure.
 
 ## 6. Record warm performance evidence
 
@@ -225,7 +226,7 @@ go run ./cmd/swarm-benchmark \
   -route "$route" \
   -prefill-samples 5 \
   -decode-samples 100 \
-  > mvp-evidence/distributed-benchmark.json
+  > validation-evidence/distributed-benchmark.json
 
 jq -e '
   (.schemaVersion == "2") and
@@ -242,13 +243,13 @@ jq -e '
   (.memory.producer.postRunKVCacheBytes == 0) and
   (.memory.consumer.postRunKVCacheBytes == 0) and
   (.memory.reference.postRunKVCacheBytes == 0)
-' mvp-evidence/distributed-benchmark.json
+' validation-evidence/distributed-benchmark.json
 ```
 
 The JSON includes raw samples and nearest-rank p50/p95 summaries for setup,
 prefill TTFT, decode, serialization, transport, end-to-end token latency,
 throughput, boundary bytes, terminal-response bytes, and memory. Hosted or
-residential latency is observational in v0; correctness and payload reduction
+residential latency is observational; correctness and payload reduction
 are gates, but a particular latency threshold is not. Terminal sampling is not
 needed to establish the central pooled-memory claim; it is nevertheless the
 integrated default serving path, so exact token parity and removal of the
@@ -260,7 +261,7 @@ The failure harness is model-free and runs on either Mac. It injects pause,
 kill, delay, jitter, and loopback HTTP disconnect behavior:
 
 ```bash
-go run ./cmd/swarm-failure-smoke > mvp-evidence/failure-characterization.json
+go run ./cmd/swarm-failure-smoke > validation-evidence/failure-characterization.json
 
 jq -e '
   (.schemaVersion == "1") and
@@ -268,10 +269,10 @@ jq -e '
   .allCleanupReleased and
   .allRecoveryReady and
   (([.scenarios[].name] | sort) == ["delay", "disconnect", "jitter", "kill", "pause"])
-' mvp-evidence/failure-characterization.json
+' validation-evidence/failure-characterization.json
 ```
 
-The expected v0 behavior is bounded failure of the active sequence followed by
+The expected behavior is bounded failure of the active sequence followed by
 worker replacement and readiness for a new sequence. Transparent continuation
 of the failed sequence is deliberately not claimed.
 
@@ -311,7 +312,7 @@ go run ./cmd/swarm-pooled-memory \
   -minimum-tokens 32 \
   -forward-timeout 2m \
   -timeout 30m \
-  > mvp-evidence/pooled-memory.json
+  > validation-evidence/pooled-memory.json
 
 jq -e '
   (.schemaVersion == 1) and
@@ -329,7 +330,7 @@ jq -e '
   .checks.generatedTokensMatchReference and
   .checks.sequenceStateReleased and
   ((.generation.generatedTokenIDs | length) >= 32)
-' mvp-evidence/pooled-memory.json
+' validation-evidence/pooled-memory.json
 ```
 
 This check passes only on hosts whose reported physical memory establishes the
@@ -349,9 +350,9 @@ model evidence. Repository-backed build caches reduce compilation time, but
 each job receives a clean checkout and the serving proofs require fresh worker
 process state.
 
-## 9. Release evidence checklist
+## 9. Validation evidence checklist
 
-An MVP candidate is ready only when all of the following refer to the same
+The proof is validated only when all of the following refer to the same
 commit:
 
 - both clean checkouts recorded the candidate SHA and `arm64` environment;
@@ -364,13 +365,13 @@ commit:
   complementary shards, no serving oracle, and process peaks below both
   workers' physical memory; and
 - the `CI`, `MLX Worker`, and `Pooled Memory Proof` workflows are green on the
-  fully integrated MVP pull request.
+  fully integrated proof pull request.
 
 Archive the two `environment.txt` files and the producer's
-`mvp-evidence/*.json` files together. These files are the auditable record of
+`validation-evidence/*.json` files together. These files are the auditable record of
 the run; prose observations alone are not release evidence.
 
-## Deliberate v0 limitations
+## Deliberate proof limitations
 
 - Only the Gemma 3 adapter is validated; architecture-neutral orchestration is
   not a claim of arbitrary checkpoint compatibility.
@@ -382,10 +383,10 @@ the run; prose observations alone are not release evidence.
   public membership, stable public API, or multi-tenant isolation.
 - A timed-out MLX mutation kills and replaces the worker. The active sequence
   fails; only a later sequence recovers.
-- Latency results characterize the measured hardware and route. v0 makes no
+- Latency results characterize the measured hardware and route. The proof makes no
   universal interactive-latency guarantee.
 - CUDA/RTX workers, WAN-aware placement, batching, speculative decoding,
-  bandwidth throttling, and same-sequence KV recovery are post-MVP work.
+  bandwidth throttling, and same-sequence KV recovery are future work.
 
 The lower-level pooled proof and wire contracts are documented in
 [`pooled-memory-proof.md`](pooled-memory-proof.md) and

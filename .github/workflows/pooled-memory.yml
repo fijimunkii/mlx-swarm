@@ -11,7 +11,7 @@ on:
       - 'internal/workerproc/**'
       - 'worker/mlx/**'
       - 'testdata/pooled-memory/**'
-      - 'docs/mvp-runbook.md'
+      - 'docs/distributed-inference-proof.md'
       - '.github/workflows/pooled-memory.yml'
   pull_request:
     paths:
@@ -21,7 +21,7 @@ on:
       - 'internal/workerproc/**'
       - 'worker/mlx/**'
       - 'testdata/pooled-memory/**'
-      - 'docs/mvp-runbook.md'
+      - 'docs/distributed-inference-proof.md'
       - '.github/workflows/pooled-memory.yml'
 
 permissions:

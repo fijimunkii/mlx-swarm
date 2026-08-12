@@ -24,7 +24,7 @@ on:
       - 'internal/smoke/**'
       - 'internal/tensorcheck/**'
       - 'internal/workerproc/**'
-      - 'docs/mvp-runbook.md'
+      - 'docs/distributed-inference-proof.md'
       - 'go.mod'
       - '.github/workflows/mlx.yml'
   pull_request:
@@ -48,7 +48,7 @@ on:
       - 'internal/smoke/**'
       - 'internal/tensorcheck/**'
       - 'internal/workerproc/**'
-      - 'docs/mvp-runbook.md'
+      - 'docs/distributed-inference-proof.md'
       - 'go.mod'
       - '.github/workflows/mlx.yml'
 
