@@ -80,12 +80,13 @@ uses explicit `prefill` and `decode` operations.
 
 The Go generation session asks the Swift worker for architecture-neutral model
 metadata and uses the checkpoint's Hugging Face tokenizer through `tokenize`
-and `detokenize` commands. Go owns the autoregressive control loop and greedy
-sampling policy:
+and `detokenize` commands. Go owns the autoregressive control loop and requests
+the deterministic greedy policy; the output-owning Swift shard applies argmax
+before crossing the network in normal serving mode:
 
 ```text
-prompt -> tokenize -> producer prefill -> consumer prefill -> argmax
-       -> producer decode -> consumer decode -> argmax -> ... -> EOS/max
+prompt -> tokenize -> producer prefill -> consumer prefill + argmax
+       -> producer decode -> consumer decode + argmax -> ... -> EOS/max
        -> detokenize generated token IDs
 ```
 
@@ -93,8 +94,10 @@ The default split is derived from the adapter-reported layer count rather than
 from a model-family constant. Stable model-and-checkpoint-derived shard IDs let
 independent commands reuse stages already retained by `swarmd`; request-specific sequence
 IDs isolate and bound KV state. A local reference worker is optional in normal
-use and mandatory in the deterministic CI proof, where every distributed
-logit vector must be within tolerance and every greedy token must match.
+use and mandatory in the full-logit CI proof, where every distributed logit
+vector must be within tolerance and every greedy token must match. Verification
+mode keeps the full-logit response; the paired serving benchmark separately
+requires the terminal-sampled token sequence to match it exactly.
 
 ## Deadlines and bounded recovery
 

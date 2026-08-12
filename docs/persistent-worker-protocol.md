@@ -93,12 +93,21 @@ as are decode-before-prefill and requests for unknown or closed sequences. The
 response echoes the operation and input position, reports `nextPosition`, and
 includes that sequence's logical `kvCacheBytes`.
 
+An output-owning shard also accepts `returnSampledToken=true`. In that mode it
+validates the final logits, applies deterministic argmax with the lowest token
+ID winning ties, and returns `sampledTokenID` with an empty output tensor. This
+avoids encoding a full-vocabulary response on the serving hot path. The flag is
+rejected on non-terminal shards. Full-logit output remains the default for
+correctness comparison, diagnostics, and future sampling policies that cannot
+run on the worker.
+
 The most recently completed `prefill` or `decode` on each sequence is
 retry-safe. Repeating the same operation, position, input kind, shape, dtype,
-and tensor bytes returns the retained result without running inference again or
-advancing the cache. This content-based replay also works when a transport
-retry uses a new `requestID`. A stale request with different input remains an
-error. Advancing to the next position replaces the retained replay result.
+tensor bytes, and response mode returns the retained result without running
+inference again or advancing the cache. This content-based replay also works
+when a transport retry uses a new `requestID`. A stale request with different
+input remains an error. Advancing to the next position replaces the retained
+replay result.
 
 Admission is bounded before cache-mutating inference. Each architecture adapter
 reports its maximum context and conservatively estimates cache and output bytes;

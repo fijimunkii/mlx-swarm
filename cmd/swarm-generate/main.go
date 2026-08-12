@@ -90,6 +90,7 @@ func run() error {
 		referenceCaller,
 		generation.SessionConfig{
 			Model: *model, RTol: *rtol, ATol: *atol, ForwardTimeout: *forwardTimeout,
+			TerminalSampling: !*verify,
 		},
 	)
 	if err != nil {

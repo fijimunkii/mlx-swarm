@@ -14,7 +14,8 @@ func TestSummarizeUsesNearestRankPercentilesAndTotals(t *testing.T) {
 		samples[index] = generation.StageSample{
 			TokenLatencyMicros: latency, ReferenceTokenLatencyMicros: latency * 2,
 			ProducerWallMicros: latency, BoundaryTensorBytes: 10,
-			BoundaryWireBytes: 20, ProducerKVCacheBytes: index,
+			BoundaryWireBytes: 20, ConsumerResponseTensorBytes: 30,
+			ConsumerResponseWireBytes: 50, ProducerKVCacheBytes: index,
 			ConsumerKVCacheBytes: index * 2, ReferenceKVCacheBytes: index * 3,
 			ProducerMemory:  workerproc.StageMemory{PeakBytes: index * 4},
 			ConsumerMemory:  workerproc.StageMemory{PeakBytes: index * 5},
@@ -28,6 +29,13 @@ func TestSummarizeUsesNearestRankPercentilesAndTotals(t *testing.T) {
 	}
 	if summary.BoundaryTensorBytes.SumBytes != 50 || summary.BoundaryWireBytes.SumBytes != 100 {
 		t.Fatalf("unexpected byte totals: %+v %+v", summary.BoundaryTensorBytes, summary.BoundaryWireBytes)
+	}
+	if summary.ConsumerResponseTensorBytes.SumBytes != 150 ||
+		summary.ConsumerResponseWireBytes.SumBytes != 250 {
+		t.Fatalf(
+			"unexpected response byte totals: %+v %+v",
+			summary.ConsumerResponseTensorBytes, summary.ConsumerResponseWireBytes,
+		)
 	}
 	if math.Abs(summary.TokensPerSecond-(5_000_000.0/150.0)) > 0.001 {
 		t.Fatalf("tokens per second = %f", summary.TokensPerSecond)

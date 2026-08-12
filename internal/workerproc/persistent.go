@@ -72,11 +72,12 @@ type PersistentSequenceRequest struct {
 }
 
 type PersistentForwardRequest struct {
-	ShardID    string     `json:"shardID"`
-	SequenceID string     `json:"sequenceID"`
-	Position   uint64     `json:"position"`
-	InputKind  string     `json:"inputKind"`
-	Input      WireTensor `json:"input"`
+	ShardID            string     `json:"shardID"`
+	SequenceID         string     `json:"sequenceID"`
+	Position           uint64     `json:"position"`
+	InputKind          string     `json:"inputKind"`
+	Input              WireTensor `json:"input"`
+	ReturnSampledToken bool       `json:"returnSampledToken,omitempty"`
 }
 
 type PersistentModelRequest struct {
@@ -130,15 +131,16 @@ type PersistentTextResult struct {
 }
 
 type PersistentForwardResult struct {
-	ShardID       string      `json:"shardID"`
-	SequenceID    string      `json:"sequenceID"`
-	Operation     string      `json:"operation"`
-	Position      uint64      `json:"position"`
-	NextPosition  uint64      `json:"nextPosition"`
-	Output        WireTensor  `json:"output"`
-	ComputeMicros uint64      `json:"computeMicros"`
-	KVCacheBytes  int         `json:"kvCacheBytes"`
-	Memory        StageMemory `json:"memory"`
+	ShardID        string      `json:"shardID"`
+	SequenceID     string      `json:"sequenceID"`
+	Operation      string      `json:"operation"`
+	Position       uint64      `json:"position"`
+	NextPosition   uint64      `json:"nextPosition"`
+	Output         WireTensor  `json:"output"`
+	SampledTokenID *int32      `json:"sampledTokenID,omitempty"`
+	ComputeMicros  uint64      `json:"computeMicros"`
+	KVCacheBytes   int         `json:"kvCacheBytes"`
+	Memory         StageMemory `json:"memory"`
 }
 
 type PersistentShardSnapshot struct {

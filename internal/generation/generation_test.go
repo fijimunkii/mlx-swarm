@@ -34,6 +34,66 @@ func TestGenerateStopsAtMaximumAndCleansSequences(t *testing.T) {
 	assertNoFakeSequences(t, producer, consumer, reference)
 }
 
+func TestGenerateUsesTerminalShardSampling(t *testing.T) {
+	producer, consumer, _ := fakeSwarm([]int32{3, 2, 3})
+	var samples []StageSample
+	session, err := NewSession(
+		context.Background(), producer, consumer, nil,
+		SessionConfig{
+			Model: "test/model", TerminalSampling: true,
+			Observer: func(sample StageSample) { samples = append(samples, sample) },
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := session.Generate(context.Background(), Request{
+		Prompt: "hello", MaxTokens: 2, SequenceID: "terminal-sampling",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(result.GeneratedTokenIDs, []int32{3, 2}) {
+		t.Fatalf("unexpected tokens: %v", result.GeneratedTokenIDs)
+	}
+	if result.Verification != nil {
+		t.Fatalf("terminal sampling unexpectedly verified logits: %+v", result.Verification)
+	}
+	if len(samples) != 2 {
+		t.Fatalf("unexpected observations: %+v", samples)
+	}
+	for _, sample := range samples {
+		if !sample.TerminalSampling || sample.ConsumerResponseTensorBytes != 0 ||
+			sample.ConsumerResponseWireBytes <= 0 {
+			t.Fatalf("invalid terminal-sampling accounting: %+v", sample)
+		}
+	}
+	assertNoFakeSequences(t, producer, consumer)
+}
+
+func TestNewSessionRejectsTerminalSamplingWhenLogitsAreRequired(t *testing.T) {
+	producer, consumer, reference := fakeSwarm([]int32{3})
+	_, err := NewSession(
+		context.Background(), producer, consumer, reference,
+		SessionConfig{Model: "test/model", TerminalSampling: true},
+	)
+	if err == nil || !strings.Contains(err.Error(), "cannot return logits") {
+		t.Fatalf("unexpected reference error: %v", err)
+	}
+
+	_, err = NewSession(
+		context.Background(), producer, consumer, nil,
+		SessionConfig{
+			Model: "test/model", TerminalSampling: true,
+			LogitsObserver: func(int, workerproc.WireTensor) {},
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "cannot return logits") {
+		t.Fatalf("unexpected logits observer error: %v", err)
+	}
+}
+
 func TestGenerateObservesHotPathSeparatelyFromReference(t *testing.T) {
 	producer, consumer, reference := fakeSwarm([]int32{3, 2, 3})
 	var samples []StageSample
@@ -63,6 +123,11 @@ func TestGenerateObservesHotPathSeparatelyFromReference(t *testing.T) {
 	for _, sample := range samples {
 		if sample.BoundaryTensorBytes <= 0 || sample.BoundaryWireBytes <= sample.BoundaryTensorBytes {
 			t.Fatalf("invalid boundary accounting: %+v", sample)
+		}
+		if sample.ConsumerResponseTensorBytes <= 0 ||
+			sample.ConsumerResponseWireBytes <= sample.ConsumerResponseTensorBytes ||
+			sample.TerminalSampling {
+			t.Fatalf("invalid response accounting: %+v", sample)
 		}
 		if sample.ReferenceComputeMicros == 0 || sample.ReferenceKVCacheBytes == 0 {
 			t.Fatalf("missing reference baseline: %+v", sample)
@@ -520,16 +585,27 @@ func (worker *fakeWorker) Call(
 			values[token] = 10
 			output = float32Tensor([]int{1, 1, len(values)}, values)
 			worker.logitIndex++
+			if forward.ReturnSampledToken {
+				resultToken := token
+				result.Forward = &workerproc.PersistentForwardResult{
+					ShardID: forward.ShardID, SequenceID: forward.SequenceID,
+					Operation: request.Command, Position: forward.Position,
+					SampledTokenID: &resultToken, ComputeMicros: 1, KVCacheBytes: 1,
+				}
+			}
 		}
 		nextPosition := forward.Position + 1
 		if request.Command == "prefill" {
 			nextPosition = uint64(forward.Input.Shape[1])
 		}
-		result.Forward = &workerproc.PersistentForwardResult{
-			ShardID: forward.ShardID, SequenceID: forward.SequenceID,
-			Operation: request.Command, Position: forward.Position, NextPosition: nextPosition,
-			Output: output, ComputeMicros: 1, KVCacheBytes: 1,
+		if result.Forward == nil {
+			result.Forward = &workerproc.PersistentForwardResult{
+				ShardID: forward.ShardID, SequenceID: forward.SequenceID,
+				Operation: request.Command, Position: forward.Position,
+				Output: output, ComputeMicros: 1, KVCacheBytes: 1,
+			}
 		}
+		result.Forward.NextPosition = nextPosition
 	default:
 		return workerproc.PersistentResponse{}, errors.New("unexpected command " + request.Command)
 	}

@@ -37,3 +37,19 @@ func greedyToken(tensor workerproc.WireTensor) (int32, error) {
 	}
 	return int32(bestIndex), nil
 }
+
+func sampledToken(sampled *int32, logits workerproc.WireTensor) (int32, error) {
+	if sampled == nil {
+		if len(logits.Data) == 0 {
+			return 0, errors.New("sampled-token response contains neither a token nor logits")
+		}
+		return greedyToken(logits)
+	}
+	if *sampled < 0 {
+		return 0, fmt.Errorf("sampled-token response contains negative token ID %d", *sampled)
+	}
+	if len(logits.Data) != 0 {
+		return 0, errors.New("sampled-token response also contains logits")
+	}
+	return *sampled, nil
+}

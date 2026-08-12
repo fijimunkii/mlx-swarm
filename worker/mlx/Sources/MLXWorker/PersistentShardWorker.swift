@@ -45,6 +45,7 @@ struct PersistentForwardRequest: Codable {
     let position: UInt64
     let inputKind: String
     let input: WireTensor
+    let returnSampledToken: Bool?
 }
 
 struct PersistentModelRequest: Codable {
@@ -114,6 +115,7 @@ struct PersistentForwardResult: Codable {
     let position: UInt64
     let nextPosition: UInt64
     let output: WireTensor
+    let sampledTokenID: Int32?
     let computeMicros: UInt64
     let kvCacheBytes: Int
     let memory: StageMemory
@@ -232,6 +234,7 @@ private struct PersistentCompletedMutation {
     let inputShape: [Int]
     let inputDType: WireTensor.ElementType
     let inputDigest: Data
+    let returnSampledToken: Bool
     let result: PersistentForwardResult
 
     init(
@@ -245,6 +248,7 @@ private struct PersistentCompletedMutation {
         self.inputShape = request.input.shape
         self.inputDType = request.input.dtype
         self.inputDigest = Data(SHA256.hash(data: request.input.data))
+        self.returnSampledToken = request.returnSampledToken == true
         self.result = result
     }
 
@@ -254,6 +258,7 @@ private struct PersistentCompletedMutation {
             && inputKind == request.inputKind
             && inputShape == request.input.shape
             && inputDType == request.input.dtype
+            && returnSampledToken == (request.returnSampledToken == true)
             && inputDigest == Data(SHA256.hash(data: request.input.data))
     }
 }
@@ -635,6 +640,11 @@ final class PersistentShardService {
         guard let sequence = shard.sequences[request.sequenceID] else {
             throw PersistentWorkerError.sequenceNotFound(request.shardID, request.sequenceID)
         }
+        if request.returnSampledToken == true && !shard.ownsOutput {
+            throw PersistentWorkerError.invalidRequest(
+                "returnSampledToken requires an output-owning shard"
+            )
+        }
         if operation != "forward",
            let completed = sequence.completedMutation,
            completed.matches(operation: operation, request: request)
@@ -735,7 +745,27 @@ final class PersistentShardService {
         default:
             throw PersistentWorkerError.invalidRequest("unknown inference operation \(operation)")
         }
-        let tensor = WireTensor(output)
+        let tensor: WireTensor
+        let sampledTokenID: Int32?
+        if request.returnSampledToken == true {
+            let finalLogits = output[0..., -1, 0...]
+            guard !isNaN(finalLogits).any().item(Bool.self) else {
+                throw PersistentWorkerError.invalidRequest(
+                    "cannot sample logits containing NaN"
+                )
+            }
+            let token = argMax(finalLogits, axis: -1).item(Int32.self)
+            guard token >= 0 else {
+                throw PersistentWorkerError.invalidRequest(
+                    "sampled token ID must be non-negative, got \(token)"
+                )
+            }
+            tensor = .empty
+            sampledTokenID = token
+        } else {
+            tensor = WireTensor(output)
+            sampledTokenID = nil
+        }
         let elapsed = DispatchTime.now().uptimeNanoseconds - start
         shard.forwardCount += 1
         forwardCount += 1
@@ -746,6 +776,7 @@ final class PersistentShardService {
             position: request.position,
             nextPosition: UInt64(sequence.nextPosition),
             output: tensor,
+            sampledTokenID: sampledTokenID,
             computeMicros: elapsed / 1_000,
             kvCacheBytes: sequence.cache.memoryBytes,
             memory: CheckpointMemory.snapshot()
@@ -820,7 +851,9 @@ final class PersistentShardService {
         let currentSequenceBytes = retainedBytes(sequence: sequence)
         let currentWorkerBytes = retainedBytes()
         let estimatedCacheBytes = try sequence.cache.estimatedMemoryBytes(at: nextPosition)
-        let estimatedOutputBytes = try shard.stage.estimatedOutputBytes(inputLength: inputLength)
+        let estimatedOutputBytes = request.returnSampledToken == true
+            ? MemoryLayout<Int32>.size
+            : try shard.stage.estimatedOutputBytes(inputLength: inputLength)
         let (estimatedSequenceBytes, sequenceOverflow) = estimatedCacheBytes
             .addingReportingOverflow(estimatedOutputBytes)
         let workerWithoutSequence = max(0, currentWorkerBytes - currentSequenceBytes)
@@ -960,9 +993,17 @@ final class PersistentShardService {
     }
 
     private func retainedBytes(sequence: PersistentSequenceState) -> Int {
-        saturatedAdd(
+        let replayBytes: Int
+        if let completed = sequence.completedMutation {
+            replayBytes = completed.result.sampledTokenID == nil
+                ? completed.result.output.data.count
+                : MemoryLayout<Int32>.size
+        } else {
+            replayBytes = 0
+        }
+        return saturatedAdd(
             sequence.cache.memoryBytes,
-            sequence.completedMutation?.result.output.data.count ?? 0
+            replayBytes
         )
     }
 

@@ -30,31 +30,34 @@ type ByteDistribution struct {
 }
 
 type StageSummary struct {
-	SampleCount                 int              `json:"sampleCount"`
-	ProducerWallMicros          Distribution     `json:"producerWallMicros"`
-	ProducerComputeMicros       Distribution     `json:"producerComputeMicros"`
-	ProducerOverheadMicros      Distribution     `json:"producerOverheadMicros"`
-	BoundarySerializationMicros Distribution     `json:"boundarySerializationMicros"`
-	ConsumerRoundTripMicros     Distribution     `json:"consumerRoundTripMicros"`
-	ConsumerComputeMicros       Distribution     `json:"consumerComputeMicros"`
-	TransportOverheadMicros     Distribution     `json:"transportOverheadMicros"`
-	DistributedEndToEndMicros   Distribution     `json:"distributedEndToEndMicros"`
-	SamplingMicros              Distribution     `json:"samplingMicros"`
-	TokenLatencyMicros          Distribution     `json:"tokenLatencyMicros"`
-	ReferenceWallMicros         Distribution     `json:"referenceWallMicros"`
-	ReferenceComputeMicros      Distribution     `json:"referenceComputeMicros"`
-	ReferenceSamplingMicros     Distribution     `json:"referenceSamplingMicros"`
-	ReferenceTokenLatencyMicros Distribution     `json:"referenceTokenLatencyMicros"`
-	TokensPerSecond             float64          `json:"tokensPerSecond"`
-	ReferenceTokensPerSecond    float64          `json:"referenceTokensPerSecond"`
-	BoundaryTensorBytes         ByteDistribution `json:"boundaryTensorBytes"`
-	BoundaryWireBytes           ByteDistribution `json:"boundaryWireBytes"`
-	MaxProducerKVCacheBytes     int              `json:"maxProducerKVCacheBytes"`
-	MaxConsumerKVCacheBytes     int              `json:"maxConsumerKVCacheBytes"`
-	MaxReferenceKVCacheBytes    int              `json:"maxReferenceKVCacheBytes"`
-	ProducerPeakMemoryBytes     int              `json:"producerPeakMemoryBytes"`
-	ConsumerPeakMemoryBytes     int              `json:"consumerPeakMemoryBytes"`
-	ReferencePeakMemoryBytes    int              `json:"referencePeakMemoryBytes"`
+	SampleCount                         int              `json:"sampleCount"`
+	ProducerWallMicros                  Distribution     `json:"producerWallMicros"`
+	ProducerComputeMicros               Distribution     `json:"producerComputeMicros"`
+	ProducerOverheadMicros              Distribution     `json:"producerOverheadMicros"`
+	BoundarySerializationMicros         Distribution     `json:"boundarySerializationMicros"`
+	ConsumerResponseSerializationMicros Distribution     `json:"consumerResponseSerializationMicros"`
+	ConsumerRoundTripMicros             Distribution     `json:"consumerRoundTripMicros"`
+	ConsumerComputeMicros               Distribution     `json:"consumerComputeMicros"`
+	TransportOverheadMicros             Distribution     `json:"transportOverheadMicros"`
+	DistributedEndToEndMicros           Distribution     `json:"distributedEndToEndMicros"`
+	SamplingMicros                      Distribution     `json:"samplingMicros"`
+	TokenLatencyMicros                  Distribution     `json:"tokenLatencyMicros"`
+	ReferenceWallMicros                 Distribution     `json:"referenceWallMicros"`
+	ReferenceComputeMicros              Distribution     `json:"referenceComputeMicros"`
+	ReferenceSamplingMicros             Distribution     `json:"referenceSamplingMicros"`
+	ReferenceTokenLatencyMicros         Distribution     `json:"referenceTokenLatencyMicros"`
+	TokensPerSecond                     float64          `json:"tokensPerSecond"`
+	ReferenceTokensPerSecond            float64          `json:"referenceTokensPerSecond"`
+	BoundaryTensorBytes                 ByteDistribution `json:"boundaryTensorBytes"`
+	BoundaryWireBytes                   ByteDistribution `json:"boundaryWireBytes"`
+	ConsumerResponseTensorBytes         ByteDistribution `json:"consumerResponseTensorBytes"`
+	ConsumerResponseWireBytes           ByteDistribution `json:"consumerResponseWireBytes"`
+	MaxProducerKVCacheBytes             int              `json:"maxProducerKVCacheBytes"`
+	MaxConsumerKVCacheBytes             int              `json:"maxConsumerKVCacheBytes"`
+	MaxReferenceKVCacheBytes            int              `json:"maxReferenceKVCacheBytes"`
+	ProducerPeakMemoryBytes             int              `json:"producerPeakMemoryBytes"`
+	ConsumerPeakMemoryBytes             int              `json:"consumerPeakMemoryBytes"`
+	ReferencePeakMemoryBytes            int              `json:"referencePeakMemoryBytes"`
 }
 
 func Summarize(samples []generation.StageSample) StageSummary {
@@ -70,6 +73,9 @@ func Summarize(samples []generation.StageSample) StageSummary {
 	})
 	summary.BoundarySerializationMicros = micros(samples, func(sample generation.StageSample) int64 {
 		return sample.BoundarySerializationMicros
+	})
+	summary.ConsumerResponseSerializationMicros = micros(samples, func(sample generation.StageSample) int64 {
+		return sample.ConsumerResponseSerializationMicros
 	})
 	summary.ConsumerRoundTripMicros = micros(samples, func(sample generation.StageSample) int64 {
 		return sample.ConsumerRoundTripMicros
@@ -112,6 +118,12 @@ func Summarize(samples []generation.StageSample) StageSummary {
 	})
 	summary.BoundaryWireBytes = bytes(samples, func(sample generation.StageSample) int64 {
 		return int64(sample.BoundaryWireBytes)
+	})
+	summary.ConsumerResponseTensorBytes = bytes(samples, func(sample generation.StageSample) int64 {
+		return int64(sample.ConsumerResponseTensorBytes)
+	})
+	summary.ConsumerResponseWireBytes = bytes(samples, func(sample generation.StageSample) int64 {
+		return int64(sample.ConsumerResponseWireBytes)
 	})
 	for _, sample := range samples {
 		summary.MaxProducerKVCacheBytes = max(summary.MaxProducerKVCacheBytes, sample.ProducerKVCacheBytes)

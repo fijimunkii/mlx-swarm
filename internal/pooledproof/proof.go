@@ -348,7 +348,7 @@ func Run(ctx context.Context, reference Reference, config RunConfig) (result Res
 		ctx, producer.Caller, consumer.Caller, nil,
 		generation.SessionConfig{
 			Model: reference.Model, RTol: config.RTol, ATol: config.ATol,
-			ForwardTimeout: config.ForwardTimeout,
+			ForwardTimeout: config.ForwardTimeout, TerminalSampling: true,
 			Observer: func(sample generation.StageSample) {
 				observePhase(&producerEvidence.Memory, sample.Operation, sample.ProducerMemory)
 				observePhase(&consumerEvidence.Memory, sample.Operation, sample.ConsumerMemory)
