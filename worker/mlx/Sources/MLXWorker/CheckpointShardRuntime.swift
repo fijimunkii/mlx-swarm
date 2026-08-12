@@ -153,6 +153,7 @@ enum CheckpointShardError: LocalizedError {
     case missingOutputModule(String)
     case invalidSequenceCache(String)
     case noSafetensors(URL)
+    case incompleteSafetensorIndex(URL, Int, Int)
 
     var errorDescription: String? {
         switch self {
@@ -172,6 +173,8 @@ enum CheckpointShardError: LocalizedError {
             return "invalid checkpoint shard sequence cache: \(reason)"
         case .noSafetensors(let directory):
             return "no safetensors found in \(directory.path)"
+        case .incompleteSafetensorIndex(let directory, let found, let expected):
+            return "safetensor index in \(directory.path) resolves \(found) of \(expected) files"
         }
     }
 }

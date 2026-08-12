@@ -24,7 +24,7 @@ func main() {
 
 func run() error {
 	createReference := flag.Bool("create-reference", false, "run a separate local full-model oracle and emit a reference manifest")
-	referencePath := flag.String("reference", "testdata/pooled-memory/gemma-3-text-12b-it-4bit.json", "checked-in deterministic reference manifest")
+	referencePath := flag.String("reference", "testdata/pooled-memory/gemma-3-12b-it-6bit.json", "checked-in deterministic reference manifest")
 	worker := flag.String("worker", workerproc.DefaultPath(), "path to the built MLXWorker executable for reference creation")
 	producerURL := flag.String("producer", "", "producer swarmd base URL")
 	consumerURL := flag.String("peer", "", "consumer swarmd base URL")
@@ -32,7 +32,7 @@ func run() error {
 	prompt := flag.String("prompt", pooledproof.DefaultPrompt, "deterministic prompt for reference creation")
 	maxTokens := flag.Int("max-tokens", pooledproof.DefaultMinimumTokens, "reference tokens to generate")
 	minimumTokens := flag.Int("minimum-tokens", pooledproof.DefaultMinimumTokens, "minimum proof token count")
-	memoryLimit := flag.Int("memory-limit-bytes", pooledproof.DefaultWorkerMemoryLimit, "required MLX memory limit on each serving worker")
+	memoryThreshold := flag.Int("memory-threshold-bytes", pooledproof.DefaultWorkerMemoryThreshold, "required MLX scheduling threshold on each serving worker")
 	rtol := flag.Float64("rtol", 1e-4, "relative reference-logit tolerance when creating a reference")
 	atol := flag.Float64("atol", 1e-4, "absolute reference-logit tolerance when creating a reference")
 	forwardTimeout := flag.Duration("forward-timeout", 2*time.Minute, "deadline for each prefill/decode request")
@@ -71,7 +71,7 @@ func run() error {
 	}
 	result, proofErr := pooledproof.Run(ctx, reference, pooledproof.RunConfig{
 		ProducerURL: *producerURL, ConsumerURL: *consumerURL,
-		ExpectedMemoryLimitBytes: *memoryLimit, MinimumGeneratedTokens: *minimumTokens,
+		ExpectedMemoryThresholdBytes: *memoryThreshold, MinimumGeneratedTokens: *minimumTokens,
 		RTol: *rtol, ATol: *atol, ForwardTimeout: *forwardTimeout,
 	})
 	if err := encode(result); err != nil {

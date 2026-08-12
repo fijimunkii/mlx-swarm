@@ -17,7 +17,7 @@ import (
 
 func TestCheckedInReferenceIsValid(t *testing.T) {
 	reference, err := LoadReference(filepath.Join(
-		"..", "..", "testdata", "pooled-memory", "gemma-3-text-12b-it-4bit.json",
+		"..", "..", "testdata", "pooled-memory", "gemma-3-12b-it-6bit.json",
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -25,11 +25,19 @@ func TestCheckedInReferenceIsValid(t *testing.T) {
 	if reference.Model != DefaultModelID {
 		t.Fatalf("model = %q, want %q", reference.Model, DefaultModelID)
 	}
-	if reference.FullCheckpointMemory.MaxObservedBytes <= DefaultWorkerMemoryLimit {
+	const runnerPhysicalBytes = uint64(7516192768)
+	if reference.CheckpointBytes <= runnerPhysicalBytes {
 		t.Fatalf(
-			"full checkpoint uses %d bytes, want more than %d",
+			"checkpoint has %d bytes, want more than a 7 GiB runner's %d",
+			reference.CheckpointBytes,
+			runnerPhysicalBytes,
+		)
+	}
+	if uint64(reference.FullCheckpointMemory.MaxObservedBytes) <= runnerPhysicalBytes {
+		t.Fatalf(
+			"full inference uses %d bytes, want more than a 7 GiB runner's %d",
 			reference.FullCheckpointMemory.MaxObservedBytes,
-			DefaultWorkerMemoryLimit,
+			runnerPhysicalBytes,
 		)
 	}
 }
@@ -58,14 +66,14 @@ func TestRemoteCapabilities(t *testing.T) {
 		MLXMemoryLimitBytes: capabilities.MLXMemoryLimitBytes,
 		MLXCacheLimitBytes:  capabilities.MLXCacheLimitBytes,
 	}
-	if !configuredLimit(capabilities, state, DefaultWorkerMemoryLimit) {
-		t.Fatalf("capabilities did not preserve configured limit: %+v", capabilities)
+	if !configuredMLXThreshold(capabilities, state, DefaultWorkerMemoryThreshold) {
+		t.Fatalf("capabilities did not preserve configured threshold: %+v", capabilities)
 	}
 }
 
 func TestRunRejectsDirtyWorkersBeforePreparingSession(t *testing.T) {
 	reference, err := LoadReference(filepath.Join(
-		"..", "..", "testdata", "pooled-memory", "gemma-3-text-12b-it-4bit.json",
+		"..", "..", "testdata", "pooled-memory", "gemma-3-12b-it-6bit.json",
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +104,7 @@ func TestRunRejectsDirtyWorkersBeforePreparingSession(t *testing.T) {
 
 func TestRunUsesConfiguredClientAndUnloadsPartialSession(t *testing.T) {
 	reference, err := LoadReference(filepath.Join(
-		"..", "..", "testdata", "pooled-memory", "gemma-3-text-12b-it-4bit.json",
+		"..", "..", "testdata", "pooled-memory", "gemma-3-12b-it-6bit.json",
 	))
 	if err != nil {
 		t.Fatal(err)

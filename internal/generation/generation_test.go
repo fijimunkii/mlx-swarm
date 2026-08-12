@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -76,6 +77,51 @@ func TestGenerateObservesHotPathSeparatelyFromReference(t *testing.T) {
 		info.ShardPlan.Consumer.LayerStart != 1 {
 		t.Fatalf("unexpected session info: %+v", info)
 	}
+}
+
+func TestVerifyTraceReplaysDistributedLogitsOnIndependentReference(t *testing.T) {
+	producer, consumer, reference := fakeSwarm([]int32{3, 2, 3})
+	var logits []workerproc.WireTensor
+	session, err := NewSession(
+		context.Background(), producer, consumer, nil,
+		SessionConfig{
+			Model: "test/model", RTol: 1e-4, ATol: 1e-4,
+			LogitsObserver: func(_ int, tensor workerproc.WireTensor) {
+				logits = append(logits, tensor)
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated, err := session.Generate(context.Background(), Request{
+		Prompt: "hello", MaxTokens: 2, SequenceID: "captured",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generated.Verification != nil || len(logits) != 2 {
+		t.Fatalf("unexpected captured generation: verification=%+v logits=%d", generated.Verification, len(logits))
+	}
+	var operations []string
+	verification, err := VerifyTrace(
+		context.Background(), reference, session.Info().Model,
+		TraceVerificationConfig{
+			RTol: 1e-4, ATol: 1e-4,
+			Observer: func(sample TraceSample) {
+				operations = append(operations, sample.Operation)
+			},
+		},
+		generated.Prompt, generated.PromptTokenIDs, generated.GeneratedTokenIDs, logits,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !verification.GreedyTokenIDsMatch || verification.ComparedTokens != 2 ||
+		!slices.Equal(operations, []string{"prefill", "decode"}) {
+		t.Fatalf("unexpected trace verification: verification=%+v operations=%v", verification, operations)
+	}
+	assertNoFakeSequences(t, producer, consumer, reference)
 }
 
 func TestGenerateStopsAtEOSAndCleansSequences(t *testing.T) {

@@ -77,17 +77,17 @@ Current failure proof:
 
 ## M6 — pooled-memory demo
 
-- [x] select a model whose full inference footprint exceeds each serving worker's configured physical MLX budget
+- [x] select a model whose checkpoint and full inference footprint exceed each serving worker's physical memory
 - [x] host complementary ranges without materializing a full model in either serving process
 - [x] generate 32 reference-matched tokens and record load/prefill/decode memory evidence
 
-Current pooled-memory proof (`mlx-community/gemma-3-text-12b-it-4bit`):
+Current pooled-memory proof (`mlx-community/gemma-3-12b-it-6bit`):
 
-- the 48 layers split 0–23 / 24–47 across two fresh Apple-silicon workers, each configured with a 6 GiB MLX limit and a 64 MiB allocator-cache limit
-- the resolved checkpoint contains 7,220,708,353 bytes; a separate upstream full-model run on a 24 GiB M4 measured a maximum 7,416,404,295-byte inference footprint
+- the 48 layers split 0–23 / 24–47 across two fresh 7 GiB Apple-silicon workers, each configured with a 6 GiB MLX scheduling threshold and a 64 MiB allocator-cache limit
+- the resolved checkpoint contains 11,256,366,608 bytes; a separate upstream full-model run on a 24 GiB M4 measured a maximum 10,608,178,912-byte inference footprint, so neither can fit in one serving runner's physical memory
 - the checked-in fingerprint, prompt token plan, and 32 greedy output tokens were produced only after every distributed logit vector and token exactly matched the upstream full-model path
 - serving proof mode requires clean remote workers, loads exactly one complementary range on each, and does not create a reference worker or full-range shard
-- machine-readable evidence records physical memory, configured limits, load/prefill/decode peaks, shard ownership, generation timings, exact reference parity, and zero retained sequence state after teardown
+- machine-readable evidence records physical memory, configured MLX thresholds, load/prefill/decode peaks, shard ownership, generation timings, exact reference parity, and zero retained sequence state after teardown
 - paired GitHub-hosted macOS runners reproduce the proof over Tailscale and upload the result; the full-model oracle never runs on either 7 GB serving VM
 
 The independent failure proof in M3 covers bounded worker loss and

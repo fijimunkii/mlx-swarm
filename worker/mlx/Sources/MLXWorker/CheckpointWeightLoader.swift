@@ -78,23 +78,29 @@ enum CheckpointWeightLoader {
                 SafetensorsIndex.self,
                 from: Data(contentsOf: indexURL)
             )
-            return Set(index.weightMap.values)
+            let indexedURLs = Set(index.weightMap.values)
                 .sorted()
                 .map { directory.appendingPathComponent($0) }
+            let existingCount = indexedURLs.count {
+                FileManager.default.fileExists(atPath: $0.path)
+            }
+            if !indexedURLs.isEmpty && existingCount == indexedURLs.count {
+                return indexedURLs
+            }
+            if existingCount > 0 {
+                throw CheckpointShardError.incompleteSafetensorIndex(
+                    directory,
+                    existingCount,
+                    indexedURLs.count
+                )
+            }
         }
 
-        guard let enumerator = FileManager.default.enumerator(
+        let urls = try FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: nil
-        ) else {
-            throw CheckpointShardError.noSafetensors(directory)
-        }
-        let urls = enumerator.compactMap { item -> URL? in
-            guard let url = item as? URL, url.pathExtension == "safetensors" else {
-                return nil
-            }
-            return url
-        }.sorted { $0.path < $1.path }
+        ).filter { $0.pathExtension == "safetensors" }
+            .sorted { $0.path < $1.path }
         guard !urls.isEmpty else {
             throw CheckpointShardError.noSafetensors(directory)
         }

@@ -222,26 +222,26 @@ prints a readable table without performance pass/fail thresholds.
 
 ### Physically pooled-memory generation
 
-The MVP proof uses `mlx-community/gemma-3-text-12b-it-4bit`, a 48-layer,
-7,220,708,353-byte checkpoint, across two independent workers limited to 6 GiB
-of MLX memory each. A separate upstream full-model run measured a
-7,416,404,295-byte inference footprint and pinned the exact 32-token greedy
-output. The serving command loads only layers 0–23 on the producer and 24–47
-plus the output modules on the consumer; it never starts or loads a full-model
-oracle on either serving Mac.
+The MVP proof uses `mlx-community/gemma-3-12b-it-6bit`, a 48-layer,
+11,256,366,608-byte checkpoint, across two independent 7 GiB workers. The
+checkpoint and a separately measured 10,608,178,912-byte full-model inference
+footprint each exceed either worker's physical memory. The serving command
+loads only layers 0–23 on the producer and 24–47 plus the output modules on the
+consumer; it never starts or loads a full-model oracle on either serving Mac.
 
 ```bash
 go run ./cmd/swarm-pooled-memory \
   -producer http://127.0.0.1:8080 \
   -peer http://MAC_B_LAN_IP:8080 \
-  -reference testdata/pooled-memory/gemma-3-text-12b-it-4bit.json \
+  -reference testdata/pooled-memory/gemma-3-12b-it-6bit.json \
   > pooled-memory.json
 ```
 
-The machine-readable result inventories both Macs, verifies their configured
-limits, reports load/prefill/decode peaks, checks every generated token against
-the pinned full-model reference, rejects any full-range serving shard, and
-proves sequence teardown before unloading both proof-owned shards. See
+The machine-readable result inventories both Macs, verifies their physical
+memory and configured MLX scheduling thresholds, reports load/prefill/decode
+peaks, checks every generated token against the pinned full-model reference,
+rejects any full-range serving shard, and proves sequence teardown before
+unloading both proof-owned shards. See
 [`docs/pooled-memory-proof.md`](docs/pooled-memory-proof.md) for checkpoint
 prefetch, worker startup, reference provenance, and the paired-runner workflow.
 

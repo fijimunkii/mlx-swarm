@@ -22,6 +22,7 @@ type SessionConfig struct {
 	ATol           float64
 	ForwardTimeout time.Duration
 	Observer       StageObserver
+	LogitsObserver LogitsObserver
 }
 
 const DefaultForwardTimeout = 30 * time.Second
@@ -30,6 +31,12 @@ const DefaultForwardTimeout = 30 * time.Second
 // decode operation after the resulting token has been sampled. Observer work
 // is excluded from the reported stage durations.
 type StageObserver func(StageSample)
+
+// LogitsObserver receives a private copy of the distributed final-logit
+// tensor immediately before each greedy token is sampled. It is intended for
+// offline reference verification where the distributed shards and full-model
+// oracle cannot coexist in memory.
+type LogitsObserver func(step int, logits workerproc.WireTensor)
 
 // StageSample separates the distributed hot path from the cached full-model
 // correctness oracle. BoundaryWireBytes measures the representative JSON
@@ -224,8 +231,7 @@ func NewSession(
 	}
 
 	split := producerModel.LayerCount / 2
-	modelHash := sha256.Sum256([]byte(config.Model + "\x00" + producerModel.CheckpointFingerprint))
-	suffix := hex.EncodeToString(modelHash[:6])
+	suffix := modelHashSuffix(config.Model, producerModel.CheckpointFingerprint)
 	plan := ShardPlan{
 		Producer: Shard{ID: "generate-producer-" + suffix, LayerStart: 0, LayerEnd: split},
 		Consumer: Shard{ID: "generate-consumer-" + suffix, LayerStart: split, LayerEnd: producerModel.LayerCount},
@@ -422,6 +428,12 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 		point = failurePoint{phase: "sample", operation: "sample", position: position}
 		if err := ctx.Err(); err != nil {
 			return result, err
+		}
+		if s.config.LogitsObserver != nil {
+			s.config.LogitsObserver(
+				len(result.GeneratedTokenIDs),
+				cloneWireTensor(distributedLogits),
+			)
 		}
 		samplingStarted := time.Now()
 		nextToken, err := greedyToken(distributedLogits)
@@ -860,6 +872,14 @@ func tokenTensor(tokens []int32) workerproc.WireTensor {
 	return workerproc.WireTensor{Shape: []int{1, len(tokens)}, DType: "int32", Data: data}
 }
 
+func cloneWireTensor(tensor workerproc.WireTensor) workerproc.WireTensor {
+	return workerproc.WireTensor{
+		Shape: append([]int(nil), tensor.Shape...),
+		DType: tensor.DType,
+		Data:  append([]byte(nil), tensor.Data...),
+	}
+}
+
 func randomSequenceID() (string, error) {
 	return randomIdentifier("generation-")
 }
@@ -870,4 +890,9 @@ func randomIdentifier(prefix string) (string, error) {
 		return "", fmt.Errorf("generate sequence ID: %w", err)
 	}
 	return prefix + hex.EncodeToString(bytes), nil
+}
+
+func modelHashSuffix(modelID, fingerprint string) string {
+	hash := sha256.Sum256([]byte(modelID + "\x00" + fingerprint))
+	return hex.EncodeToString(hash[:6])
 }

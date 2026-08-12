@@ -19,9 +19,9 @@ struct WorkerRuntimeMemory {
     static let physicalMemoryBytes = ProcessInfo.processInfo.physicalMemory
 
     static func configure(environment: [String: String] = ProcessInfo.processInfo.environment) throws {
-        if let value = environment["MLX_SWARM_MEMORY_LIMIT_BYTES"] {
+        if let value = environment["MLX_SWARM_MEMORY_THRESHOLD_BYTES"] {
             Memory.memoryLimit = try parseLimit(
-                name: "MLX_SWARM_MEMORY_LIMIT_BYTES",
+                name: "MLX_SWARM_MEMORY_THRESHOLD_BYTES",
                 value: value
             )
         }

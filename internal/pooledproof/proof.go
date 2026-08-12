@@ -17,13 +17,13 @@ import (
 )
 
 const (
-	SchemaVersion              = 1
-	DefaultModelID             = "mlx-community/gemma-3-text-12b-it-4bit"
-	DefaultPrompt              = "Write a short story about two computers working together:"
-	DefaultMinimumTokens       = 32
-	DefaultWorkerMemoryLimit   = 6 * 1024 * 1024 * 1024
-	defaultCapabilitiesMaxBody = 1 << 20
-	defaultCleanupTimeout      = 10 * time.Second
+	SchemaVersion                = 1
+	DefaultModelID               = "mlx-community/gemma-3-12b-it-6bit"
+	DefaultPrompt                = "Write a short story about two computers working together:"
+	DefaultMinimumTokens         = 32
+	DefaultWorkerMemoryThreshold = 6 * 1024 * 1024 * 1024
+	defaultCapabilitiesMaxBody   = 1 << 20
+	defaultCleanupTimeout        = 10 * time.Second
 )
 
 type Capabilities struct {
@@ -67,38 +67,38 @@ type WorkerEvidence struct {
 }
 
 type Checks struct {
-	CleanWorkersAtStart               bool `json:"cleanWorkersAtStart"`
-	CheckpointMatchesReference        bool `json:"checkpointMatchesReference"`
-	CheckpointExceedsProducerLimit    bool `json:"checkpointExceedsProducerLimit"`
-	CheckpointExceedsConsumerLimit    bool `json:"checkpointExceedsConsumerLimit"`
-	FullInferenceExceedsProducerLimit bool `json:"fullInferenceExceedsProducerLimit"`
-	FullInferenceExceedsConsumerLimit bool `json:"fullInferenceExceedsConsumerLimit"`
-	ProducerUsesConfiguredLimit       bool `json:"producerUsesConfiguredLimit"`
-	ConsumerUsesConfiguredLimit       bool `json:"consumerUsesConfiguredLimit"`
-	ProducerWithinLimit               bool `json:"producerWithinLimit"`
-	ConsumerWithinLimit               bool `json:"consumerWithinLimit"`
-	ComplementaryShardsOnly           bool `json:"complementaryShardsOnly"`
-	NoServingFullModelOracle          bool `json:"noServingFullModelOracle"`
-	PromptTokensMatchReference        bool `json:"promptTokensMatchReference"`
-	GeneratedTokensMatchReference     bool `json:"generatedTokensMatchReference"`
-	GeneratedAtLeastMinimumTokens     bool `json:"generatedAtLeastMinimumTokens"`
-	SequenceStateReleased             bool `json:"sequenceStateReleased"`
-	AllPassed                         bool `json:"allPassed"`
+	CleanWorkersAtStart                        bool `json:"cleanWorkersAtStart"`
+	CheckpointMatchesReference                 bool `json:"checkpointMatchesReference"`
+	CheckpointExceedsProducerPhysicalMemory    bool `json:"checkpointExceedsProducerPhysicalMemory"`
+	CheckpointExceedsConsumerPhysicalMemory    bool `json:"checkpointExceedsConsumerPhysicalMemory"`
+	FullInferenceExceedsProducerPhysicalMemory bool `json:"fullInferenceExceedsProducerPhysicalMemory"`
+	FullInferenceExceedsConsumerPhysicalMemory bool `json:"fullInferenceExceedsConsumerPhysicalMemory"`
+	ProducerUsesConfiguredMLXThreshold         bool `json:"producerUsesConfiguredMLXThreshold"`
+	ConsumerUsesConfiguredMLXThreshold         bool `json:"consumerUsesConfiguredMLXThreshold"`
+	ProducerWithinPhysicalMemory               bool `json:"producerWithinPhysicalMemory"`
+	ConsumerWithinPhysicalMemory               bool `json:"consumerWithinPhysicalMemory"`
+	ComplementaryShardsOnly                    bool `json:"complementaryShardsOnly"`
+	NoServingFullModelOracle                   bool `json:"noServingFullModelOracle"`
+	PromptTokensMatchReference                 bool `json:"promptTokensMatchReference"`
+	GeneratedTokensMatchReference              bool `json:"generatedTokensMatchReference"`
+	GeneratedAtLeastMinimumTokens              bool `json:"generatedAtLeastMinimumTokens"`
+	SequenceStateReleased                      bool `json:"sequenceStateReleased"`
+	AllPassed                                  bool `json:"allPassed"`
 }
 
 type Result struct {
-	SchemaVersion              int               `json:"schemaVersion"`
-	Model                      string            `json:"model"`
-	ModelType                  string            `json:"modelType"`
-	CheckpointFingerprint      string            `json:"checkpointFingerprint"`
-	CheckpointBytes            uint64            `json:"checkpointBytes"`
-	ConfiguredMemoryLimitBytes int               `json:"configuredMemoryLimitBytes"`
-	MinimumGeneratedTokens     int               `json:"minimumGeneratedTokens"`
-	Producer                   WorkerEvidence    `json:"producer"`
-	Consumer                   WorkerEvidence    `json:"consumer"`
-	Reference                  Reference         `json:"reference"`
-	Generation                 generation.Result `json:"generation"`
-	Checks                     Checks            `json:"checks"`
+	SchemaVersion                     int               `json:"schemaVersion"`
+	Model                             string            `json:"model"`
+	ModelType                         string            `json:"modelType"`
+	CheckpointFingerprint             string            `json:"checkpointFingerprint"`
+	CheckpointBytes                   uint64            `json:"checkpointBytes"`
+	ConfiguredMLXMemoryThresholdBytes int               `json:"configuredMLXMemoryThresholdBytes"`
+	MinimumGeneratedTokens            int               `json:"minimumGeneratedTokens"`
+	Producer                          WorkerEvidence    `json:"producer"`
+	Consumer                          WorkerEvidence    `json:"consumer"`
+	Reference                         Reference         `json:"reference"`
+	Generation                        generation.Result `json:"generation"`
+	Checks                            Checks            `json:"checks"`
 }
 
 type ReferenceConfig struct {
@@ -112,14 +112,14 @@ type ReferenceConfig struct {
 }
 
 type RunConfig struct {
-	ProducerURL              string
-	ConsumerURL              string
-	ExpectedMemoryLimitBytes int
-	MinimumGeneratedTokens   int
-	RTol                     float64
-	ATol                     float64
-	ForwardTimeout           time.Duration
-	HTTPClient               *http.Client
+	ProducerURL                  string
+	ConsumerURL                  string
+	ExpectedMemoryThresholdBytes int
+	MinimumGeneratedTokens       int
+	RTol                         float64
+	ATol                         float64
+	ForwardTimeout               time.Duration
+	HTTPClient                   *http.Client
 }
 
 func LoadReference(path string) (Reference, error) {
@@ -195,25 +195,51 @@ func CreateReference(ctx context.Context, config ReferenceConfig) (Reference, er
 		return Reference{}, fmt.Errorf("reference consumer: %w", err)
 	}
 	defer consumer.Cleanup()
-	oracle, err := workerproc.OpenPersistentTarget(config.WorkerPath, "")
-	if err != nil {
-		return Reference{}, fmt.Errorf("full-model oracle: %w", err)
-	}
-	defer oracle.Cleanup()
 
-	var fullMemory MemoryEvidence
+	var distributedLogits []workerproc.WireTensor
 	session, err := generation.NewSession(
-		ctx, producer.Caller, consumer.Caller, oracle.Caller,
+		ctx, producer.Caller, consumer.Caller, nil,
 		generation.SessionConfig{
 			Model: config.Model, RTol: config.RTol, ATol: config.ATol,
 			ForwardTimeout: config.ForwardTimeout,
-			Observer: func(sample generation.StageSample) {
-				observePhase(&fullMemory, sample.Operation, sample.ReferenceMemory)
+			LogitsObserver: func(_ int, logits workerproc.WireTensor) {
+				distributedLogits = append(distributedLogits, logits)
 			},
 		},
 	)
 	if err != nil {
 		return Reference{}, fmt.Errorf("prepare reference session: %w", err)
+	}
+	generated, err := session.Generate(ctx, generation.Request{
+		Prompt: config.Prompt, MaxTokens: config.MaxTokens,
+	})
+	if err != nil {
+		return Reference{}, fmt.Errorf("generate reference: %w", err)
+	}
+	info := session.Info()
+	producer.Cleanup()
+	consumer.Cleanup()
+
+	oracle, err := workerproc.OpenPersistentTarget(config.WorkerPath, "")
+	if err != nil {
+		return Reference{}, fmt.Errorf("full-model oracle: %w", err)
+	}
+	defer oracle.Cleanup()
+	var fullMemory MemoryEvidence
+	verification, err := generation.VerifyTrace(
+		ctx, oracle.Caller, info.Model,
+		generation.TraceVerificationConfig{
+			RTol: config.RTol, ATol: config.ATol,
+			ForwardTimeout: config.ForwardTimeout,
+			Observer: func(sample generation.TraceSample) {
+				observePhase(&fullMemory, sample.Operation, sample.Memory)
+			},
+		},
+		generated.Prompt, generated.PromptTokenIDs, generated.GeneratedTokenIDs,
+		distributedLogits,
+	)
+	if err != nil {
+		return Reference{}, fmt.Errorf("verify full-model reference: %w", err)
 	}
 	oracleState, err := workerproc.State(ctx, oracle.Caller)
 	if err != nil {
@@ -224,17 +250,6 @@ func CreateReference(ctx context.Context, config ReferenceConfig) (Reference, er
 	}
 	fullMemory.Load = oracleState.LoadedShards[0].LoadedMemory
 	updateMaxObserved(&fullMemory, fullMemory.Load)
-
-	generated, err := session.Generate(ctx, generation.Request{
-		Prompt: config.Prompt, MaxTokens: config.MaxTokens,
-	})
-	if err != nil {
-		return Reference{}, fmt.Errorf("generate reference: %w", err)
-	}
-	if generated.Verification == nil {
-		return Reference{}, errors.New("reference generation omitted full-model verification")
-	}
-	info := session.Info()
 	reference := Reference{
 		SchemaVersion: SchemaVersion,
 		Model:         generated.Model, ModelType: generated.ModelType,
@@ -246,7 +261,7 @@ func CreateReference(ctx context.Context, config ReferenceConfig) (Reference, er
 		GeneratedTokenIDs:     append([]int32(nil), generated.GeneratedTokenIDs...),
 		GeneratedText:         generated.Text, StopReason: generated.StopReason,
 		FullCheckpointMemory: fullMemory, SourceHardware: capabilities,
-		ReferenceVerification: *generated.Verification,
+		ReferenceVerification: verification,
 	}
 	if err := ValidateReference(reference); err != nil {
 		return Reference{}, err
@@ -264,8 +279,8 @@ func Run(ctx context.Context, reference Reference, config RunConfig) (result Res
 	if strings.TrimRight(config.ProducerURL, "/") == strings.TrimRight(config.ConsumerURL, "/") {
 		return Result{}, errors.New("producer and consumer must be different swarmd endpoints")
 	}
-	if config.ExpectedMemoryLimitBytes <= 0 {
-		config.ExpectedMemoryLimitBytes = DefaultWorkerMemoryLimit
+	if config.ExpectedMemoryThresholdBytes <= 0 {
+		config.ExpectedMemoryThresholdBytes = DefaultWorkerMemoryThreshold
 	}
 	if config.MinimumGeneratedTokens < DefaultMinimumTokens {
 		config.MinimumGeneratedTokens = DefaultMinimumTokens
@@ -393,20 +408,20 @@ func Run(ctx context.Context, reference Reference, config RunConfig) (result Res
 		CheckpointMatchesReference: generated.CheckpointFingerprint == reference.CheckpointFingerprint &&
 			generated.CheckpointBytes == reference.CheckpointBytes &&
 			generated.ModelType == reference.ModelType && info.Model.LayerCount == reference.LayerCount,
-		CheckpointExceedsProducerLimit:    reference.CheckpointBytes > uint64(producerCapabilities.MLXMemoryLimitBytes),
-		CheckpointExceedsConsumerLimit:    reference.CheckpointBytes > uint64(consumerCapabilities.MLXMemoryLimitBytes),
-		FullInferenceExceedsProducerLimit: reference.FullCheckpointMemory.MaxObservedBytes > producerCapabilities.MLXMemoryLimitBytes,
-		FullInferenceExceedsConsumerLimit: reference.FullCheckpointMemory.MaxObservedBytes > consumerCapabilities.MLXMemoryLimitBytes,
-		ProducerUsesConfiguredLimit: configuredLimit(
-			producerCapabilities, producerInitial, config.ExpectedMemoryLimitBytes,
+		CheckpointExceedsProducerPhysicalMemory:    reference.CheckpointBytes > producerCapabilities.PhysicalMemoryBytes,
+		CheckpointExceedsConsumerPhysicalMemory:    reference.CheckpointBytes > consumerCapabilities.PhysicalMemoryBytes,
+		FullInferenceExceedsProducerPhysicalMemory: uint64(reference.FullCheckpointMemory.MaxObservedBytes) > producerCapabilities.PhysicalMemoryBytes,
+		FullInferenceExceedsConsumerPhysicalMemory: uint64(reference.FullCheckpointMemory.MaxObservedBytes) > consumerCapabilities.PhysicalMemoryBytes,
+		ProducerUsesConfiguredMLXThreshold: configuredMLXThreshold(
+			producerCapabilities, producerInitial, config.ExpectedMemoryThresholdBytes,
 		),
-		ConsumerUsesConfiguredLimit: configuredLimit(
-			consumerCapabilities, consumerInitial, config.ExpectedMemoryLimitBytes,
+		ConsumerUsesConfiguredMLXThreshold: configuredMLXThreshold(
+			consumerCapabilities, consumerInitial, config.ExpectedMemoryThresholdBytes,
 		),
-		ProducerWithinLimit: completeMemoryEvidence(producerEvidence.Memory) &&
-			producerEvidence.Memory.MaxObservedBytes <= producerCapabilities.MLXMemoryLimitBytes,
-		ConsumerWithinLimit: completeMemoryEvidence(consumerEvidence.Memory) &&
-			consumerEvidence.Memory.MaxObservedBytes <= consumerCapabilities.MLXMemoryLimitBytes,
+		ProducerWithinPhysicalMemory: completeMemoryEvidence(producerEvidence.Memory) &&
+			uint64(producerEvidence.Memory.MaxObservedBytes) <= producerCapabilities.PhysicalMemoryBytes,
+		ConsumerWithinPhysicalMemory: completeMemoryEvidence(consumerEvidence.Memory) &&
+			uint64(consumerEvidence.Memory.MaxObservedBytes) <= consumerCapabilities.PhysicalMemoryBytes,
 		ComplementaryShardsOnly:       complementary,
 		NoServingFullModelOracle:      noOracle,
 		PromptTokensMatchReference:    slices.Equal(generated.PromptTokenIDs, reference.PromptTokenIDs),
@@ -418,11 +433,11 @@ func Run(ctx context.Context, reference Reference, config RunConfig) (result Res
 	result = Result{
 		SchemaVersion: SchemaVersion,
 		Model:         generated.Model, ModelType: generated.ModelType,
-		CheckpointFingerprint:      generated.CheckpointFingerprint,
-		CheckpointBytes:            generated.CheckpointBytes,
-		ConfiguredMemoryLimitBytes: config.ExpectedMemoryLimitBytes,
-		MinimumGeneratedTokens:     config.MinimumGeneratedTokens,
-		Producer:                   producerEvidence, Consumer: consumerEvidence,
+		CheckpointFingerprint:             generated.CheckpointFingerprint,
+		CheckpointBytes:                   generated.CheckpointBytes,
+		ConfiguredMLXMemoryThresholdBytes: config.ExpectedMemoryThresholdBytes,
+		MinimumGeneratedTokens:            config.MinimumGeneratedTokens,
+		Producer:                          producerEvidence, Consumer: consumerEvidence,
 		Reference: reference, Generation: generated, Checks: checks,
 	}
 	if !checks.AllPassed {
@@ -588,7 +603,7 @@ func complementaryShards(
 		!second.OwnsInput && second.OwnsOutput
 }
 
-func configuredLimit(
+func configuredMLXThreshold(
 	capabilities Capabilities,
 	state *workerproc.PersistentWorkerState,
 	expected int,
@@ -602,10 +617,10 @@ func configuredLimit(
 
 func allChecksPassed(checks Checks) bool {
 	return checks.CleanWorkersAtStart && checks.CheckpointMatchesReference &&
-		checks.CheckpointExceedsProducerLimit && checks.CheckpointExceedsConsumerLimit &&
-		checks.FullInferenceExceedsProducerLimit && checks.FullInferenceExceedsConsumerLimit &&
-		checks.ProducerUsesConfiguredLimit && checks.ConsumerUsesConfiguredLimit &&
-		checks.ProducerWithinLimit && checks.ConsumerWithinLimit &&
+		checks.CheckpointExceedsProducerPhysicalMemory && checks.CheckpointExceedsConsumerPhysicalMemory &&
+		checks.FullInferenceExceedsProducerPhysicalMemory && checks.FullInferenceExceedsConsumerPhysicalMemory &&
+		checks.ProducerUsesConfiguredMLXThreshold && checks.ConsumerUsesConfiguredMLXThreshold &&
+		checks.ProducerWithinPhysicalMemory && checks.ConsumerWithinPhysicalMemory &&
 		checks.ComplementaryShardsOnly && checks.NoServingFullModelOracle &&
 		checks.PromptTokensMatchReference && checks.GeneratedTokensMatchReference &&
 		checks.GeneratedAtLeastMinimumTokens && checks.SequenceStateReleased

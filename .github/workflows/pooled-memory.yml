@@ -31,15 +31,15 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  POOLED_MODEL: mlx-community/gemma-3-text-12b-it-4bit
-  MLX_SWARM_MEMORY_LIMIT_BYTES: '6442450944'
+  POOLED_MODEL: mlx-community/gemma-3-12b-it-6bit
+  MLX_SWARM_MEMORY_THRESHOLD_BYTES: '6442450944'
   MLX_SWARM_CACHE_LIMIT_BYTES: '67108864'
 
 jobs:
   pooled-receiver-macos:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: macos-latest
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -74,6 +74,7 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           audience: ${{ secrets.TS_AUDIENCE }}
           tags: tag:ci
+          args: --accept-dns=false
           hostname: pooled-r-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Serve the consumer shard until proof completion
         run: |
@@ -93,7 +94,7 @@ jobs:
   pooled-producer-macos:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: macos-latest
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -128,6 +129,7 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           audience: ${{ secrets.TS_AUDIENCE }}
           tags: tag:ci
+          args: --accept-dns=false
           hostname: pooled-p-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Prove 12B generation across two memory-bounded runners
         id: proof
@@ -180,8 +182,8 @@ jobs:
           go run ./cmd/swarm-pooled-memory \
             -producer http://127.0.0.1:8080 \
             -peer "http://${peer_ip}:8080" \
-            -reference testdata/pooled-memory/gemma-3-text-12b-it-4bit.json \
-            -memory-limit-bytes "$MLX_SWARM_MEMORY_LIMIT_BYTES" \
+            -reference testdata/pooled-memory/gemma-3-12b-it-6bit.json \
+            -memory-threshold-bytes "$MLX_SWARM_MEMORY_THRESHOLD_BYTES" \
             -minimum-tokens 32 \
             -forward-timeout 2m \
             -timeout 20m >"$result"
@@ -195,7 +197,9 @@ jobs:
             echo '|---|---:|'
             printf '| Checkpoint bytes | %.3f GiB |\n' "$(jq -r '.checkpointBytes / 1073741824' "$result")"
             printf '| Full-model measured footprint | %.3f GiB |\n' "$(jq -r '.reference.fullCheckpointMemory.maxObservedBytes / 1073741824' "$result")"
-            printf '| Per-worker MLX limit | %.3f GiB |\n' "$(jq -r '.configuredMemoryLimitBytes / 1073741824' "$result")"
+            printf '| Producer physical memory | %.3f GiB |\n' "$(jq -r '.producer.capabilities.physicalMemoryBytes / 1073741824' "$result")"
+            printf '| Consumer physical memory | %.3f GiB |\n' "$(jq -r '.consumer.capabilities.physicalMemoryBytes / 1073741824' "$result")"
+            printf '| MLX scheduling threshold | %.3f GiB |\n' "$(jq -r '.configuredMLXMemoryThresholdBytes / 1073741824' "$result")"
             printf '| Producer maximum | %.3f GiB |\n' "$(jq -r '.producer.memory.maxObservedBytes / 1073741824' "$result")"
             printf '| Consumer maximum | %.3f GiB |\n' "$(jq -r '.consumer.memory.maxObservedBytes / 1073741824' "$result")"
             printf '| Generated tokens | %s |\n' "$(jq -r '.generation.generatedTokenIDs | length' "$result")"
