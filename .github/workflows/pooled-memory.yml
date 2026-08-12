@@ -131,11 +131,16 @@ jobs:
           tags: tag:ci
           args: --accept-dns=false
           hostname: pooled-p-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Restore runner DNS after Tailscale setup
+        run: |
+          sudo /usr/sbin/networksetup -setdnsservers Ethernet Empty
+          sudo /usr/sbin/networksetup -setsearchdomains Ethernet Empty
       - name: Prove 12B generation across two memory-bounded runners
         id: proof
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
           daemon="$RUNNER_TEMP/swarmd"
+          proof="$RUNNER_TEMP/swarm-pooled-memory"
           log="$RUNNER_TEMP/swarmd-producer.log"
           result="$RUNNER_TEMP/mlx-swarm-pooled-memory.json"
           peer_name="pooled-r-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -155,12 +160,21 @@ jobs:
           fi
 
           go build -o "$daemon" ./cmd/swarmd
+          go build -o "$proof" ./cmd/swarm-pooled-memory
           MLX_SWARM_WORKER="$worker" SWARMD_ADDR=127.0.0.1:8080 "$daemon" >"$log" 2>&1 &
           daemon_pid=$!
+          proof_pid=""
           cleanup() {
+            if [ -n "$proof_pid" ]; then
+              kill -TERM "$proof_pid" 2>/dev/null || true
+              wait "$proof_pid" 2>/dev/null || true
+            fi
             curl -fsS -X POST --connect-timeout 2 --max-time 5 "http://${peer_ip}:8080/v1/debug/complete" >/dev/null 2>&1 || true
             kill -TERM "$daemon_pid" 2>/dev/null || true
             wait "$daemon_pid" 2>/dev/null || true
+            if [ -f "$log" ]; then
+              cat "$log"
+            fi
           }
           trap cleanup EXIT
 
@@ -179,14 +193,21 @@ jobs:
             exit 1
           fi
 
-          go run ./cmd/swarm-pooled-memory \
+          "$proof" \
             -producer http://127.0.0.1:8080 \
             -peer "http://${peer_ip}:8080" \
             -reference testdata/pooled-memory/gemma-3-12b-it-6bit.json \
             -memory-threshold-bytes "$MLX_SWARM_MEMORY_THRESHOLD_BYTES" \
             -minimum-tokens 32 \
             -forward-timeout 2m \
-            -timeout 20m >"$result"
+            -timeout 20m >"$result" &
+          proof_pid=$!
+          while kill -0 "$proof_pid" 2>/dev/null; do
+            printf 'pooled-memory proof still running at %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            sleep 30
+          done
+          wait "$proof_pid"
+          proof_pid=""
           jq -e '.checks.allPassed and (.generation.generatedTokenIDs | length >= 32)' "$result" >/dev/null
           printf 'result_path=%s\n' "$result" >> "$GITHUB_OUTPUT"
 
@@ -209,7 +230,6 @@ jobs:
 
           cleanup
           trap - EXIT
-          cat "$log"
       - name: Upload pooled-memory evidence
         uses: actions/upload-artifact@v4
         with:

@@ -228,6 +228,10 @@ jobs:
           tags: tag:ci
           args: --accept-dns=false
           hostname: mlx-swarm-p-${{ github.run_id }}
+      - name: Restore runner DNS after Tailscale setup
+        run: |
+          sudo /usr/sbin/networksetup -setdnsservers Ethernet Empty
+          sudo /usr/sbin/networksetup -setsearchdomains Ethernet Empty
       - name: Discover receiver and exercise cached pipeline across runners
         id: distributed
         run: |
