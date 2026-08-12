@@ -1,0 +1,418 @@
+name: MLX Worker
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/mlx/**'
+      - 'scripts/build-mlx-worker.sh'
+      - 'cmd/swarm-local/**'
+      - 'cmd/swarm-net/**'
+      - 'cmd/swarm-session-smoke/**'
+      - 'cmd/swarm-cache-smoke/**'
+      - 'cmd/swarm-benchmark/**'
+      - 'cmd/swarm-generate/**'
+      - 'cmd/swarm-generate-smoke/**'
+      - 'cmd/swarm-failure-smoke/**'
+      - 'cmd/swarm-pooled-memory/**'
+      - 'cmd/swarmd/**'
+      - 'internal/generation/**'
+      - 'internal/benchmark/**'
+      - 'internal/failureharness/**'
+      - 'internal/pooledproof/**'
+      - 'internal/smoke/**'
+      - 'internal/tensorcheck/**'
+      - 'internal/workerproc/**'
+      - 'docs/distributed-inference-proof.md'
+      - 'go.mod'
+      - '.github/workflows/mlx.yml'
+  pull_request:
+    paths:
+      - 'worker/mlx/**'
+      - 'scripts/build-mlx-worker.sh'
+      - 'cmd/swarm-local/**'
+      - 'cmd/swarm-net/**'
+      - 'cmd/swarm-session-smoke/**'
+      - 'cmd/swarm-cache-smoke/**'
+      - 'cmd/swarm-benchmark/**'
+      - 'cmd/swarm-generate/**'
+      - 'cmd/swarm-generate-smoke/**'
+      - 'cmd/swarm-failure-smoke/**'
+      - 'cmd/swarm-pooled-memory/**'
+      - 'cmd/swarmd/**'
+      - 'internal/generation/**'
+      - 'internal/benchmark/**'
+      - 'internal/failureharness/**'
+      - 'internal/pooledproof/**'
+      - 'internal/smoke/**'
+      - 'internal/tensorcheck/**'
+      - 'internal/workerproc/**'
+      - 'docs/distributed-inference-proof.md'
+      - 'go.mod'
+      - '.github/workflows/mlx.yml'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: mlx-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fork PRs do not receive repository secrets. Keep a local MLX compiler and
+  # correctness check for those contributions without attaching them to the
+  # private tailnet.
+  mlx-worker-macos-fork:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Fingerprint Swift toolchain
+        id: mlx-toolchain
+        run: |
+          toolchain="$( { xcodebuild -version; swift --version; } )"
+          printf '%s\n' "$toolchain"
+          fingerprint="$(printf '%s\n' "$toolchain" | shasum -a 256 | awk '{print $1}')"
+          printf 'fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Restore MLX build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            worker/mlx/.build/source-packages
+            worker/mlx/.build/xcode/Build
+          key: mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-${{ hashFiles('worker/mlx/Sources/**', 'scripts/build-mlx-worker.sh') }}
+          restore-keys: |
+            mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-
+      - name: Build MLX worker and Metal library
+        run: ./scripts/build-mlx-worker.sh
+      - name: Smoke test MLX worker
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          "$worker" health
+          "$worker" capabilities
+          "$worker" shard-smoke
+          "$worker" checkpoint-shard-smoke
+      - name: Relay shard across two worker processes with Go
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          go run ./cmd/swarm-local -worker "$worker"
+      - name: Reuse one real checkpoint shard in a persistent worker
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          go run ./cmd/swarm-session-smoke -worker "$worker"
+      - name: Prove cached prefill and decode locally
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          go run ./cmd/swarm-cache-smoke -worker "$worker"
+      - name: Generate verified text locally
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          go run ./cmd/swarm-generate-smoke -worker "$worker"
+
+  mlx-receiver-macos:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Fingerprint Swift toolchain
+        id: mlx-toolchain
+        run: |
+          toolchain="$( { xcodebuild -version; swift --version; } )"
+          printf '%s\n' "$toolchain"
+          fingerprint="$(printf '%s\n' "$toolchain" | shasum -a 256 | awk '{print $1}')"
+          printf 'fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Restore MLX build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            worker/mlx/.build/source-packages
+            worker/mlx/.build/xcode/Build
+          key: mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-${{ hashFiles('worker/mlx/Sources/**', 'scripts/build-mlx-worker.sh') }}
+          restore-keys: |
+            mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-
+      # Resolve/build before Tailscale modifies the macOS DNS resolver. SwiftPM
+      # needs ordinary github.com access while fetching mlx-swift-lm.
+      - name: Build MLX worker and Metal library
+        run: ./scripts/build-mlx-worker.sh
+      - name: Cache and verify the real checkpoint before joining Tailscale
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          "$worker" checkpoint-shard-smoke
+      - name: Connect receiver to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
+          args: --accept-dns=false
+          hostname: mlx-swarm-r-${{ github.run_id }}
+      - name: Start one-shot shard receiver
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          ts_ip="$(tailscale ip -4 | head -n 1)"
+          if [ -z "$ts_ip" ]; then
+            echo "Tailscale did not assign an IPv4 address" >&2
+            exit 1
+          fi
+          echo "receiver_tailscale_ip=$ts_ip"
+          MLX_SWARM_WORKER="$worker" \
+            SWARMD_ADDR="${ts_ip}:8080" \
+            SWARMD_EXIT_AFTER_DEBUG_SHARD=1 \
+            go run ./cmd/swarmd
+
+  mlx-producer-macos:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Fingerprint Swift toolchain
+        id: mlx-toolchain
+        run: |
+          toolchain="$( { xcodebuild -version; swift --version; } )"
+          printf '%s\n' "$toolchain"
+          fingerprint="$(printf '%s\n' "$toolchain" | shasum -a 256 | awk '{print $1}')"
+          printf 'fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Restore MLX build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            worker/mlx/.build/source-packages
+            worker/mlx/.build/xcode/Build
+          key: mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-${{ hashFiles('worker/mlx/Sources/**', 'scripts/build-mlx-worker.sh') }}
+          restore-keys: |
+            mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-
+      # Keep all dependency resolution and local correctness work off the
+      # Tailscale-modified resolver; attach to the tailnet only for WAN relay.
+      - name: Build MLX worker and Metal library
+        run: ./scripts/build-mlx-worker.sh
+      - name: Smoke test MLX worker
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          "$worker" health
+          "$worker" capabilities
+          "$worker" shard-smoke
+          "$worker" checkpoint-shard-smoke
+      - name: Relay shard across two local worker processes with Go
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          go run ./cmd/swarm-local -worker "$worker"
+      - name: Reuse one real checkpoint shard in a persistent worker
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          go run ./cmd/swarm-session-smoke -worker "$worker"
+      - name: Prove cached prefill and decode locally
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          go run ./cmd/swarm-cache-smoke -worker "$worker"
+      - name: Generate verified text locally
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          go run ./cmd/swarm-generate-smoke -worker "$worker"
+      - name: Connect producer to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
+          args: --accept-dns=false
+          hostname: mlx-swarm-p-${{ github.run_id }}
+      - name: Restore runner DNS after Tailscale setup
+        run: |
+          sudo /usr/sbin/networksetup -setdnsservers Ethernet Empty
+          sudo /usr/sbin/networksetup -setsearchdomains Ethernet Empty
+      - name: Discover receiver and exercise cached pipeline across runners
+        id: distributed
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          peer_name="mlx-swarm-r-${GITHUB_RUN_ID}"
+          peer_ip=""
+
+          for _ in {1..120}; do
+            peer_ip="$(tailscale status --json | jq -r --arg name "$peer_name" '(.Peer // {})[] | select(.HostName == $name) | .TailscaleIPs[]? | select(contains(":") | not)' | head -n 1)"
+            if [ -n "$peer_ip" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [ -z "$peer_ip" ]; then
+            echo "Could not discover Tailscale peer $peer_name" >&2
+            tailscale status
+            exit 1
+          fi
+
+          echo "receiver_tailscale_ip=$peer_ip"
+          ping_output="$(tailscale ping --timeout=10s "$peer_ip" 2>&1 || true)"
+          printf '%s\n' "$ping_output"
+          route_line="$(printf '%s\n' "$ping_output" | grep '^pong from ' | tail -n 1 || true)"
+          route="$(printf '%s\n' "$route_line" | sed -E 's/^.* via (.*) in [^ ]+$/\1/')"
+          if [ -z "$route" ]; then
+            route="unknown"
+          fi
+
+          ready=0
+          for _ in {1..120}; do
+            if curl -fsS --connect-timeout 2 "http://${peer_ip}:8080/healthz" >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "Receiver was discovered but never became HTTP-ready" >&2
+            tailscale status
+            exit 1
+          fi
+
+          cache_json="$(go run ./cmd/swarm-cache-smoke \
+            -worker "$worker" \
+            -peer "http://${peer_ip}:8080")"
+          printf '%s\n' "$cache_json"
+
+          if [ "$(printf '%s' "$cache_json" | jq -r '.allFinalLogitsMatch')" != "true" ]; then
+            echo "Cached distributed logits did not match the full-checkpoint cache" >&2
+            exit 1
+          fi
+          if [ "$(printf '%s' "$cache_json" | jq -r '.positionsValidated and .sequenceIsolationValidated')" != "true" ]; then
+            echo "Cached sequence position or isolation proof failed" >&2
+            exit 1
+          fi
+          if [ "$(printf '%s' "$cache_json" | jq -r '(.producerAfterTeardownBytes == 0) and (.consumerAfterTeardownBytes == 0) and (.referenceAfterTeardownBytes == 0)')" != "true" ]; then
+            echo "Sequence teardown retained KV cache memory" >&2
+            exit 1
+          fi
+
+          generation_json="$(go run ./cmd/swarm-generate-smoke \
+            -worker "$worker" \
+            -peer "http://${peer_ip}:8080")"
+          printf '%s\n' "$generation_json"
+
+          if [ "$(printf '%s' "$generation_json" | jq -r '.greedyTokenIDsMatch and (.generatedTokenCount >= 32)')" != "true" ]; then
+            echo "Distributed generation did not match the full-checkpoint token sequence" >&2
+            exit 1
+          fi
+          if [ "$(printf '%s' "$generation_json" | jq -r '.repeatedRequestValidated and .sequenceTeardownValidated')" != "true" ]; then
+            echo "Distributed generation did not reuse shards or release sequence state" >&2
+            exit 1
+          fi
+
+          benchmark_path="$RUNNER_TEMP/mlx-swarm-distributed-benchmark.json"
+          hardware="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m)"
+          go run ./cmd/swarm-benchmark \
+            -worker "$worker" \
+            -peer "http://${peer_ip}:8080" \
+            -hardware "$hardware" \
+            -route "$route" \
+            -decode-samples 100 > "$benchmark_path"
+          if ! jq -e '
+            (.schemaVersion == "2") and
+            (.decode.sampleCount >= 100) and
+            .verification.allFinalLogitsMatch and
+            .verification.greedyTokenIDsMatch and
+            (.tokenOnly.decode.sampleCount >= 100) and
+            .tokenOnly.generatedTokenIDsMatch and
+            (.tokenOnly.decode.consumerResponseTensorBytes.maxBytes == 0) and
+            (.tokenOnly.decode.consumerResponseWireBytes.p50Bytes < .decode.consumerResponseWireBytes.p50Bytes) and
+            (.memory.producer.postRunKVCacheBytes == 0) and
+            (.memory.consumer.postRunKVCacheBytes == 0) and
+            (.memory.reference.postRunKVCacheBytes == 0)
+          ' "$benchmark_path" >/dev/null; then
+            echo "Warm distributed benchmark did not complete its fixed verified token plan" >&2
+            exit 1
+          fi
+          printf 'benchmark_path=%s\n' "$benchmark_path" >> "$GITHUB_OUTPUT"
+
+          network_json="$(go run ./cmd/swarm-net \
+            -worker "$worker" \
+            -peer "http://${peer_ip}:8080")"
+          printf '%s\n' "$network_json"
+
+          if [ "$(printf '%s' "$network_json" | jq -r '.matchesFullCheckpoint')" != "true" ]; then
+            echo "Distributed final logits did not match the full checkpoint" >&2
+            exit 1
+          fi
+          if [ "$(printf '%s' "$network_json" | jq -r '.passesMemoryProof')" != "true" ]; then
+            echo "Distributed workers did not pass the configured memory proof" >&2
+            exit 1
+          fi
+
+          {
+            echo "## MLX Swarm distributed benchmark"
+            echo
+            echo "Two independent GitHub-hosted macOS runners, connected through Tailscale."
+            echo
+            echo "| Metric | Value |"
+            echo "|---|---:|"
+            printf '| Model | `%s` |\n' "$(printf '%s' "$network_json" | jq -r '.model')"
+            printf '| Adapter model type | `%s` |\n' "$(printf '%s' "$network_json" | jq -r '.modelType')"
+            printf '| Layers | %s (split at %s) |\n' "$(printf '%s' "$network_json" | jq -r '.layers')" "$(printf '%s' "$network_json" | jq -r '.splitLayer')"
+            printf '| Boundary dtype | `%s` |\n' "$(printf '%s' "$network_json" | jq -r '.boundaryDType')"
+            printf '| Output shape | `%s` |\n' "$(printf '%s' "$network_json" | jq -c '.outputShape')"
+            printf '| Tensor bytes | %s |\n' "$(printf '%s' "$network_json" | jq -r '.boundaryTensorBytes')"
+            printf '| Wire bytes | %s |\n' "$(printf '%s' "$network_json" | jq -r '.boundaryWireBytes')"
+            printf '| Worker budget | %.2f MiB |\n' "$(printf '%s' "$network_json" | jq -r '.workerBudgetBytes / 1048576')"
+            printf '| Full checkpoint peak | %.2f MiB |\n' "$(printf '%s' "$network_json" | jq -r '.fullCheckpointPeakBytes / 1048576')"
+            printf '| Producer shard peak | %.2f MiB |\n' "$(printf '%s' "$network_json" | jq -r '.firstStagePeakBytes / 1048576')"
+            printf '| Consumer shard peak | %.2f MiB |\n' "$(printf '%s' "$network_json" | jq -r '.secondStagePeakBytes / 1048576')"
+            printf '| Producer | %.3f ms |\n' "$(printf '%s' "$network_json" | jq -r '.producerMillis')"
+            printf '| Network round trip | %.3f ms |\n' "$(printf '%s' "$network_json" | jq -r '.networkMillis')"
+            printf '| Remote worker | %.3f ms |\n' "$(printf '%s' "$network_json" | jq -r '.remoteWorkerMillis')"
+            printf '| Transport overhead | %.3f ms |\n' "$(printf '%s' "$network_json" | jq -r '.transportOverheadMillis')"
+            printf '| Total producer + remote | %.3f ms |\n' "$(printf '%s' "$network_json" | jq -r '.totalMillis')"
+            printf '| Effective wire throughput | %.3f MB/s |\n' "$(printf '%s' "$network_json" | jq -r '.wireEffectiveMBps')"
+            printf '| Tailscale route | `%s` |\n' "$route"
+            printf '| Logit tolerance | `rtol=%s, atol=%s` |\n' "$(printf '%s' "$network_json" | jq -r '.rtol')" "$(printf '%s' "$network_json" | jq -r '.atol')"
+            printf '| Final-logit correctness | **%s** |\n' "$(printf '%s' "$network_json" | jq -r 'if .matchesFullCheckpoint then "MATCH" else "MISMATCH" end')"
+            printf '| Memory proof | **%s** |\n' "$(printf '%s' "$network_json" | jq -r 'if .passesMemoryProof then "PASS" else "FAIL" end')"
+            printf '| Cached decode steps | %s × %s sequences |\n' "$(printf '%s' "$cache_json" | jq -r '.decodeStepsPerSequence')" "$(printf '%s' "$cache_json" | jq -r '.sequenceCount')"
+            printf '| Cached final-logit correctness | **%s** |\n' "$(printf '%s' "$cache_json" | jq -r 'if .allFinalLogitsMatch then "MATCH" else "MISMATCH" end')"
+            printf '| Producer / consumer KV cache | %.3f / %.3f MiB |\n' "$(printf '%s' "$cache_json" | jq -r '.producerKVCacheBytes / 1048576')" "$(printf '%s' "$cache_json" | jq -r '.consumerKVCacheBytes / 1048576')"
+            printf '| KV bytes after sequence teardown | %s / %s |\n' "$(printf '%s' "$cache_json" | jq -r '.producerAfterTeardownBytes')" "$(printf '%s' "$cache_json" | jq -r '.consumerAfterTeardownBytes')"
+            printf '| Generated tokens | %s |\n' "$(printf '%s' "$generation_json" | jq -r '.generatedTokenCount')"
+            printf '| Greedy generation correctness | **%s** |\n' "$(printf '%s' "$generation_json" | jq -r 'if .greedyTokenIDsMatch then "MATCH" else "MISMATCH" end')"
+            printf '| Repeated request / teardown | **%s / %s** |\n' "$(printf '%s' "$generation_json" | jq -r 'if .repeatedRequestValidated then "PASS" else "FAIL" end')" "$(printf '%s' "$generation_json" | jq -r 'if .sequenceTeardownValidated then "PASS" else "FAIL" end')"
+            echo
+            echo '| Warm benchmark samples | p50 | p95 |'
+            echo '|---|---:|---:|'
+            printf '| Prefill TTFT | %.3f ms | %.3f ms |\n' "$(jq -r '.prefill.tokenLatencyMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.prefill.tokenLatencyMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Decode producer | %.3f ms | %.3f ms |\n' "$(jq -r '.decode.producerWallMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.decode.producerWallMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Boundary serialization | %.3f ms | %.3f ms |\n' "$(jq -r '.decode.boundarySerializationMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.decode.boundarySerializationMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Full-logit response serialization | %.3f ms | %.3f ms |\n' "$(jq -r '.decode.consumerResponseSerializationMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.decode.consumerResponseSerializationMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Token-only response serialization | %.3f ms | %.3f ms |\n' "$(jq -r '.tokenOnly.decode.consumerResponseSerializationMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.tokenOnly.decode.consumerResponseSerializationMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Transport overhead | %.3f ms | %.3f ms |\n' "$(jq -r '.decode.transportOverheadMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.decode.transportOverheadMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Decode consumer compute | %.3f ms | %.3f ms |\n' "$(jq -r '.decode.consumerComputeMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.decode.consumerComputeMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Distributed end-to-end | %.3f ms | %.3f ms |\n' "$(jq -r '.decode.distributedEndToEndMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.decode.distributedEndToEndMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Decode inter-token latency | %.3f ms | %.3f ms |\n' "$(jq -r '.decode.tokenLatencyMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.decode.tokenLatencyMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Token-only decode latency | %.3f ms | %.3f ms |\n' "$(jq -r '.tokenOnly.decode.tokenLatencyMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.tokenOnly.decode.tokenLatencyMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Single-node cached baseline | %.3f ms | %.3f ms |\n' "$(jq -r '.decode.referenceTokenLatencyMicros.p50Micros / 1000' "$benchmark_path")" "$(jq -r '.decode.referenceTokenLatencyMicros.p95Micros / 1000' "$benchmark_path")"
+            printf '| Decode throughput | %.2f tok/s | %.2f tok/s baseline |\n' "$(jq -r '.decode.tokensPerSecond' "$benchmark_path")" "$(jq -r '.decode.referenceTokensPerSecond' "$benchmark_path")"
+            printf '| Token-only decode throughput | %.2f tok/s | %.2fx full-logit |\n' "$(jq -r '.tokenOnly.decode.tokensPerSecond' "$benchmark_path")" "$(jq -r '.tokenOnly.decode.tokensPerSecond / .decode.tokensPerSecond' "$benchmark_path")"
+            printf '| Boundary transfer | %s tensor bytes/sample | %s wire bytes/sample |\n' "$(jq -r '.decode.boundaryTensorBytes.p50Bytes' "$benchmark_path")" "$(jq -r '.decode.boundaryWireBytes.p50Bytes' "$benchmark_path")"
+            printf '| Full-logit response | %s tensor bytes/sample | %s wire bytes/sample |\n' "$(jq -r '.decode.consumerResponseTensorBytes.p50Bytes' "$benchmark_path")" "$(jq -r '.decode.consumerResponseWireBytes.p50Bytes' "$benchmark_path")"
+            printf '| Token-only response | %s tensor bytes/sample | %s wire bytes/sample |\n' "$(jq -r '.tokenOnly.decode.consumerResponseTensorBytes.p50Bytes' "$benchmark_path")" "$(jq -r '.tokenOnly.decode.consumerResponseWireBytes.p50Bytes' "$benchmark_path")"
+            printf '| Producer weight / max KV memory | %.2f MiB | %.2f MiB |\n' "$(jq -r '.memory.producer.loadedShardMemory.activeBytes / 1048576' "$benchmark_path")" "$(jq -r '.memory.producer.maxKVCacheBytes / 1048576' "$benchmark_path")"
+            printf '| Consumer weight / max KV memory | %.2f MiB | %.2f MiB |\n' "$(jq -r '.memory.consumer.loadedShardMemory.activeBytes / 1048576' "$benchmark_path")" "$(jq -r '.memory.consumer.maxKVCacheBytes / 1048576' "$benchmark_path")"
+            printf '| Full-model weight / max KV memory | %.2f MiB | %.2f MiB |\n' "$(jq -r '.memory.reference.loadedShardMemory.activeBytes / 1048576' "$benchmark_path")" "$(jq -r '.memory.reference.maxKVCacheBytes / 1048576' "$benchmark_path")"
+            echo
+            echo "Route probe: \`$route_line\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload distributed benchmark JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlx-swarm-distributed-benchmark-${{ github.run_id }}
+          path: ${{ steps.distributed.outputs.benchmark_path }}
+          if-no-files-found: error

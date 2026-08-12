@@ -1,0 +1,148 @@
+syntax = "proto3";
+
+package mlxswarm.v1;
+
+option go_package = "github.com/fijimunkii/mlx-swarm/gen/swarm/v1;swarmv1";
+
+message DeviceInfo {
+  string backend = 1;       // mlx
+  string accelerator = 2;   // metal, cuda, cpu
+  string device_name = 3;
+  uint64 memory_bytes = 4;
+}
+
+message WorkerHello {
+  string worker_id = 1;
+  DeviceInfo device = 2;
+  repeated string capabilities = 3;
+}
+
+message Heartbeat {
+  string worker_id = 1;
+  uint64 unix_millis = 2;
+  uint64 available_memory_bytes = 3;
+}
+
+message Tensor {
+  repeated uint32 shape = 1;
+  string dtype = 2;
+  bytes data = 3;
+}
+
+message LoadShardRequest {
+  string model_id = 1;
+  string shard_id = 2;
+  uint32 layer_start = 3;
+  uint32 layer_end = 4;
+  bool owns_input = 5;
+  bool owns_output = 6;
+  string checkpoint_fingerprint = 7;
+}
+
+message LoadShardResponse {
+  bool loaded = 1;
+  string error = 2;
+}
+
+message UnloadShardRequest {
+  string shard_id = 1;
+}
+
+message SequenceRequest {
+  string shard_id = 1;
+  string sequence_id = 2;
+  string owner_id = 3;
+}
+
+message ModelInfoRequest {
+  string model_id = 1;
+}
+
+message ModelInfoResponse {
+  string model_id = 1;
+  string model_type = 2;
+  uint32 layer_count = 3;
+  string error = 4;
+  string checkpoint_fingerprint = 5;
+}
+
+message TokenizeRequest {
+  string model_id = 1;
+  string text = 2;
+  bool add_special_tokens = 3;
+}
+
+message TokenizeResponse {
+  repeated int32 token_ids = 1;
+  optional int32 eos_token_id = 2;
+  string error = 3;
+}
+
+message DetokenizeRequest {
+  string model_id = 1;
+  repeated int32 token_ids = 2;
+  bool skip_special_tokens = 3;
+}
+
+message DetokenizeResponse {
+  string text = 1;
+  string error = 2;
+}
+
+enum InferenceOperation {
+  INFERENCE_OPERATION_UNSPECIFIED = 0;
+  INFERENCE_OPERATION_FORWARD = 1;
+  INFERENCE_OPERATION_PREFILL = 2;
+  INFERENCE_OPERATION_DECODE = 3;
+}
+
+message ForwardRequest {
+  string request_id = 1;
+  string model_id = 2;
+  string shard_id = 3;
+  string sequence_id = 4;
+  uint64 position = 5;
+  Tensor input = 6;
+  uint64 deadline_unix_millis = 7;
+  string input_kind = 8; // tokens or hidden
+  InferenceOperation operation = 9;
+  bool return_sampled_token = 10;
+}
+
+message ForwardResponse {
+  string request_id = 1;
+  Tensor output = 2;
+  uint64 compute_micros = 3;
+  string error = 4;
+  uint64 next_position = 5;
+  uint64 kv_cache_memory_bytes = 6;
+  optional int32 sampled_token_id = 7;
+}
+
+message ShardState {
+  string shard_id = 1;
+  string model_id = 2;
+  string model_type = 3;
+  uint32 layer_start = 4;
+  uint32 layer_end = 5;
+  bool owns_input = 6;
+  bool owns_output = 7;
+  uint64 weight_key_count = 8;
+  uint64 open_sequence_count = 9;
+  uint64 forward_count = 10;
+  uint64 active_memory_bytes = 11;
+  uint64 cache_memory_bytes = 12;
+  uint64 peak_memory_bytes = 13;
+  uint64 kv_cache_memory_bytes = 14;
+  string checkpoint_fingerprint = 15;
+}
+
+message WorkerStateResponse {
+  repeated ShardState loaded_shards = 1;
+  uint64 load_count = 2;
+  uint64 forward_count = 3;
+  uint64 active_memory_bytes = 4;
+  uint64 cache_memory_bytes = 5;
+  uint64 peak_memory_bytes = 6;
+  uint64 kv_cache_memory_bytes = 7;
+}

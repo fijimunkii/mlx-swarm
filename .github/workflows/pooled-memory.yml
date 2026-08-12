@@ -1,0 +1,270 @@
+name: Pooled Memory Proof
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/swarm-pooled-memory/**'
+      - 'internal/pooledproof/**'
+      - 'internal/generation/**'
+      - 'internal/workerproc/**'
+      - 'worker/mlx/**'
+      - 'testdata/pooled-memory/**'
+      - 'docs/distributed-inference-proof.md'
+      - '.github/workflows/pooled-memory.yml'
+  pull_request:
+    paths:
+      - 'cmd/swarm-pooled-memory/**'
+      - 'internal/pooledproof/**'
+      - 'internal/generation/**'
+      - 'internal/workerproc/**'
+      - 'worker/mlx/**'
+      - 'testdata/pooled-memory/**'
+      - 'docs/distributed-inference-proof.md'
+      - '.github/workflows/pooled-memory.yml'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: pooled-memory-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  POOLED_MODEL: mlx-community/gemma-3-12b-it-4bit
+  MLX_SWARM_MEMORY_THRESHOLD_BYTES: '6442450944'
+  MLX_SWARM_CACHE_LIMIT_BYTES: '67108864'
+
+jobs:
+  pooled-receiver-macos:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Fingerprint Swift toolchain
+        id: mlx-toolchain
+        run: |
+          toolchain="$( { xcodebuild -version; swift --version; } )"
+          printf '%s\n' "$toolchain"
+          fingerprint="$(printf '%s\n' "$toolchain" | shasum -a 256 | awk '{print $1}')"
+          printf 'fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Restore MLX build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            worker/mlx/.build/source-packages
+            worker/mlx/.build/xcode/Build
+          key: mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-${{ hashFiles('worker/mlx/Sources/**', 'scripts/build-mlx-worker.sh') }}
+          restore-keys: |
+            mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-
+      - name: Build worker and prefetch pinned checkpoint
+        run: |
+          ./scripts/build-mlx-worker.sh
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          "$worker" capabilities
+          "$worker" checkpoint-info "$POOLED_MODEL"
+          df -h "$GITHUB_WORKSPACE"
+      - name: Connect receiver to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
+          args: --accept-dns=false
+          hostname: pooled-r-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Serve the consumer shard until proof completion
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          daemon="$RUNNER_TEMP/swarmd"
+          daemon_pid=""
+          watchdog_pid=""
+          cleanup() {
+            if [ -n "$watchdog_pid" ]; then
+              kill -TERM "$watchdog_pid" 2>/dev/null || true
+              wait "$watchdog_pid" 2>/dev/null || true
+            fi
+            if [ -n "$daemon_pid" ]; then
+              kill -TERM "$daemon_pid" 2>/dev/null || true
+              wait "$daemon_pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          go build -o "$daemon" ./cmd/swarmd
+          ts_ip="$(tailscale ip -4 | head -n 1)"
+          if [ -z "$ts_ip" ]; then
+            echo "Tailscale did not assign an IPv4 address" >&2
+            exit 1
+          fi
+          MLX_SWARM_WORKER="$worker" \
+            SWARMD_ADDR="${ts_ip}:8080" \
+            SWARMD_ALLOW_DEBUG_COMPLETE=1 \
+            "$daemon" &
+          daemon_pid=$!
+          (
+            # Cover producer discovery (4m), readiness (4m), proof (10m),
+            # and setup skew while staying below the 50-minute job timeout.
+            sleep 1800
+            echo "consumer proof watchdog expired after 30 minutes" >&2
+            kill -TERM "$daemon_pid" 2>/dev/null || true
+          ) &
+          watchdog_pid=$!
+          wait "$daemon_pid"
+          daemon_pid=""
+
+  pooled-producer-macos:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Fingerprint Swift toolchain
+        id: mlx-toolchain
+        run: |
+          toolchain="$( { xcodebuild -version; swift --version; } )"
+          printf '%s\n' "$toolchain"
+          fingerprint="$(printf '%s\n' "$toolchain" | shasum -a 256 | awk '{print $1}')"
+          printf 'fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Restore MLX build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            worker/mlx/.build/source-packages
+            worker/mlx/.build/xcode/Build
+          key: mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-${{ hashFiles('worker/mlx/Sources/**', 'scripts/build-mlx-worker.sh') }}
+          restore-keys: |
+            mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-
+      - name: Build worker and prefetch pinned checkpoint
+        run: |
+          ./scripts/build-mlx-worker.sh
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          "$worker" capabilities
+          "$worker" checkpoint-info "$POOLED_MODEL"
+          df -h "$GITHUB_WORKSPACE"
+      - name: Connect producer to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
+          args: --accept-dns=false
+          hostname: pooled-p-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Restore runner DNS after Tailscale setup
+        run: |
+          sudo /usr/sbin/networksetup -setdnsservers Ethernet Empty
+          sudo /usr/sbin/networksetup -setsearchdomains Ethernet Empty
+      - name: Prove 12B generation across two memory-bounded runners
+        id: proof
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          daemon="$RUNNER_TEMP/swarmd"
+          proof="$RUNNER_TEMP/swarm-pooled-memory"
+          log="$RUNNER_TEMP/swarmd-producer.log"
+          result="$RUNNER_TEMP/mlx-swarm-pooled-memory.json"
+          peer_name="pooled-r-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          peer_ip=""
+          daemon_pid=""
+          proof_pid=""
+          cleanup() {
+            if [ -n "$proof_pid" ]; then
+              kill -TERM "$proof_pid" 2>/dev/null || true
+              wait "$proof_pid" 2>/dev/null || true
+            fi
+            if [ -n "$peer_ip" ]; then
+              curl -fsS -X POST --connect-timeout 2 --max-time 5 "http://${peer_ip}:8080/v1/debug/complete" >/dev/null 2>&1 || true
+            fi
+            if [ -n "$daemon_pid" ]; then
+              kill -TERM "$daemon_pid" 2>/dev/null || true
+              wait "$daemon_pid" 2>/dev/null || true
+            fi
+            if [ -f "$log" ]; then
+              cat "$log"
+            fi
+          }
+          trap cleanup EXIT
+
+          for _ in {1..120}; do
+            peer_ip="$(tailscale status --json | jq -r --arg name "$peer_name" '(.Peer // {})[] | select(.HostName == $name) | .TailscaleIPs[]? | select(contains(":") | not)' | head -n 1)"
+            if [ -n "$peer_ip" ]; then
+              break
+            fi
+            sleep 2
+          done
+          if [ -z "$peer_ip" ]; then
+            echo "Could not discover Tailscale peer $peer_name" >&2
+            tailscale status
+            exit 1
+          fi
+
+          go build -o "$daemon" ./cmd/swarmd
+          go build -o "$proof" ./cmd/swarm-pooled-memory
+          MLX_SWARM_WORKER="$worker" SWARMD_ADDR=127.0.0.1:8080 "$daemon" >"$log" 2>&1 &
+          daemon_pid=$!
+
+          ready=0
+          for _ in {1..120}; do
+            if curl -fsS --connect-timeout 2 http://127.0.0.1:8080/healthz >/dev/null &&
+               curl -fsS --connect-timeout 2 "http://${peer_ip}:8080/healthz" >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then
+            cat "$log" >&2
+            echo "pooled-memory workers did not become ready" >&2
+            exit 1
+          fi
+
+          "$proof" \
+            -producer http://127.0.0.1:8080 \
+            -peer "http://${peer_ip}:8080" \
+            -reference testdata/pooled-memory/gemma-3-12b-it-4bit.json \
+            -memory-threshold-bytes "$MLX_SWARM_MEMORY_THRESHOLD_BYTES" \
+            -minimum-tokens 32 \
+            -forward-timeout 2m \
+            -timeout 10m >"$result" &
+          proof_pid=$!
+          while kill -0 "$proof_pid" 2>/dev/null; do
+            printf 'pooled-memory proof still running at %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            sleep 30
+          done
+          wait "$proof_pid"
+          proof_pid=""
+          jq -e '.checks.allPassed and (.generation.generatedTokenIDs | length >= 32)' "$result" >/dev/null
+          printf 'result_path=%s\n' "$result" >> "$GITHUB_OUTPUT"
+
+          {
+            echo '## Physically pooled-memory generation'
+            echo
+            echo '| Metric | Value |'
+            echo '|---|---:|'
+            printf '| Checkpoint bytes | %.3f GiB |\n' "$(jq -r '.checkpointBytes / 1073741824' "$result")"
+            printf '| Full-model process peak | %.3f GiB |\n' "$(jq -r '.reference.fullCheckpointMemory.maxProcessPhysicalBytes / 1073741824' "$result")"
+            printf '| Producer physical memory | %.3f GiB |\n' "$(jq -r '.producer.capabilities.physicalMemoryBytes / 1073741824' "$result")"
+            printf '| Consumer physical memory | %.3f GiB |\n' "$(jq -r '.consumer.capabilities.physicalMemoryBytes / 1073741824' "$result")"
+            printf '| MLX scheduling threshold | %.3f GiB |\n' "$(jq -r '.configuredMLXMemoryThresholdBytes / 1073741824' "$result")"
+            printf '| Producer process peak | %.3f GiB |\n' "$(jq -r '.producer.memory.maxProcessPhysicalBytes / 1073741824' "$result")"
+            printf '| Consumer process peak | %.3f GiB |\n' "$(jq -r '.consumer.memory.maxProcessPhysicalBytes / 1073741824' "$result")"
+            printf '| Generated tokens | %s |\n' "$(jq -r '.generation.generatedTokenIDs | length' "$result")"
+            printf '| Deterministic reference | **%s** |\n' "$(jq -r 'if .checks.generatedTokensMatchReference then "MATCH" else "MISMATCH" end' "$result")"
+            printf '| Serving full-model oracle | **%s** |\n' "$(jq -r 'if .checks.noServingFullModelOracle then "NONE" else "PRESENT" end' "$result")"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          cleanup
+          trap - EXIT
+      - name: Upload pooled-memory evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlx-swarm-pooled-memory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.proof.outputs.result_path }}
+          if-no-files-found: error
