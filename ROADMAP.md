@@ -62,7 +62,7 @@ same-sequence recovery, heterogeneous GPU execution, or MoE expert placement.
 |---|---|---|
 | M0–M6 | Distributed Inference Proof | Complete in PR #1 |
 | M7 | Immutable `v0.1.0-proof` release baseline | [#24](https://github.com/fijimunkii/mlx-swarm/issues/24) |
-| M8 | Dynamic Trusted Mesh: N-stage execution, five-Mac scale, automatic placement, and control-plane churn | [#25](https://github.com/fijimunkii/mlx-swarm/issues/25), [#31](https://github.com/fijimunkii/mlx-swarm/issues/31), [#32](https://github.com/fijimunkii/mlx-swarm/issues/32), [#34](https://github.com/fijimunkii/mlx-swarm/issues/34) |
+| M8 | Dynamic Trusted Mesh: N-stage execution, five-Mac scale, automatic placement, and control-plane churn | [#25](https://github.com/fijimunkii/mlx-swarm/issues/25), [#31](https://github.com/fijimunkii/mlx-swarm/issues/31), [#32](https://github.com/fijimunkii/mlx-swarm/issues/32), [#35](https://github.com/fijimunkii/mlx-swarm/issues/35), [#34](https://github.com/fijimunkii/mlx-swarm/issues/34) |
 | M9 | Persistent binary tensor transport | [#26](https://github.com/fijimunkii/mlx-swarm/issues/26) |
 | M10 | Same-sequence recovery by deterministic replay | [#27](https://github.com/fijimunkii/mlx-swarm/issues/27) |
 | M11 | Linux execution: CPU first, then CUDA/NVIDIA mixed hardware | [#33](https://github.com/fijimunkii/mlx-swarm/issues/33) → [#28](https://github.com/fijimunkii/mlx-swarm/issues/28) |
@@ -210,7 +210,7 @@ an explicit measurement deliverable.
 
 ### M8.3 — membership and automatic placement
 
-Parent tracking: [#25](https://github.com/fijimunkii/mlx-swarm/issues/25)
+Tracking: [#35](https://github.com/fijimunkii/mlx-swarm/issues/35)
 
 Once explicit N-stage execution is correct, let the control plane build the plan.
 
@@ -391,7 +391,7 @@ M7 proof release
 ├── M8 Dynamic Trusted Mesh
 │   ├── #31 N-stage execution
 │   ├── #32 five-Mac + Linux coordinator proof
-│   ├── automatic membership / placement (#25)
+│   ├── #35 automatic membership / placement
 │   └── #34 32-node control-plane scale
 │
 └── M9 binary transport (#26)
