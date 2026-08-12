@@ -249,7 +249,10 @@ The JSON includes raw samples and nearest-rank p50/p95 summaries for setup,
 prefill TTFT, decode, serialization, transport, end-to-end token latency,
 throughput, boundary bytes, terminal-response bytes, and memory. Hosted or
 residential latency is observational in v0; correctness and payload reduction
-are gates, but a particular latency threshold is not.
+are gates, but a particular latency threshold is not. Terminal sampling is not
+needed to establish the central pooled-memory claim; it is nevertheless the
+integrated default serving path, so exact token parity and removal of the
+full-logit response are release regression checks.
 
 ## 7. Record bounded failure behavior
 

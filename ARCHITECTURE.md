@@ -14,10 +14,11 @@ checkpoint revisions, shard plans, acceptance predicates, and clean-checkout
 procedure live in [`docs/mvp-runbook.md`](docs/mvp-runbook.md).
 
 Terminal-shard sampling is included because it removes full-vocabulary logits
-from the normal serving hot path, but it is a performance optimization rather
-than part of the central pooled-memory claim. Public membership, automatic
-placement, replicated execution, same-sequence recovery, and heterogeneous GPU
-workers remain post-MVP.
+from the normal serving hot path. It is not evidence for the central
+pooled-memory claim, but once integrated into the default path its exact-token
+and payload-reduction invariants become release regression gates. Public
+membership, automatic placement, replicated execution, same-sequence recovery,
+and heterogeneous GPU workers remain post-MVP.
 
 ## Boundary: swarm vs. MLX
 

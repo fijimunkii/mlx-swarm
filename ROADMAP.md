@@ -110,9 +110,10 @@ Current pooled-memory proof (`mlx-community/gemma-3-12b-it-4bit`):
 The independent failure proof in M3 covers bounded worker loss and
 next-sequence recovery. Transparent same-sequence recovery remains post-MVP.
 
-Terminal-shard sampling landed after the MVP proof was defined. It is included
-in the integrated branch and validated by paired full-logit/token-only
-benchmarks, but it does not expand the v0 release gate.
+Terminal-shard sampling was scoped after the central MVP proof was defined and
+is not evidence for the pooled-memory claim. Because it is now included in the
+integrated branch's default serving path, paired full-logit/token-only token
+parity and payload reduction are release regression gates.
 
 ## Later
 
