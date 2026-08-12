@@ -80,6 +80,20 @@ jobs:
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
           daemon="$RUNNER_TEMP/swarmd"
+          daemon_pid=""
+          watchdog_pid=""
+          cleanup() {
+            if [ -n "$watchdog_pid" ]; then
+              kill -TERM "$watchdog_pid" 2>/dev/null || true
+              wait "$watchdog_pid" 2>/dev/null || true
+            fi
+            if [ -n "$daemon_pid" ]; then
+              kill -TERM "$daemon_pid" 2>/dev/null || true
+              wait "$daemon_pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
           go build -o "$daemon" ./cmd/swarmd
           ts_ip="$(tailscale ip -4 | head -n 1)"
           if [ -z "$ts_ip" ]; then
@@ -89,7 +103,16 @@ jobs:
           MLX_SWARM_WORKER="$worker" \
             SWARMD_ADDR="${ts_ip}:8080" \
             SWARMD_ALLOW_DEBUG_COMPLETE=1 \
-            "$daemon"
+            "$daemon" &
+          daemon_pid=$!
+          (
+            sleep 900
+            echo "consumer proof watchdog expired after 15 minutes" >&2
+            kill -TERM "$daemon_pid" 2>/dev/null || true
+          ) &
+          watchdog_pid=$!
+          wait "$daemon_pid"
+          daemon_pid=""
 
   pooled-producer-macos:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -145,6 +168,25 @@ jobs:
           result="$RUNNER_TEMP/mlx-swarm-pooled-memory.json"
           peer_name="pooled-r-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           peer_ip=""
+          daemon_pid=""
+          proof_pid=""
+          cleanup() {
+            if [ -n "$proof_pid" ]; then
+              kill -TERM "$proof_pid" 2>/dev/null || true
+              wait "$proof_pid" 2>/dev/null || true
+            fi
+            if [ -n "$peer_ip" ]; then
+              curl -fsS -X POST --connect-timeout 2 --max-time 5 "http://${peer_ip}:8080/v1/debug/complete" >/dev/null 2>&1 || true
+            fi
+            if [ -n "$daemon_pid" ]; then
+              kill -TERM "$daemon_pid" 2>/dev/null || true
+              wait "$daemon_pid" 2>/dev/null || true
+            fi
+            if [ -f "$log" ]; then
+              cat "$log"
+            fi
+          }
+          trap cleanup EXIT
 
           for _ in {1..120}; do
             peer_ip="$(tailscale status --json | jq -r --arg name "$peer_name" '(.Peer // {})[] | select(.HostName == $name) | .TailscaleIPs[]? | select(contains(":") | not)' | head -n 1)"
@@ -163,20 +205,6 @@ jobs:
           go build -o "$proof" ./cmd/swarm-pooled-memory
           MLX_SWARM_WORKER="$worker" SWARMD_ADDR=127.0.0.1:8080 "$daemon" >"$log" 2>&1 &
           daemon_pid=$!
-          proof_pid=""
-          cleanup() {
-            if [ -n "$proof_pid" ]; then
-              kill -TERM "$proof_pid" 2>/dev/null || true
-              wait "$proof_pid" 2>/dev/null || true
-            fi
-            curl -fsS -X POST --connect-timeout 2 --max-time 5 "http://${peer_ip}:8080/v1/debug/complete" >/dev/null 2>&1 || true
-            kill -TERM "$daemon_pid" 2>/dev/null || true
-            wait "$daemon_pid" 2>/dev/null || true
-            if [ -f "$log" ]; then
-              cat "$log"
-            fi
-          }
-          trap cleanup EXIT
 
           ready=0
           for _ in {1..120}; do
@@ -200,7 +228,7 @@ jobs:
             -memory-threshold-bytes "$MLX_SWARM_MEMORY_THRESHOLD_BYTES" \
             -minimum-tokens 32 \
             -forward-timeout 2m \
-            -timeout 20m >"$result" &
+            -timeout 10m >"$result" &
           proof_pid=$!
           while kill -0 "$proof_pid" 2>/dev/null; do
             printf 'pooled-memory proof still running at %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"

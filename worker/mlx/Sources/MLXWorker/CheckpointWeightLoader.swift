@@ -93,19 +93,20 @@ enum CheckpointWeightLoader {
             let indexedURLs = Set(index.weightMap.values)
                 .sorted()
                 .map { directory.appendingPathComponent($0) }
+            guard !indexedURLs.isEmpty else {
+                throw CheckpointShardError.noSafetensors(directory)
+            }
             let existingCount = indexedURLs.count {
                 FileManager.default.fileExists(atPath: $0.path)
             }
-            if !indexedURLs.isEmpty && existingCount == indexedURLs.count {
-                return indexedURLs
-            }
-            if existingCount > 0 {
+            guard existingCount == indexedURLs.count else {
                 throw CheckpointShardError.incompleteSafetensorIndex(
                     directory,
                     existingCount,
                     indexedURLs.count
                 )
             }
+            return indexedURLs
         }
 
         let urls = try FileManager.default.contentsOfDirectory(
