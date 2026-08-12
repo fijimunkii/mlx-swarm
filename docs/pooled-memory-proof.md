@@ -3,17 +3,17 @@
 This runbook reproduces the MVP's central memory-pooling claim with two
 independent 7 GiB Apple-silicon workers. Each worker receives a 6 GiB MLX
 scheduling threshold and loads one half of
-`mlx-community/gemma-3-12b-it-6bit`. Neither serving process loads the full
+`mlx-community/gemma-3-12b-it-4bit`. Neither serving process loads the full
 checkpoint or a correctness oracle.
 
 ## Fixed inputs
 
 | Input | Value |
 |---|---|
-| Checkpoint | `mlx-community/gemma-3-12b-it-6bit` |
+| Checkpoint | `mlx-community/gemma-3-12b-it-4bit` |
 | Adapter model type | `gemma3` |
 | Layers | 48, split 0–23 / 24–47 |
-| Checkpoint bytes | 11,256,366,608 |
+| Checkpoint bytes | 8,063,329,713 |
 | Per-worker physical memory | 7,516,192,768 bytes (7 GiB) |
 | Per-worker MLX scheduling threshold | 6,442,450,944 bytes (6 GiB) |
 | MLX allocator cache limit | 67,108,864 bytes (64 MiB) |
@@ -21,12 +21,12 @@ checkpoint or a correctness oracle.
 | Required output | 32 greedy tokens |
 
 The checked-in reference at
-[`testdata/pooled-memory/gemma-3-12b-it-6bit.json`](../testdata/pooled-memory/gemma-3-12b-it-6bit.json)
+[`testdata/pooled-memory/gemma-3-12b-it-4bit.json`](../testdata/pooled-memory/gemma-3-12b-it-4bit.json)
 pins checkpoint fingerprint
-`3d9c541c1a66ed7ff266deea20dabb70c19365e10d304b528dad2e13330a387c`.
+`ec3c7b60c388290a6b8adf28d5f2812b00f0f9fbf5d3c404d755fcdd699518a2`.
 An upstream full-model run on a 24 GiB Apple M4 measured a maximum MLX
-footprint of 10,608,178,912 bytes and a macOS lifetime process peak of
-21,726,789,496 bytes. Both the MLX footprint and checkpoint byte count exceed
+footprint of 7,416,426,311 bytes and a macOS lifetime process peak of
+7,647,434,848 bytes. The process peak and checkpoint byte count each exceed
 either serving worker's 7 GiB physical memory. The same reference run proved
 exact logit and greedy-token parity before the token plan was recorded.
 
@@ -40,13 +40,13 @@ fresh runners in its JSON artifact. A missing process measurement fails closed.
 
 ## Prepare both Macs
 
-Each Mac needs enough disk space for the 11.26 GB checkpoint. Build and resolve
+Each Mac needs enough disk space for the 8.06 GB checkpoint. Build and resolve
 the checkpoint before changing DNS or starting the serving process:
 
 ```bash
 ./scripts/build-mlx-worker.sh
 worker="$PWD/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
-"$worker" checkpoint-info mlx-community/gemma-3-12b-it-6bit
+"$worker" checkpoint-info mlx-community/gemma-3-12b-it-4bit
 ```
 
 `checkpoint-info` downloads, fingerprints, and inventories the checkpoint. It
@@ -81,7 +81,7 @@ of the consumer:
 go run ./cmd/swarm-pooled-memory \
   -producer http://127.0.0.1:8080 \
   -peer http://MAC_B_LAN_IP:8080 \
-  -reference testdata/pooled-memory/gemma-3-12b-it-6bit.json \
+  -reference testdata/pooled-memory/gemma-3-12b-it-4bit.json \
   -memory-threshold-bytes 6442450944 \
   -minimum-tokens 32 \
   -forward-timeout 2m \
@@ -119,7 +119,7 @@ use a Mac with at least 16 GiB unified memory:
 go run ./cmd/swarm-pooled-memory \
   -create-reference \
   -worker "$PWD/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker" \
-  -model mlx-community/gemma-3-12b-it-6bit \
+  -model mlx-community/gemma-3-12b-it-4bit \
   -max-tokens 32 \
   -forward-timeout 2m \
   -timeout 30m \

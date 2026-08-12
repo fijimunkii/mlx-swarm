@@ -49,6 +49,18 @@ enum CheckpointWeightLoader {
 
         let sanitized = sanitize(selected, metadata)
             .filter { selection.includesSanitized($0.key) }
+        // URL safetensors produce lazy Load nodes. Evaluate owned leaves one at
+        // a time so each value detaches from its file reader before the stage
+        // retains it, while bounding transient sanitizer/view intermediates.
+        for key in sanitized.keys.sorted() {
+            guard let value = sanitized[key] else {
+                continue
+            }
+            try autoreleasepool {
+                try checkedEval(value)
+            }
+            Memory.clearCache()
+        }
         return SelectedCheckpointWeights(arrays: sanitized, metadata: metadata)
     }
 

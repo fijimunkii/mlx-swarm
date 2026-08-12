@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "model": "mlx-community/gemma-3-12b-it-6bit",
+  "model": "mlx-community/gemma-3-12b-it-4bit",
   "modelType": "gemma3",
   "layerCount": 48,
-  "checkpointFingerprint": "3d9c541c1a66ed7ff266deea20dabb70c19365e10d304b528dad2e13330a387c",
-  "checkpointBytes": 11256366608,
+  "checkpointFingerprint": "ec3c7b60c388290a6b8adf28d5f2812b00f0f9fbf5d3c404d755fcdd699518a2",
+  "checkpointBytes": 8063329713,
   "prompt": "Write a short story about two computers working together:",
   "promptTokenIDs": [
     2,
@@ -36,49 +36,49 @@
     1992,
     607,
     506,
-    12010,
-    9747,
+    16932,
+    34824,
     529,
     13013,
+    529,
+    15621,
     236761,
     1293,
     691,
-    506,
-    20387,
+    496,
+    70509,
     529,
-    4654,
+    13179,
     236764,
-    506,
-    64222,
-    529,
-    8735
+    496,
+    20387
   ],
-  "generatedText": "\n\nUnit 734, a hulking mainframe, hummed with the quiet authority of decades. He was the repository of knowledge, the keeper of records",
+  "generatedText": "\n\nUnit 734, a hulking mainframe, hummed with the steady rhythm of decades of calculations. He was a fortress of logic, a repository",
   "stopReason": "max_tokens",
   "fullCheckpointMemory": {
     "load": {
-      "activeBytes": 10381325104,
+      "activeBytes": 7188280112,
       "cacheBytes": 0,
-      "peakBytes": 10381325104,
-      "processPhysicalBytes": 21713157984,
-      "processPeakPhysicalBytes": 21713420128
+      "peakBytes": 7188281268,
+      "processPhysicalBytes": 7214700280,
+      "processPeakPhysicalBytes": 7214700280
     },
     "prefill": {
-      "activeBytes": 10458133360,
-      "cacheBytes": 15863074,
-      "peakBytes": 10471805082,
-      "processPhysicalBytes": 10736394568,
-      "processPeakPhysicalBytes": 21726789496
+      "activeBytes": 7265088368,
+      "cacheBytes": 17237511,
+      "peakBytes": 7280932774,
+      "processPhysicalBytes": 7501158448,
+      "processPeakPhysicalBytes": 7569201152
     },
     "decode": {
-      "activeBytes": 10536776520,
-      "cacheBytes": 47601486,
-      "peakBytes": 10560577426,
-      "processPhysicalBytes": 10882687328,
-      "processPeakPhysicalBytes": 21726789496
+      "activeBytes": 7343731528,
+      "cacheBytes": 49058227,
+      "peakBytes": 7367368084,
+      "processPhysicalBytes": 7647434848,
+      "processPeakPhysicalBytes": 7647434848
     },
-    "maxObservedBytes": 10608178912,
-    "maxProcessPhysicalBytes": 21726789496
+    "maxObservedBytes": 7416426311,
+    "maxProcessPhysicalBytes": 7647434848
   },
   "sourceHardware": {
     "runtime": "mlx-swift",

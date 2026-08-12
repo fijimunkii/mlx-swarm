@@ -222,19 +222,19 @@ prints a readable table without performance pass/fail thresholds.
 
 ### Physically pooled-memory generation
 
-The MVP proof uses `mlx-community/gemma-3-12b-it-6bit`, a 48-layer,
-11,256,366,608-byte checkpoint, across two independent 7 GiB workers. The
-checkpoint and a separately measured 10,608,178,912-byte full-model inference
-MLX footprint each exceed either worker's physical memory; the full-model
-worker's macOS process peak was 21,726,789,496 bytes. The serving command loads
-only layers 0–23 on the producer and 24–47 plus the output modules on the
-consumer; it never starts or loads a full-model oracle on either serving Mac.
+The MVP proof uses `mlx-community/gemma-3-12b-it-4bit`, a 48-layer,
+8,063,329,713-byte checkpoint, across two independent 7 GiB workers. The
+checkpoint and a separately measured 7,647,434,848-byte full-model macOS
+process peak each exceed either worker's physical memory; the full-model MLX
+peak was 7,416,426,311 bytes. The serving command loads only layers 0–23 on the
+producer and 24–47 plus the output modules on the consumer; it never starts or
+loads a full-model oracle on either serving Mac.
 
 ```bash
 go run ./cmd/swarm-pooled-memory \
   -producer http://127.0.0.1:8080 \
   -peer http://MAC_B_LAN_IP:8080 \
-  -reference testdata/pooled-memory/gemma-3-12b-it-6bit.json \
+  -reference testdata/pooled-memory/gemma-3-12b-it-4bit.json \
   > pooled-memory.json
 ```
 

@@ -458,9 +458,20 @@ enum CheckpointShardRuntime {
             hasher.update(data: Data(relativePath.utf8))
             hasher.update(data: Data([0]))
             let handle = try FileHandle(forReadingFrom: file)
-            while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            defer {
+                try? handle.close()
+            }
+            // The identity pass is sequential and never rereads file data.
+            // Avoid displacing useful model pages when the filesystem supports it.
+            _ = fcntl(handle.fileDescriptor, F_NOCACHE, 1)
+            while let chunkBytes: Int = try autoreleasepool(invoking: {
+                guard let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty else {
+                    return nil
+                }
                 hasher.update(data: chunk)
-                let (nextTotal, overflow) = totalBytes.addingReportingOverflow(UInt64(chunk.count))
+                return chunk.count
+            }) {
+                let (nextTotal, overflow) = totalBytes.addingReportingOverflow(UInt64(chunkBytes))
                 guard !overflow else {
                     throw CheckpointShardError.invalidBoundary(
                         "checkpoint byte count overflows UInt64"

@@ -81,10 +81,10 @@ Current failure proof:
 - [x] host complementary ranges without materializing a full model in either serving process
 - [x] generate 32 reference-matched tokens and record load/prefill/decode memory evidence
 
-Current pooled-memory proof (`mlx-community/gemma-3-12b-it-6bit`):
+Current pooled-memory proof (`mlx-community/gemma-3-12b-it-4bit`):
 
 - the 48 layers split 0–23 / 24–47 across two fresh 7 GiB Apple-silicon workers, each configured with a 6 GiB MLX scheduling threshold and a 64 MiB allocator-cache limit
-- the resolved checkpoint contains 11,256,366,608 bytes; a separate upstream full-model run on a 24 GiB M4 measured a 10,608,178,912-byte MLX peak and a 21,726,789,496-byte macOS process peak, so neither the checkpoint nor full-model working set can fit in one serving runner's physical memory
+- the resolved checkpoint contains 8,063,329,713 bytes; a separate upstream full-model run on a 24 GiB M4 measured a 7,416,426,311-byte MLX peak and a 7,647,434,848-byte macOS process peak, so neither the checkpoint nor full-model working set can fit in one serving runner's physical memory
 - the checked-in fingerprint, prompt token plan, and 32 greedy output tokens were produced only after every distributed logit vector and token exactly matched the upstream full-model path
 - serving proof mode requires clean remote workers, loads exactly one complementary range on each, and does not create a reference worker or full-range shard
 - machine-readable evidence records physical memory, configured MLX thresholds, load/prefill/decode MLX and process peaks, shard ownership, generation timings, exact reference parity, and zero retained sequence state after teardown

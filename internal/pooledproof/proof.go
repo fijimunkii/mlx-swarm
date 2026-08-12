@@ -18,7 +18,7 @@ import (
 
 const (
 	SchemaVersion                = 1
-	DefaultModelID               = "mlx-community/gemma-3-12b-it-6bit"
+	DefaultModelID               = "mlx-community/gemma-3-12b-it-4bit"
 	DefaultPrompt                = "Write a short story about two computers working together:"
 	DefaultMinimumTokens         = 32
 	DefaultWorkerMemoryThreshold = 6 * 1024 * 1024 * 1024

@@ -31,7 +31,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  POOLED_MODEL: mlx-community/gemma-3-12b-it-6bit
+  POOLED_MODEL: mlx-community/gemma-3-12b-it-4bit
   MLX_SWARM_MEMORY_THRESHOLD_BYTES: '6442450944'
   MLX_SWARM_CACHE_LIMIT_BYTES: '67108864'
 
@@ -196,7 +196,7 @@ jobs:
           "$proof" \
             -producer http://127.0.0.1:8080 \
             -peer "http://${peer_ip}:8080" \
-            -reference testdata/pooled-memory/gemma-3-12b-it-6bit.json \
+            -reference testdata/pooled-memory/gemma-3-12b-it-4bit.json \
             -memory-threshold-bytes "$MLX_SWARM_MEMORY_THRESHOLD_BYTES" \
             -minimum-tokens 32 \
             -forward-timeout 2m \

@@ -17,7 +17,7 @@ import (
 
 func TestCheckedInReferenceIsValid(t *testing.T) {
 	reference, err := LoadReference(filepath.Join(
-		"..", "..", "testdata", "pooled-memory", "gemma-3-12b-it-6bit.json",
+		"..", "..", "testdata", "pooled-memory", "gemma-3-12b-it-4bit.json",
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +73,7 @@ func TestRemoteCapabilities(t *testing.T) {
 
 func TestRunRejectsDirtyWorkersBeforePreparingSession(t *testing.T) {
 	reference, err := LoadReference(filepath.Join(
-		"..", "..", "testdata", "pooled-memory", "gemma-3-12b-it-6bit.json",
+		"..", "..", "testdata", "pooled-memory", "gemma-3-12b-it-4bit.json",
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestRunRejectsDirtyWorkersBeforePreparingSession(t *testing.T) {
 
 func TestRunUsesConfiguredClientAndUnloadsPartialSession(t *testing.T) {
 	reference, err := LoadReference(filepath.Join(
-		"..", "..", "testdata", "pooled-memory", "gemma-3-12b-it-6bit.json",
+		"..", "..", "testdata", "pooled-memory", "gemma-3-12b-it-4bit.json",
 	))
 	if err != nil {
 		t.Fatal(err)

@@ -24,7 +24,7 @@ func main() {
 
 func run() error {
 	createReference := flag.Bool("create-reference", false, "run a separate local full-model oracle and emit a reference manifest")
-	referencePath := flag.String("reference", "testdata/pooled-memory/gemma-3-12b-it-6bit.json", "checked-in deterministic reference manifest")
+	referencePath := flag.String("reference", "testdata/pooled-memory/gemma-3-12b-it-4bit.json", "checked-in deterministic reference manifest")
 	worker := flag.String("worker", workerproc.DefaultPath(), "path to the built MLXWorker executable for reference creation")
 	producerURL := flag.String("producer", "", "producer swarmd base URL")
 	consumerURL := flag.String("peer", "", "consumer swarmd base URL")
