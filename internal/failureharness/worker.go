@@ -81,7 +81,7 @@ func (worker *faultWorker) handle(
 	case "modelInfo":
 		return &workerproc.PersistentWorkerResult{Model: &workerproc.PersistentModelResult{
 			ModelID: faultModelID, ModelType: "fault", LayerCount: 2,
-			CheckpointFingerprint: "fault-checkpoint",
+			CheckpointFingerprint: "fault-checkpoint", CheckpointBytes: 1,
 		}}, false, nil
 	case "state":
 		state := worker.state()

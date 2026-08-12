@@ -15,10 +15,12 @@ on:
       - 'cmd/swarm-generate/**'
       - 'cmd/swarm-generate-smoke/**'
       - 'cmd/swarm-failure-smoke/**'
+      - 'cmd/swarm-pooled-memory/**'
       - 'cmd/swarmd/**'
       - 'internal/generation/**'
       - 'internal/benchmark/**'
       - 'internal/failureharness/**'
+      - 'internal/pooledproof/**'
       - 'internal/smoke/**'
       - 'internal/tensorcheck/**'
       - 'internal/workerproc/**'
@@ -36,10 +38,12 @@ on:
       - 'cmd/swarm-generate/**'
       - 'cmd/swarm-generate-smoke/**'
       - 'cmd/swarm-failure-smoke/**'
+      - 'cmd/swarm-pooled-memory/**'
       - 'cmd/swarmd/**'
       - 'internal/generation/**'
       - 'internal/benchmark/**'
       - 'internal/failureharness/**'
+      - 'internal/pooledproof/**'
       - 'internal/smoke/**'
       - 'internal/tensorcheck/**'
       - 'internal/workerproc/**'
@@ -135,10 +139,10 @@ jobs:
           restore-keys: |
             mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-
       # Resolve/build before Tailscale modifies the macOS DNS resolver. SwiftPM
-      # needs ordinary github.com DNS while fetching mlx-swift-lm.
+      # needs ordinary github.com access while fetching mlx-swift-lm.
       - name: Build MLX worker and Metal library
         run: ./scripts/build-mlx-worker.sh
-      - name: Cache and verify the real checkpoint before Tailscale changes DNS
+      - name: Cache and verify the real checkpoint before joining Tailscale
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
           "$worker" checkpoint-shard-smoke
@@ -148,6 +152,7 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           audience: ${{ secrets.TS_AUDIENCE }}
           tags: tag:ci
+          args: --accept-dns=false
           hostname: mlx-swarm-r-${{ github.run_id }}
       - name: Start one-shot shard receiver
         run: |
@@ -221,7 +226,12 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           audience: ${{ secrets.TS_AUDIENCE }}
           tags: tag:ci
+          args: --accept-dns=false
           hostname: mlx-swarm-p-${{ github.run_id }}
+      - name: Restore runner DNS after Tailscale setup
+        run: |
+          sudo /usr/sbin/networksetup -setdnsservers Ethernet Empty
+          sudo /usr/sbin/networksetup -setsearchdomains Ethernet Empty
       - name: Discover receiver and exercise cached pipeline across runners
         id: distributed
         run: |

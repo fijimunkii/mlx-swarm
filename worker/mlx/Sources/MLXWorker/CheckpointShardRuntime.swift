@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Darwin
 import HuggingFace
 import MLX
 import MLXHuggingFace
@@ -9,6 +10,8 @@ struct StageMemory: Codable {
     let activeBytes: Int
     let cacheBytes: Int
     let peakBytes: Int
+    let processPhysicalBytes: UInt64
+    let processPeakPhysicalBytes: UInt64
 }
 
 struct CheckpointShardResult: Codable {
@@ -40,6 +43,7 @@ struct ResolvedCheckpoint {
     let modelID: String
     let modelType: String
     let fingerprint: String
+    let checkpointBytes: UInt64
     let directory: URL
     let configData: Data
 }
@@ -152,6 +156,7 @@ enum CheckpointShardError: LocalizedError {
     case missingOutputModule(String)
     case invalidSequenceCache(String)
     case noSafetensors(URL)
+    case incompleteSafetensorIndex(URL, Int, Int)
 
     var errorDescription: String? {
         switch self {
@@ -171,6 +176,8 @@ enum CheckpointShardError: LocalizedError {
             return "invalid checkpoint shard sequence cache: \(reason)"
         case .noSafetensors(let directory):
             return "no safetensors found in \(directory.path)"
+        case .incompleteSafetensorIndex(let directory, let found, let expected):
+            return "safetensor index in \(directory.path) resolves \(found) of \(expected) files"
         }
     }
 }
@@ -178,10 +185,20 @@ enum CheckpointShardError: LocalizedError {
 enum CheckpointMemory {
     static func snapshot() -> StageMemory {
         let snapshot = Memory.snapshot()
+        var usage = rusage_info_v4()
+        let status = withUnsafeMutablePointer(to: &usage) { pointer in
+            pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                proc_pid_rusage(getpid(), RUSAGE_INFO_V4, $0)
+            }
+        }
         return StageMemory(
             activeBytes: snapshot.activeMemory,
             cacheBytes: snapshot.cacheMemory,
-            peakBytes: snapshot.peakMemory
+            peakBytes: snapshot.peakMemory,
+            processPhysicalBytes: status == 0 ? usage.ri_phys_footprint : 0,
+            processPeakPhysicalBytes: status == 0
+                ? usage.ri_lifetime_max_phys_footprint
+                : 0
         )
     }
 }
@@ -387,17 +404,24 @@ enum CheckpointShardRuntime {
         let directory = resolved.modelDirectory
         let configData = try Data(contentsOf: directory.appendingPathComponent("config.json"))
         let baseConfig = try JSONDecoder().decode(BaseConfiguration.self, from: configData)
+        let identity = try checkpointIdentity(directory: directory)
         return ResolvedCheckpoint(
             modelID: modelID,
             modelType: baseConfig.modelType,
-            fingerprint: try checkpointFingerprint(directory: directory),
+            fingerprint: identity.fingerprint,
+            checkpointBytes: identity.bytes,
             directory: directory,
             configData: configData
         )
     }
 
-    private static func checkpointFingerprint(directory: URL) throws -> String {
-        let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
+    private static func checkpointIdentity(
+        directory: URL
+    ) throws -> (fingerprint: String, bytes: UInt64) {
+        let resourceKeys: [URLResourceKey] = [
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+        ]
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
             includingPropertiesForKeys: resourceKeys,
@@ -423,6 +447,7 @@ enum CheckpointShardRuntime {
         }
 
         var hasher = SHA256()
+        var totalBytes: UInt64 = 0
         for file in files {
             guard file.path.hasPrefix(root) else {
                 throw CheckpointShardError.invalidBoundary(
@@ -433,12 +458,33 @@ enum CheckpointShardRuntime {
             hasher.update(data: Data(relativePath.utf8))
             hasher.update(data: Data([0]))
             let handle = try FileHandle(forReadingFrom: file)
-            while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            defer {
+                try? handle.close()
+            }
+            // The identity pass is sequential and never rereads file data.
+            // Avoid displacing useful model pages when the filesystem supports it.
+            _ = fcntl(handle.fileDescriptor, F_NOCACHE, 1)
+            while let chunkBytes: Int = try autoreleasepool(invoking: {
+                guard let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty else {
+                    return nil
+                }
                 hasher.update(data: chunk)
+                return chunk.count
+            }) {
+                let (nextTotal, overflow) = totalBytes.addingReportingOverflow(UInt64(chunkBytes))
+                guard !overflow else {
+                    throw CheckpointShardError.invalidBoundary(
+                        "checkpoint byte count overflows UInt64"
+                    )
+                }
+                totalBytes = nextTotal
             }
             try handle.close()
             hasher.update(data: Data([0xff]))
         }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return (
+            hasher.finalize().map { String(format: "%02x", $0) }.joined(),
+            totalBytes
+        )
     }
 }

@@ -77,11 +77,21 @@ Current failure proof:
 
 ## M6 — pooled-memory demo
 
-- [ ] select a model that cannot fit on either Mac individually
-- [ ] host it across multiple workers
-- [ ] demonstrate generation and controlled worker failure
+- [x] select a model whose checkpoint and full inference footprint exceed each serving worker's physical memory
+- [x] host complementary ranges without materializing a full model in either serving process
+- [x] generate 32 reference-matched tokens and record load/prefill/decode memory evidence
 
-The M2 checkpoint proof establishes the loader and budget accounting needed for M6, but does not claim that the 270M validation model exceeds either Mac's physical memory.
+Current pooled-memory proof (`mlx-community/gemma-3-12b-it-4bit`):
+
+- the 48 layers split 0–23 / 24–47 across two fresh 7 GiB Apple-silicon workers, each configured with a 6 GiB MLX scheduling threshold and a 64 MiB allocator-cache limit
+- the resolved checkpoint contains 8,063,329,713 bytes; a separate upstream full-model run on a 24 GiB M4 measured a 7,416,426,311-byte MLX peak and a 7,647,434,848-byte macOS process peak, so neither the checkpoint nor full-model working set can fit in one serving runner's physical memory
+- the checked-in fingerprint, prompt token plan, and 32 greedy output tokens were produced only after every distributed logit vector and token exactly matched the upstream full-model path
+- serving proof mode requires clean remote workers, loads exactly one complementary range on each, and does not create a reference worker or full-range shard
+- machine-readable evidence records physical memory, configured MLX thresholds, load/prefill/decode MLX and process peaks, shard ownership, generation timings, exact reference parity, and zero retained sequence state after teardown
+- paired GitHub-hosted macOS runners reproduce the proof over Tailscale and upload the result; the full-model oracle never runs on either 7 GB serving VM
+
+The independent failure proof in M3 covers bounded worker loss and
+next-sequence recovery. Transparent same-sequence recovery remains post-MVP.
 
 ## Later
 

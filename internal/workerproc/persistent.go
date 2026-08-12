@@ -119,6 +119,7 @@ type PersistentModelResult struct {
 	ModelType             string `json:"modelType"`
 	LayerCount            int    `json:"layerCount"`
 	CheckpointFingerprint string `json:"checkpointFingerprint"`
+	CheckpointBytes       uint64 `json:"checkpointBytes"`
 }
 
 type PersistentTextResult struct {
@@ -159,19 +160,24 @@ type PersistentShardSnapshot struct {
 }
 
 type PersistentWorkerState struct {
-	LoadedShards       []PersistentShardSnapshot `json:"loadedShards"`
-	LoadCount          int                       `json:"loadCount"`
-	ForwardCount       int                       `json:"forwardCount"`
-	KVCacheBytes       int                       `json:"kvCacheBytes"`
-	RetainedBytes      int                       `json:"retainedBytes"`
-	RetainedByteBudget int                       `json:"retainedByteBudget"`
-	Memory             StageMemory               `json:"memory"`
+	LoadedShards        []PersistentShardSnapshot `json:"loadedShards"`
+	LoadCount           int                       `json:"loadCount"`
+	ForwardCount        int                       `json:"forwardCount"`
+	KVCacheBytes        int                       `json:"kvCacheBytes"`
+	RetainedBytes       int                       `json:"retainedBytes"`
+	RetainedByteBudget  int                       `json:"retainedByteBudget"`
+	PhysicalMemoryBytes uint64                    `json:"physicalMemoryBytes"`
+	MLXMemoryLimitBytes int                       `json:"mlxMemoryLimitBytes"`
+	MLXCacheLimitBytes  int                       `json:"mlxCacheLimitBytes"`
+	Memory              StageMemory               `json:"memory"`
 }
 
 type StageMemory struct {
-	ActiveBytes int `json:"activeBytes"`
-	CacheBytes  int `json:"cacheBytes"`
-	PeakBytes   int `json:"peakBytes"`
+	ActiveBytes              int    `json:"activeBytes"`
+	CacheBytes               int    `json:"cacheBytes"`
+	PeakBytes                int    `json:"peakBytes"`
+	ProcessPhysicalBytes     uint64 `json:"processPhysicalBytes"`
+	ProcessPeakPhysicalBytes uint64 `json:"processPeakPhysicalBytes"`
 }
 
 type WorkerResponseError struct {

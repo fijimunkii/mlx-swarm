@@ -11,6 +11,7 @@ private enum WorkerCommand {
     case capabilities
     case shardSmoke
     case checkpointShardSmoke(modelID: String)
+    case checkpointInfo(modelID: String)
     case shardProduce(path: String)
     case shardFinish(path: String)
     case shardProduceStdio
@@ -42,6 +43,11 @@ private enum WorkerCommand {
                     ? arguments[1]
                     : WorkerCheckpointShards.defaultModelID
             )
+        case "checkpoint-info":
+            guard arguments.count == 2 else {
+                throw WorkerError.usage("checkpoint-info requires one model id")
+            }
+            self = .checkpointInfo(modelID: arguments[1])
         case "shard-produce":
             guard arguments.count == 2 else {
                 throw WorkerError.usage("shard-produce requires an output path")
@@ -82,7 +88,7 @@ private enum WorkerError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .usage(let message):
-            return "\(message)\nusage: mlx-worker [health | capabilities | shard-smoke | checkpoint-shard-smoke [model-id] | shard-produce <path> | shard-finish <path> | shard-produce-stdio | shard-finish-stdio | checkpoint-shard-produce-stdio | checkpoint-shard-finish-stdio | serve-stdio | generate <prompt>]"
+            return "\(message)\nusage: mlx-worker [health | capabilities | shard-smoke | checkpoint-shard-smoke [model-id] | checkpoint-info <model-id> | shard-produce <path> | shard-finish <path> | shard-produce-stdio | shard-finish-stdio | checkpoint-shard-produce-stdio | checkpoint-shard-finish-stdio | serve-stdio | generate <prompt>]"
         case .shardMismatch:
             return "sharded output did not match the single-range reference"
         case .checkpointShardMismatch:
@@ -96,13 +102,24 @@ private struct WorkerCapabilities: Codable {
     let device: String
     let checkpointShardModelTypes: [String]
     let physicalMemoryBytes: UInt64
+    let mlxMemoryLimitBytes: Int
+    let mlxCacheLimitBytes: Int
     let mlxActiveMemoryBytes: Int
     let mlxCacheMemoryBytes: Int
+}
+
+private struct WorkerCheckpointInfo: Codable {
+    let modelID: String
+    let modelType: String
+    let layerCount: Int
+    let checkpointFingerprint: String
+    let checkpointBytes: UInt64
 }
 
 @main
 struct MLXWorker {
     static func main() async throws {
+        try WorkerRuntimeMemory.configure()
         let command = try WorkerCommand(arguments: Array(CommandLine.arguments.dropFirst()))
         let encoder = JSONEncoder()
 
@@ -116,7 +133,9 @@ struct MLXWorker {
                 device: Device.defaultDevice().deviceType?.rawValue ?? "unknown",
                 checkpointShardModelTypes: WorkerCheckpointShards.configuration
                     .adapterRegistry.supportedModelTypes,
-                physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
+                physicalMemoryBytes: WorkerRuntimeMemory.physicalMemoryBytes,
+                mlxMemoryLimitBytes: Memory.memoryLimit,
+                mlxCacheLimitBytes: Memory.cacheLimit,
                 mlxActiveMemoryBytes: Memory.activeMemory,
                 mlxCacheMemoryBytes: Memory.cacheMemory
             )
@@ -138,6 +157,20 @@ struct MLXWorker {
                 throw WorkerError.checkpointShardMismatch
             }
             print(String(decoding: try encoder.encode(result), as: UTF8.self))
+
+        case .checkpointInfo(let modelID):
+            let checkpoint = try await CheckpointShardRuntime.resolveCheckpoint(modelID: modelID)
+            let adapter = try WorkerCheckpointShards.configuration.adapterRegistry.adapter(
+                for: checkpoint.modelType
+            )
+            let info = WorkerCheckpointInfo(
+                modelID: checkpoint.modelID,
+                modelType: checkpoint.modelType,
+                layerCount: try adapter.layerCount(checkpoint: checkpoint),
+                checkpointFingerprint: checkpoint.fingerprint,
+                checkpointBytes: checkpoint.checkpointBytes
+            )
+            print(String(decoding: try encoder.encode(info), as: UTF8.self))
 
         case .shardProduce(let path):
             let result = try Gemma3ShardSmoke.produceBoundary(

@@ -220,6 +220,32 @@ plan but runs outside the distributed hot-path timer. JSON contains both raw
 samples and nearest-rank p50/p95 summaries; CI uploads it as an artifact and
 prints a readable table without performance pass/fail thresholds.
 
+### Physically pooled-memory generation
+
+The MVP proof uses `mlx-community/gemma-3-12b-it-4bit`, a 48-layer,
+8,063,329,713-byte checkpoint, across two independent 7 GiB workers. The
+checkpoint and a separately measured 7,647,434,848-byte full-model macOS
+process peak each exceed either worker's physical memory; the full-model MLX
+peak was 7,416,426,311 bytes. The serving command loads only layers 0–23 on the
+producer and 24–47 plus the output modules on the consumer; it never starts or
+loads a full-model oracle on either serving Mac.
+
+```bash
+go run ./cmd/swarm-pooled-memory \
+  -producer http://127.0.0.1:8080 \
+  -peer http://MAC_B_LAN_IP:8080 \
+  -reference testdata/pooled-memory/gemma-3-12b-it-4bit.json \
+  > pooled-memory.json
+```
+
+The machine-readable result inventories both Macs, verifies their physical
+memory and configured MLX scheduling thresholds, reports load/prefill/decode
+MLX and macOS process peaks, checks every generated token against the pinned
+full-model reference, rejects any full-range serving shard, and proves sequence
+teardown before unloading both proof-owned shards. See
+[`docs/pooled-memory-proof.md`](docs/pooled-memory-proof.md) for checkpoint
+prefetch, worker startup, reference provenance, and the paired-runner workflow.
+
 The current boundary representation is `shape + dtype + contiguous bytes`. JSON/base64 framing is temporary; `proto/swarm.proto` already models the intended raw-byte tensor message.
 
 ## First milestone
@@ -232,7 +258,8 @@ The current boundary representation is `shape + dtype + contiguous bytes`. JSON/
 6. Record p50/p95 stage latency, transfer bytes, TTFT, and tokens/sec.
 7. Kill or pause a worker and characterize failure behavior.
 
-Only after correctness is established do we add hedged execution, dynamic placement, public membership, and pooled-memory-only models.
+With correctness and pooled memory established, hedged execution, dynamic
+placement, and public membership remain post-MVP work.
 
 ## Repository layout
 
@@ -246,9 +273,11 @@ cmd/swarm-benchmark/     warm distributed/reference benchmark and JSON artifact
 cmd/swarm-generate/      prompt-to-text distributed greedy generation
 cmd/swarm-generate-smoke/ deterministic generation/reference/retention proof
 cmd/swarm-failure-smoke/ deterministic process/transport failure proof
+cmd/swarm-pooled-memory/ physical-memory-bounded generation/reference proof
 internal/generation/     reusable model planning and generation session
 internal/benchmark/      percentile, throughput, transfer, and memory summaries
 internal/failureharness/ reusable fault workers, injection, and observations
+internal/pooledproof/    pooled-memory evidence and acceptance validation
 internal/smoke/          shared smoke request and assertion helpers
 internal/tensorcheck/    reusable tensor decoding and reference comparison
 internal/workerproc/     persistent targets, transports, and sequence lifecycle
@@ -269,6 +298,9 @@ per-sequence KV-cached prefill/decode, with exact greedy-token parity enforced
 between paired macOS CI runners and a cached full-model reference. Warm paired
 runs also publish statistically useful latency, throughput, transfer, and
 memory evidence. Deterministic CI now characterizes deadline, process, and
-transport failures with bounded cleanup and next-sequence recovery. The next
-MVP proof is pooled memory: serve a model that cannot fit on either Mac alone;
-see [ROADMAP.md](ROADMAP.md).
+transport failures with bounded cleanup and next-sequence recovery. The
+pooled-memory workflow serves a 12B checkpoint across two 6 GiB MLX budgets,
+matches a separately recorded full-model reference, and emits phase memory
+evidence without loading an oracle on either serving runner. Final MVP
+integration and clean-machine documentation remain in issue #11; see
+[ROADMAP.md](ROADMAP.md).

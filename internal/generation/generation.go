@@ -22,6 +22,7 @@ type SessionConfig struct {
 	ATol           float64
 	ForwardTimeout time.Duration
 	Observer       StageObserver
+	LogitsObserver LogitsObserver
 }
 
 const DefaultForwardTimeout = 30 * time.Second
@@ -30,6 +31,12 @@ const DefaultForwardTimeout = 30 * time.Second
 // decode operation after the resulting token has been sampled. Observer work
 // is excluded from the reported stage durations.
 type StageObserver func(StageSample)
+
+// LogitsObserver receives a private copy of the distributed final-logit
+// tensor immediately before each greedy token is sampled. It is intended for
+// offline reference verification where the distributed shards and full-model
+// oracle cannot coexist in memory.
+type LogitsObserver func(step int, logits workerproc.WireTensor)
 
 // StageSample separates the distributed hot path from the cached full-model
 // correctness oracle. BoundaryWireBytes measures the representative JSON
@@ -103,6 +110,7 @@ type Result struct {
 	Model                 string        `json:"model"`
 	ModelType             string        `json:"modelType"`
 	CheckpointFingerprint string        `json:"checkpointFingerprint"`
+	CheckpointBytes       uint64        `json:"checkpointBytes"`
 	ShardPlan             ShardPlan     `json:"shardPlan"`
 	SequenceID            string        `json:"sequenceID"`
 	Prompt                string        `json:"prompt"`
@@ -223,8 +231,7 @@ func NewSession(
 	}
 
 	split := producerModel.LayerCount / 2
-	modelHash := sha256.Sum256([]byte(config.Model + "\x00" + producerModel.CheckpointFingerprint))
-	suffix := hex.EncodeToString(modelHash[:6])
+	suffix := modelHashSuffix(config.Model, producerModel.CheckpointFingerprint)
 	plan := ShardPlan{
 		Producer: Shard{ID: "generate-producer-" + suffix, LayerStart: 0, LayerEnd: split},
 		Consumer: Shard{ID: "generate-consumer-" + suffix, LayerStart: split, LayerEnd: producerModel.LayerCount},
@@ -291,7 +298,8 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 	}
 	result = Result{
 		Model: s.config.Model, ModelType: s.model.ModelType,
-		CheckpointFingerprint: s.model.CheckpointFingerprint, ShardPlan: s.plan,
+		CheckpointFingerprint: s.model.CheckpointFingerprint,
+		CheckpointBytes:       s.model.CheckpointBytes, ShardPlan: s.plan,
 		SequenceID: request.SequenceID, Prompt: request.Prompt, MaxTokens: request.MaxTokens,
 		RTol: s.config.RTol, ATol: s.config.ATol,
 		ForwardTimeoutMillis: s.config.ForwardTimeout.Milliseconds(),
@@ -420,6 +428,12 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 		point = failurePoint{phase: "sample", operation: "sample", position: position}
 		if err := ctx.Err(); err != nil {
 			return result, err
+		}
+		if s.config.LogitsObserver != nil {
+			s.config.LogitsObserver(
+				len(result.GeneratedTokenIDs),
+				cloneWireTensor(distributedLogits),
+			)
 		}
 		samplingStarted := time.Now()
 		nextToken, err := greedyToken(distributedLogits)
@@ -564,7 +578,8 @@ func modelInfo(
 		return nil, errors.New("modelInfo returned no model metadata")
 	}
 	if response.Result.Model.ModelID != modelID || response.Result.Model.ModelType == "" ||
-		response.Result.Model.LayerCount <= 0 || response.Result.Model.CheckpointFingerprint == "" {
+		response.Result.Model.LayerCount <= 0 || response.Result.Model.CheckpointFingerprint == "" ||
+		response.Result.Model.CheckpointBytes == 0 {
 		return nil, fmt.Errorf("modelInfo returned invalid metadata: %+v", *response.Result.Model)
 	}
 	return response.Result.Model, nil
@@ -573,7 +588,8 @@ func modelInfo(
 func matchModel(expected, actual *workerproc.PersistentModelResult, role string) error {
 	if expected.ModelID != actual.ModelID || expected.ModelType != actual.ModelType ||
 		expected.LayerCount != actual.LayerCount ||
-		expected.CheckpointFingerprint != actual.CheckpointFingerprint {
+		expected.CheckpointFingerprint != actual.CheckpointFingerprint ||
+		expected.CheckpointBytes != actual.CheckpointBytes {
 		return fmt.Errorf(
 			"%s model mismatch: producer=%+v %s=%+v", role, *expected, role, *actual,
 		)
@@ -710,14 +726,7 @@ func workerState(
 	ctx context.Context,
 	caller workerproc.PersistentCaller,
 ) (*workerproc.PersistentWorkerState, error) {
-	response, err := call(ctx, caller, workerproc.PersistentRequest{Command: "state"})
-	if err != nil {
-		return nil, err
-	}
-	if response.Result == nil || response.Result.State == nil {
-		return nil, errors.New("state returned no worker snapshot")
-	}
-	return response.Result.State, nil
+	return workerproc.State(ctx, caller)
 }
 
 func measuredInfer(
@@ -863,6 +872,14 @@ func tokenTensor(tokens []int32) workerproc.WireTensor {
 	return workerproc.WireTensor{Shape: []int{1, len(tokens)}, DType: "int32", Data: data}
 }
 
+func cloneWireTensor(tensor workerproc.WireTensor) workerproc.WireTensor {
+	return workerproc.WireTensor{
+		Shape: append([]int(nil), tensor.Shape...),
+		DType: tensor.DType,
+		Data:  append([]byte(nil), tensor.Data...),
+	}
+}
+
 func randomSequenceID() (string, error) {
 	return randomIdentifier("generation-")
 }
@@ -873,4 +890,9 @@ func randomIdentifier(prefix string) (string, error) {
 		return "", fmt.Errorf("generate sequence ID: %w", err)
 	}
 	return prefix + hex.EncodeToString(bytes), nil
+}
+
+func modelHashSuffix(modelID, fingerprint string) string {
+	hash := sha256.Sum256([]byte(modelID + "\x00" + fingerprint))
+	return hex.EncodeToString(hash[:6])
 }

@@ -42,6 +42,7 @@ func run() error {
 		addr = "127.0.0.1:8080"
 	}
 	exitAfterDebugShard := os.Getenv("SWARMD_EXIT_AFTER_DEBUG_SHARD") == "1"
+	allowDebugComplete := os.Getenv("SWARMD_ALLOW_DEBUG_COMPLETE") == "1"
 	debugShardComplete := make(chan struct{}, 1)
 
 	worker := workerproc.Client{Path: workerproc.DefaultPath()}
@@ -108,6 +109,14 @@ func run() error {
 		_, _ = w.Write(result.Output)
 	})
 
+	// Workflow-only rendezvous for paired ephemeral workers. It is disabled by
+	// default and carries no model data; successful proof clients use it to let
+	// the remote runner exit after they have read its final worker state.
+	mux.HandleFunc(
+		"POST /v1/debug/complete",
+		debugCompleteHandler(allowDebugComplete, debugShardComplete),
+	)
+
 	// Debug-only v0 endpoint. It proves that the tensor emitted by a worker on
 	// one machine can traverse the Go network layer and be consumed by the
 	// complementary worker range on another machine. It is intentionally not
@@ -140,7 +149,7 @@ func run() error {
 	serverStopped := make(chan struct{})
 	shutdownComplete := make(chan struct{})
 	var debugShutdown <-chan struct{}
-	if exitAfterDebugShard {
+	if exitAfterDebugShard || allowDebugComplete {
 		debugShutdown = debugShardComplete
 	}
 	go func() {
@@ -169,6 +178,20 @@ func run() error {
 		return fmt.Errorf("serve: %w", serveErr)
 	}
 	return nil
+}
+
+func debugCompleteHandler(enabled bool, complete chan<- struct{}) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		if !enabled {
+			writeError(w, http.StatusForbidden, errors.New("debug completion is disabled"))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		select {
+		case complete <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func forwardPersistentRequest(

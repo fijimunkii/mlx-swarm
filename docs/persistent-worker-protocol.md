@@ -41,7 +41,7 @@ The supported commands are:
 | Command | Payload | Effect |
 |---|---|---|
 | `health` | none | Proves the child is responsive. |
-| `modelInfo` | `model` | Resolves `modelID`, selects its adapter, and reports model type, layer count, and checkpoint fingerprint for architecture-neutral planning. |
+| `modelInfo` | `model` | Resolves `modelID`, selects its adapter, and reports model type, layer count, checkpoint fingerprint, and resolved byte count for architecture-neutral planning. |
 | `tokenize` | `text` | Loads/caches the checkpoint tokenizer and converts text to token IDs, including special tokens by default. |
 | `detokenize` | `text` | Uses the cached checkpoint tokenizer to convert generated token IDs to text, skipping special tokens by default. |
 | `loadShard` | `loadShard` | Resolves `modelID`, selects its registered `model_type` adapter, loads the requested layer range, and retains it under `shardID`. |
@@ -51,11 +51,12 @@ The supported commands are:
 | `forward` | `forward` | Runs a retained stage without mutating sequence cache; retained for diagnostics and the stateless reuse proof. |
 | `prefill` | `forward` | Runs a prompt exactly once at position zero and populates every owned layer cache. |
 | `decode` | `forward` | Runs exactly one new position at the sequence's expected next position and reuses every owned layer cache. |
-| `state` | none | Reports loaded ranges, adapter/model type, sequence and reuse counts, KV bytes, and MLX allocator memory. |
+| `state` | none | Reports loaded ranges, adapter/model type, sequence and reuse counts, KV bytes, physical memory, configured MLX/cache limits, and allocator memory. |
 | `shutdown` | none | Releases all shards, clears the MLX cache, acknowledges shutdown, and exits cleanly. Only the supervising daemon sends it. |
 
-`modelInfo` keeps the Go planner independent of model-family layer counts and
-fingerprints the resolved checkpoint contents. The coordinator requires the
+`modelInfo` keeps the Go planner independent of model-family layer counts,
+fingerprints the resolved checkpoint contents, and counts the exact resolved
+files. The coordinator requires the
 producer, consumer, and optional reference fingerprints to match, pins that
 fingerprint in each `loadShard` request, and validates it when reusing a stable
 shard ID. This prevents stages from different cached checkpoint revisions from

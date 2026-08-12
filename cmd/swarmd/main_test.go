@@ -3,11 +3,49 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
+
+func TestDebugCompleteHandler(t *testing.T) {
+	t.Run("disabled", func(t *testing.T) {
+		complete := make(chan struct{}, 1)
+		response := httptest.NewRecorder()
+		debugCompleteHandler(false, complete).ServeHTTP(
+			response,
+			httptest.NewRequest(http.MethodPost, "/v1/debug/complete", nil),
+		)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+		}
+		select {
+		case <-complete:
+			t.Fatal("disabled handler signaled completion")
+		default:
+		}
+	})
+
+	t.Run("enabled", func(t *testing.T) {
+		complete := make(chan struct{}, 1)
+		response := httptest.NewRecorder()
+		debugCompleteHandler(true, complete).ServeHTTP(
+			response,
+			httptest.NewRequest(http.MethodPost, "/v1/debug/complete", nil),
+		)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+		}
+		select {
+		case <-complete:
+		default:
+			t.Fatal("enabled handler did not signal completion")
+		}
+	})
+}
 
 type recordingPersistentCaller struct {
 	request     workerproc.PersistentRequest

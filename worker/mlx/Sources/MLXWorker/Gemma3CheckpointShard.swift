@@ -374,12 +374,37 @@ struct Gemma3CheckpointShardAdapter: CheckpointShardAdapter {
            request.ownsOutput,
            range == 0 ..< inner.layers.count
         {
-            try loadWeights(
+            let weights = try CheckpointWeightLoader.load(
                 modelDirectory: checkpoint.directory,
-                model: model,
-                perLayerQuantization: baseConfig.perLayerQuantization
+                selection: CheckpointWeightSelection(
+                    includesRaw: { _ in true },
+                    includesSanitized: { _ in true }
+                ),
+                sanitize: { weights, metadata in
+                    model.sanitize(weights: weights, metadata: metadata)
+                }
+            ).arrays
+            if let quantization = baseConfig.perLayerQuantization {
+                quantize(model: model) { path, _ in
+                    guard weights["\(path).scales"] != nil else {
+                        return nil
+                    }
+                    return quantization.quantization(layer: path)?.asTuple
+                }
+            }
+            try model.update(
+                parameters: ModuleParameters.unflattened(weights),
+                verify: [.all]
             )
-            eval(model)
+            // Materializing every lazy weight in one eval creates a command
+            // buffer large enough to trip macOS's GPU watchdog for 6-bit 12B
+            // checkpoints. Leaf-sized evaluations preserve identical arrays
+            // while bounding each command buffer.
+            for (_, module) in model.leafModules().flattened().sorted(by: {
+                $0.0 < $1.0
+            }) {
+                eval(module)
+            }
             return Gemma3CheckpointStage(
                 embedding: inner.embedTokens,
                 layers: inner.layers,

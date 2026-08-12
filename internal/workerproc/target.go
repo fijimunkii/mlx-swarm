@@ -2,6 +2,7 @@ package workerproc
 
 import (
 	"context"
+	"net/http"
 	"time"
 )
 
@@ -16,8 +17,18 @@ type PersistentTarget struct {
 // OpenPersistentTarget opens a remote endpoint when endpoint is nonempty and
 // otherwise starts a directly supervised worker process.
 func OpenPersistentTarget(workerPath string, endpoint string) (*PersistentTarget, error) {
+	return OpenPersistentTargetWithHTTPClient(workerPath, endpoint, nil)
+}
+
+// OpenPersistentTargetWithHTTPClient opens a persistent target using client
+// for every remote swarmd request. The client is ignored for direct workers.
+func OpenPersistentTargetWithHTTPClient(
+	workerPath string,
+	endpoint string,
+	httpClient *http.Client,
+) (*PersistentTarget, error) {
 	if endpoint != "" {
-		client, err := NewHTTPPersistentClient(endpoint, nil)
+		client, err := NewHTTPPersistentClient(endpoint, httpClient)
 		if err != nil {
 			return nil, err
 		}
