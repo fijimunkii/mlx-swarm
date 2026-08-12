@@ -1,5 +1,21 @@
 # Roadmap
 
+## Distributed Inference Proof acceptance criteria
+
+- [x] retain complementary real-checkpoint shards in supervised workers
+- [x] generate tokenizer-backed text with per-shard KV-cached prefill/decode
+- [x] match a cached full-checkpoint reference at explicit tolerances
+- [x] publish reproducible latency, throughput, transfer, and memory evidence
+- [x] characterize bounded deadline, process, and transport failures
+- [x] prove 32-token generation from a model that cannot fit on either serving worker
+- [x] provide one clean-checkout, two-Mac verification runbook with machine-readable gates
+- [ ] finish the integrated review and merge the proof PR #1 to `main`
+
+The first seven items are implemented. The final acceptance criterion is the
+review and green integrated run of PR #1 using
+[`docs/distributed-inference-proof.md`](docs/distributed-inference-proof.md).
+Items explicitly marked as future work below do not block the proof.
+
 ## M0 — bootstrap
 
 - [x] establish Go control-plane / Swift worker boundary
@@ -48,7 +64,7 @@ Current correctness proof (`mlx-community/gemma-3-270m-it-4bit`):
 ## M3 — chaos harness
 
 - [x] inject latency and jitter
-- [ ] throttle bandwidth
+- [ ] future work: throttle bandwidth
 - [x] pause/kill worker processes
 - [x] disconnect/reconnect a peer
 - [x] record recovery behavior and failed-token rate
@@ -60,7 +76,7 @@ Current failure proof:
 - the deterministic, model-free harness injects process pause, process kill, long delay, bounded jitter, and a loopback HTTP disconnect without using the public network
 - pause, kill, delay, and disconnect fail the active sequence with its shard, phase, position, and last accepted token; every scenario proves bounded termination, released sequence state, worker reuse for a new sequence, and a machine-readable failed-token rate in CI
 
-## M4 — fault-tolerant scheduler
+## M4 — fault-tolerant scheduler (future milestone)
 
 - [ ] worker health scoring
 - [x] request deadlines
@@ -69,7 +85,7 @@ Current failure proof:
 - [ ] first-valid-result selection
 - [ ] KV recovery strategy
 
-## M5 — residential WAN
+## M5 — residential WAN (future milestone)
 
 - [ ] connect the two Macs to remote consumer GPU workers
 - [ ] validate MLX CUDA worker path on RTX hardware
@@ -92,7 +108,12 @@ Current pooled-memory proof (`mlx-community/gemma-3-12b-it-4bit`):
 - paired GitHub-hosted macOS runners reproduce the proof over Tailscale and upload the result; the full-model oracle never runs on either 7 GB serving VM
 
 The independent failure proof in M3 covers bounded worker loss and
-next-sequence recovery. Transparent same-sequence recovery remains post-MVP.
+next-sequence recovery. Transparent same-sequence recovery remains future work.
+
+Terminal-shard sampling was scoped after the central proof was defined and
+is not evidence for the pooled-memory claim. Because it is now included in the
+integrated branch's default serving path, paired full-logit/token-only token
+parity and payload reduction are release regression gates.
 
 ## Later
 

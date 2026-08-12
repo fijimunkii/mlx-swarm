@@ -4,6 +4,24 @@
 
 Test whether a dynamic pool of heterogeneous consumer devices can provide useful distributed LLM inference over ordinary networks without treating every participant as a reliable cluster member.
 
+## Proof boundary
+
+The Distributed Inference Proof is a validation milestone, not a production
+serving architecture. It
+proves a two-Mac, contiguous-shard pipeline with deterministic correctness,
+retained KV state, measured warm performance, bounded next-sequence recovery,
+and a physically pooled 12B checkpoint. The authoritative supported hardware,
+checkpoint revisions, shard plans, acceptance predicates, and clean-checkout
+procedure live in
+[`docs/distributed-inference-proof.md`](docs/distributed-inference-proof.md).
+
+Terminal-shard sampling is included because it removes full-vocabulary logits
+from the normal serving hot path. It is not evidence for the central
+pooled-memory claim, but once integrated into the default path its exact-token
+and payload-reduction invariants become release regression gates. Public
+membership, automatic placement, replicated execution, same-sequence recovery,
+and heterogeneous GPU workers remain outside the proof scope.
+
 ## Boundary: swarm vs. MLX
 
 `mlx-swarm` should add distributed-systems behavior, not duplicate the ML stack.
@@ -42,7 +60,7 @@ A process boundary gives us crash isolation and lets future worker backends impl
 `swarmd` starts one `MLXWorker serve-stdio` child and exchanges framed,
 request-ID-correlated messages with it. The child retains assigned checkpoint
 stages until unload or shutdown. Unexpected EOF is a daemon health failure;
-only an acknowledged shutdown is treated as a clean exit. The concrete v0
+only an acknowledged shutdown is treated as a clean exit. The concrete
 framing is described in `docs/persistent-worker-protocol.md`.
 
 Inside the Swift worker, checkpoint sharding has three boundaries:
@@ -132,6 +150,13 @@ sequence, then records the failed-token rate as a JSON artifact.
 
 The global network is dynamic. A worker may disappear at any point. We therefore do not model the public swarm as one `mx.distributed.Group`.
 
+The implemented network is narrower than that direction: `swarmd` exposes
+an unauthenticated, unencrypted HTTP debug API for a private LAN or tailnet.
+It provides no peer identity, authorization, confidentiality, integrity
+protection, malicious-worker defense, NAT traversal, or multi-tenant resource
+isolation. Binding that endpoint to a public interface is outside the trust
+model.
+
 Stable local groups may later use MLX Ring/JACCL/NCCL internally, while the swarm treats each group as an execution island.
 
 ```text
@@ -159,13 +184,13 @@ execute shard 12
   accept first valid result
 ```
 
-v0 does **not** implement this. It first measures the baseline needed to decide whether hedging is worthwhile.
+The proof does **not** implement this. It first measures the baseline needed to decide whether hedging is worthwhile.
 
 ## Correctness rule
 
 A distributed execution path must match a single-worker reference within an explicitly defined numerical tolerance before its performance matters.
 
-## Non-goals for v0
+## Proof non-goals
 
 - cryptocurrency or payments
 - permissionless public discovery

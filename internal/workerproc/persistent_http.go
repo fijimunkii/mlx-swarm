@@ -18,7 +18,7 @@ type PersistentCaller interface {
 	Call(context.Context, PersistentRequest) (PersistentResponse, error)
 }
 
-// HTTPPersistentClient sends persistent worker frames through swarmd. The v0
+// HTTPPersistentClient sends persistent worker frames through swarmd. The
 // endpoint is intentionally limited to trusted networks.
 type HTTPPersistentClient struct {
 	endpoint string

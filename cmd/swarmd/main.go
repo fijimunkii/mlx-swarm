@@ -81,7 +81,7 @@ func run() error {
 		writePersistentResponse(w, response, err)
 	})
 
-	// Trusted-network v0 worker API. The daemon owns worker process shutdown;
+	// Trusted-network worker API. The daemon owns worker process shutdown;
 	// clients own shard and sequence lifecycle through framed requests.
 	mux.HandleFunc("POST /v1/worker/request", func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxDebugTensorPayload)
@@ -117,7 +117,7 @@ func run() error {
 		debugCompleteHandler(allowDebugComplete, debugShardComplete),
 	)
 
-	// Debug-only v0 endpoint. It proves that the tensor emitted by a worker on
+	// Debug-only endpoint. It proves that the tensor emitted by a worker on
 	// one machine can traverse the Go network layer and be consumed by the
 	// complementary worker range on another machine. It is intentionally not
 	// the final public protocol and has no authentication or encryption.

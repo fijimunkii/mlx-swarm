@@ -5,7 +5,7 @@
 daemon exits. Swift owns checkpoint loading and MLX execution; Go owns process
 lifetime, request cancellation, networking, and error translation.
 
-The current v0 transport is newline-delimited JSON over the child's standard
+The current transport is newline-delimited JSON over the child's standard
 input and output. Each line is one complete UTF-8 JSON object. Tensor data is
 the base64 JSON encoding of contiguous bytes. This framing is intentionally
 simple while `proto/swarm.proto` records the language-neutral message shape for
@@ -191,4 +191,11 @@ disconnect scenarios.
 The HTTP proxy is currently unauthenticated and unencrypted. Bind it only to a
 loopback or trusted LAN/tailnet address. `swarmd` limits request bodies to 64
 MiB, and the Go clients limit responses to 128 MiB. Public membership,
-authentication, and transport encryption are outside the MVP.
+authentication, and transport encryption are outside the proof scope.
+
+This protocol also provides no peer identity, authorization, malicious-worker
+verification, tenant isolation, or hard operating-system memory sandbox. Its
+worker admission budgets bound retained MLX state for cooperating clients; they
+do not turn the debug endpoint into a safe public service. The authoritative
+private-network startup, daemon-restart, evidence, and release procedure is the
+[`validation runbook`](distributed-inference-proof.md).

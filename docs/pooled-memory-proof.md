@@ -1,6 +1,7 @@
 # Pooled-memory generation proof
 
-This runbook reproduces the MVP's central memory-pooling claim with two
+This runbook reproduces the Distributed Inference Proof's central
+memory-pooling claim with two
 independent 7 GiB Apple-silicon workers. Each worker receives a 6 GiB MLX
 scheduling threshold and loads one half of
 `mlx-community/gemma-3-12b-it-4bit`. Neither serving process loads the full
@@ -133,5 +134,5 @@ token to match the upstream full-model path exactly.
 ## Trust boundary
 
 The serving HTTP endpoint remains unauthenticated and unencrypted. Run this
-proof only on a trusted LAN or private tailnet. The memory proof is an MVP
+proof only on a trusted LAN or private tailnet. The memory proof is a validation
 experiment, not a hard multi-tenant resource sandbox.
