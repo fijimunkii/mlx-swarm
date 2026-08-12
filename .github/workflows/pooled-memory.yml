@@ -106,8 +106,10 @@ jobs:
             "$daemon" &
           daemon_pid=$!
           (
-            sleep 900
-            echo "consumer proof watchdog expired after 15 minutes" >&2
+            # Cover producer discovery (4m), readiness (4m), proof (10m),
+            # and setup skew while staying below the 50-minute job timeout.
+            sleep 1800
+            echo "consumer proof watchdog expired after 30 minutes" >&2
             kill -TERM "$daemon_pid" 2>/dev/null || true
           ) &
           watchdog_pid=$!
