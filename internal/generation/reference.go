@@ -113,6 +113,7 @@ func VerifyTrace(
 	result, _, err := measuredInfer(
 		ctx, config.ForwardTimeout, caller,
 		"prefill", shardID, sequenceID, 0, "tokens", tokenTensor(expectedPromptTokenIDs),
+		false,
 	)
 	if err != nil {
 		return verification, fmt.Errorf("reference prefill: %w", err)
@@ -160,6 +161,7 @@ func VerifyTrace(
 		result, _, err = measuredInfer(
 			ctx, config.ForwardTimeout, caller,
 			"decode", shardID, sequenceID, position, "tokens", tokenTensor([]int32{expectedToken}),
+			false,
 		)
 		if err != nil {
 			return verification, fmt.Errorf("reference decode step %d: %w", index+1, err)

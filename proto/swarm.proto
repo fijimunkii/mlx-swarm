@@ -106,6 +106,7 @@ message ForwardRequest {
   uint64 deadline_unix_millis = 7;
   string input_kind = 8; // tokens or hidden
   InferenceOperation operation = 9;
+  bool return_sampled_token = 10;
 }
 
 message ForwardResponse {
@@ -115,6 +116,7 @@ message ForwardResponse {
   string error = 4;
   uint64 next_position = 5;
   uint64 kv_cache_memory_bytes = 6;
+  optional int32 sampled_token_id = 7;
 }
 
 message ShardState {

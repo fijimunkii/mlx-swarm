@@ -17,12 +17,13 @@ import (
 )
 
 type SessionConfig struct {
-	Model          string
-	RTol           float64
-	ATol           float64
-	ForwardTimeout time.Duration
-	Observer       StageObserver
-	LogitsObserver LogitsObserver
+	Model            string
+	RTol             float64
+	ATol             float64
+	ForwardTimeout   time.Duration
+	TerminalSampling bool
+	Observer         StageObserver
+	LogitsObserver   LogitsObserver
 }
 
 const DefaultForwardTimeout = 30 * time.Second
@@ -39,34 +40,38 @@ type StageObserver func(StageSample)
 type LogitsObserver func(step int, logits workerproc.WireTensor)
 
 // StageSample separates the distributed hot path from the cached full-model
-// correctness oracle. BoundaryWireBytes measures the representative JSON
-// request payload, excluding transport headers and the generated request ID.
+// correctness oracle. Wire byte counts measure representative JSON payloads,
+// excluding transport headers and generated request IDs.
 type StageSample struct {
-	Operation                   string                 `json:"operation"`
-	Position                    uint64                 `json:"position"`
-	InputTokenCount             int                    `json:"inputTokenCount"`
-	ProducerWallMicros          int64                  `json:"producerWallMicros"`
-	ProducerComputeMicros       uint64                 `json:"producerComputeMicros"`
-	ProducerOverheadMicros      int64                  `json:"producerOverheadMicros"`
-	BoundarySerializationMicros int64                  `json:"boundarySerializationMicros"`
-	ConsumerRoundTripMicros     int64                  `json:"consumerRoundTripMicros"`
-	ConsumerComputeMicros       uint64                 `json:"consumerComputeMicros"`
-	TransportOverheadMicros     int64                  `json:"transportOverheadMicros"`
-	DistributedEndToEndMicros   int64                  `json:"distributedEndToEndMicros"`
-	SamplingMicros              int64                  `json:"samplingMicros"`
-	TokenLatencyMicros          int64                  `json:"tokenLatencyMicros"`
-	ReferenceWallMicros         int64                  `json:"referenceWallMicros,omitempty"`
-	ReferenceComputeMicros      uint64                 `json:"referenceComputeMicros,omitempty"`
-	ReferenceSamplingMicros     int64                  `json:"referenceSamplingMicros,omitempty"`
-	ReferenceTokenLatencyMicros int64                  `json:"referenceTokenLatencyMicros,omitempty"`
-	BoundaryTensorBytes         int                    `json:"boundaryTensorBytes"`
-	BoundaryWireBytes           int                    `json:"boundaryWireBytes"`
-	ProducerKVCacheBytes        int                    `json:"producerKVCacheBytes"`
-	ConsumerKVCacheBytes        int                    `json:"consumerKVCacheBytes"`
-	ReferenceKVCacheBytes       int                    `json:"referenceKVCacheBytes,omitempty"`
-	ProducerMemory              workerproc.StageMemory `json:"producerMemory"`
-	ConsumerMemory              workerproc.StageMemory `json:"consumerMemory"`
-	ReferenceMemory             workerproc.StageMemory `json:"referenceMemory,omitempty"`
+	Operation                           string                 `json:"operation"`
+	Position                            uint64                 `json:"position"`
+	InputTokenCount                     int                    `json:"inputTokenCount"`
+	ProducerWallMicros                  int64                  `json:"producerWallMicros"`
+	ProducerComputeMicros               uint64                 `json:"producerComputeMicros"`
+	ProducerOverheadMicros              int64                  `json:"producerOverheadMicros"`
+	BoundarySerializationMicros         int64                  `json:"boundarySerializationMicros"`
+	ConsumerResponseSerializationMicros int64                  `json:"consumerResponseSerializationMicros"`
+	ConsumerRoundTripMicros             int64                  `json:"consumerRoundTripMicros"`
+	ConsumerComputeMicros               uint64                 `json:"consumerComputeMicros"`
+	TransportOverheadMicros             int64                  `json:"transportOverheadMicros"`
+	DistributedEndToEndMicros           int64                  `json:"distributedEndToEndMicros"`
+	SamplingMicros                      int64                  `json:"samplingMicros"`
+	TokenLatencyMicros                  int64                  `json:"tokenLatencyMicros"`
+	ReferenceWallMicros                 int64                  `json:"referenceWallMicros,omitempty"`
+	ReferenceComputeMicros              uint64                 `json:"referenceComputeMicros,omitempty"`
+	ReferenceSamplingMicros             int64                  `json:"referenceSamplingMicros,omitempty"`
+	ReferenceTokenLatencyMicros         int64                  `json:"referenceTokenLatencyMicros,omitempty"`
+	BoundaryTensorBytes                 int                    `json:"boundaryTensorBytes"`
+	BoundaryWireBytes                   int                    `json:"boundaryWireBytes"`
+	ConsumerResponseTensorBytes         int                    `json:"consumerResponseTensorBytes"`
+	ConsumerResponseWireBytes           int                    `json:"consumerResponseWireBytes"`
+	TerminalSampling                    bool                   `json:"terminalSampling"`
+	ProducerKVCacheBytes                int                    `json:"producerKVCacheBytes"`
+	ConsumerKVCacheBytes                int                    `json:"consumerKVCacheBytes"`
+	ReferenceKVCacheBytes               int                    `json:"referenceKVCacheBytes,omitempty"`
+	ProducerMemory                      workerproc.StageMemory `json:"producerMemory"`
+	ConsumerMemory                      workerproc.StageMemory `json:"consumerMemory"`
+	ReferenceMemory                     workerproc.StageMemory `json:"referenceMemory,omitempty"`
 }
 
 type Request struct {
@@ -213,6 +218,9 @@ func NewSession(
 	}
 	if config.ForwardTimeout == 0 {
 		config.ForwardTimeout = DefaultForwardTimeout
+	}
+	if config.TerminalSampling && (reference != nil || config.LogitsObserver != nil) {
+		return nil, errors.New("terminal sampling cannot return logits for reference verification")
 	}
 
 	producerModel, err := modelInfo(ctx, producer, config.Model)
@@ -366,7 +374,7 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 	}
 	producerResult, producerWallMicros, err := measuredInfer(
 		ctx, s.config.ForwardTimeout, s.producer,
-		"prefill", s.plan.Producer.ID, request.SequenceID, 0, "tokens", prompt,
+		"prefill", s.plan.Producer.ID, request.SequenceID, 0, "tokens", prompt, false,
 	)
 	if err != nil {
 		return result, fmt.Errorf("producer prefill: %w", err)
@@ -378,6 +386,7 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 	consumerResult, consumerWallMicros, err := measuredInfer(
 		ctx, s.config.ForwardTimeout, s.consumer,
 		"prefill", s.plan.Consumer.ID, request.SequenceID, 0, "hidden", producerResult.Output,
+		s.config.TerminalSampling,
 	)
 	if err != nil {
 		return result, fmt.Errorf("consumer prefill: %w", err)
@@ -392,7 +401,7 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 		}
 		referenceResult, referenceWallMicros, err = measuredInfer(
 			ctx, s.config.ForwardTimeout, s.reference,
-			"prefill", s.referenceShard, request.SequenceID, 0, "tokens", prompt,
+			"prefill", s.referenceShard, request.SequenceID, 0, "tokens", prompt, false,
 		)
 		if err != nil {
 			return result, fmt.Errorf("reference prefill: %w", err)
@@ -419,6 +428,7 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 
 	position := uint64(len(tokenized.TokenIDs))
 	distributedLogits := consumerResult.Output
+	distributedSampledToken := consumerResult.SampledTokenID
 	var referenceLogits workerproc.WireTensor
 	if referenceResult != nil {
 		referenceLogits = referenceResult.Output
@@ -436,7 +446,7 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 			)
 		}
 		samplingStarted := time.Now()
-		nextToken, err := greedyToken(distributedLogits)
+		nextToken, err := sampledToken(distributedSampledToken, distributedLogits)
 		samplingMicros := time.Since(samplingStarted).Microseconds()
 		if err != nil {
 			return result, fmt.Errorf("sample distributed logits: %w", err)
@@ -500,7 +510,7 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 		}
 		producerResult, producerWallMicros, err = measuredInfer(
 			ctx, s.config.ForwardTimeout, s.producer,
-			"decode", s.plan.Producer.ID, request.SequenceID, position, "tokens", token,
+			"decode", s.plan.Producer.ID, request.SequenceID, position, "tokens", token, false,
 		)
 		if err != nil {
 			return result, fmt.Errorf("producer decode step %d: %w", len(result.GeneratedTokenIDs), err)
@@ -512,6 +522,7 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 		consumerResult, consumerWallMicros, err = measuredInfer(
 			ctx, s.config.ForwardTimeout, s.consumer,
 			"decode", s.plan.Consumer.ID, request.SequenceID, position, "hidden", producerResult.Output,
+			s.config.TerminalSampling,
 		)
 		if err != nil {
 			return result, fmt.Errorf("consumer decode step %d: %w", len(result.GeneratedTokenIDs), err)
@@ -522,6 +533,7 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 		result.ProducerKVCacheBytes = producerResult.KVCacheBytes
 		result.ConsumerKVCacheBytes = consumerResult.KVCacheBytes
 		distributedLogits = consumerResult.Output
+		distributedSampledToken = consumerResult.SampledTokenID
 		referenceResult = nil
 		referenceWallMicros = 0
 		if s.reference != nil {
@@ -531,7 +543,7 @@ func (s *Session) Generate(ctx context.Context, request Request) (result Result,
 			}
 			referenceResult, referenceWallMicros, err = measuredInfer(
 				ctx, s.config.ForwardTimeout, s.reference,
-				"decode", s.referenceShard, request.SequenceID, position, "tokens", token,
+				"decode", s.referenceShard, request.SequenceID, position, "tokens", token, false,
 			)
 			if err != nil {
 				return result, fmt.Errorf("reference decode step %d: %w", len(result.GeneratedTokenIDs), err)
@@ -739,11 +751,15 @@ func measuredInfer(
 	position uint64,
 	inputKind string,
 	input workerproc.WireTensor,
+	returnSampledToken bool,
 ) (*workerproc.PersistentForwardResult, int64, error) {
 	callContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	started := time.Now()
-	result, err := infer(callContext, caller, command, shardID, sequenceID, position, inputKind, input)
+	result, err := infer(
+		callContext, caller, command, shardID, sequenceID, position, inputKind, input,
+		returnSampledToken,
+	)
 	return result, time.Since(started).Microseconds(), err
 }
 
@@ -766,24 +782,37 @@ func newStageSample(
 		Forward: &workerproc.PersistentForwardRequest{
 			ShardID: consumer.ShardID, SequenceID: sequenceID, Position: position,
 			InputKind: "hidden", Input: producer.Output,
+			ReturnSampledToken: consumer.SampledTokenID != nil,
+		},
+	})
+	boundarySerializationMicros := time.Since(serializationStarted).Microseconds()
+	responseSerializationStarted := time.Now()
+	responsePayload, _ := json.Marshal(workerproc.PersistentResponse{
+		OK: true,
+		Result: &workerproc.PersistentWorkerResult{
+			Forward: consumer,
 		},
 	})
 	sample := StageSample{
 		Operation: operation, Position: position, InputTokenCount: inputTokenCount,
 		ProducerWallMicros: producerWallMicros, ProducerComputeMicros: producer.ComputeMicros,
-		ProducerOverheadMicros:    positiveDifference(producerWallMicros, producer.ComputeMicros),
-		ConsumerRoundTripMicros:   consumerWallMicros,
-		ConsumerComputeMicros:     consumer.ComputeMicros,
-		TransportOverheadMicros:   positiveDifference(consumerWallMicros, consumer.ComputeMicros),
-		DistributedEndToEndMicros: distributedEndToEndMicros,
-		BoundaryTensorBytes:       len(producer.Output.Data),
-		BoundaryWireBytes:         len(wirePayload),
-		ProducerKVCacheBytes:      producer.KVCacheBytes,
-		ConsumerKVCacheBytes:      consumer.KVCacheBytes,
-		ProducerMemory:            producer.Memory,
-		ConsumerMemory:            consumer.Memory,
+		ProducerOverheadMicros:              positiveDifference(producerWallMicros, producer.ComputeMicros),
+		BoundarySerializationMicros:         boundarySerializationMicros,
+		ConsumerResponseSerializationMicros: time.Since(responseSerializationStarted).Microseconds(),
+		ConsumerRoundTripMicros:             consumerWallMicros,
+		ConsumerComputeMicros:               consumer.ComputeMicros,
+		TransportOverheadMicros:             positiveDifference(consumerWallMicros, consumer.ComputeMicros),
+		DistributedEndToEndMicros:           distributedEndToEndMicros,
+		BoundaryTensorBytes:                 len(producer.Output.Data),
+		BoundaryWireBytes:                   len(wirePayload),
+		ConsumerResponseTensorBytes:         len(consumer.Output.Data),
+		ConsumerResponseWireBytes:           len(responsePayload),
+		TerminalSampling:                    consumer.SampledTokenID != nil,
+		ProducerKVCacheBytes:                producer.KVCacheBytes,
+		ConsumerKVCacheBytes:                consumer.KVCacheBytes,
+		ProducerMemory:                      producer.Memory,
+		ConsumerMemory:                      consumer.Memory,
 	}
-	sample.BoundarySerializationMicros = time.Since(serializationStarted).Microseconds()
 	if reference != nil {
 		sample.ReferenceWallMicros = referenceWallMicros
 		sample.ReferenceComputeMicros = reference.ComputeMicros
@@ -809,6 +838,7 @@ func infer(
 	position uint64,
 	inputKind string,
 	input workerproc.WireTensor,
+	returnSampledToken bool,
 ) (*workerproc.PersistentForwardResult, error) {
 	deadline, hasDeadline := ctx.Deadline()
 	if !hasDeadline {
@@ -818,7 +848,7 @@ func infer(
 		Command: command, DeadlineUnixMillis: workerproc.WireDeadlineUnixMillis(deadline),
 		Forward: &workerproc.PersistentForwardRequest{
 			ShardID: shardID, SequenceID: sequenceID, Position: position,
-			InputKind: inputKind, Input: input,
+			InputKind: inputKind, Input: input, ReturnSampledToken: returnSampledToken,
 		},
 	})
 	if err != nil {
@@ -832,6 +862,19 @@ func infer(
 		return nil, fmt.Errorf(
 			"%s returned inconsistent metadata: operation=%s position=%d kv=%d",
 			command, result.Operation, result.Position, result.KVCacheBytes,
+		)
+	}
+	if returnSampledToken {
+		if result.SampledTokenID == nil || len(result.Output.Data) != 0 {
+			return nil, fmt.Errorf(
+				"%s returned an invalid sampled-token response: token=%v outputBytes=%d",
+				command, result.SampledTokenID, len(result.Output.Data),
+			)
+		}
+	} else if result.SampledTokenID != nil || len(result.Output.Data) == 0 {
+		return nil, fmt.Errorf(
+			"%s returned an invalid tensor response: token=%v outputBytes=%d",
+			command, result.SampledTokenID, len(result.Output.Data),
 		)
 	}
 	return result, nil

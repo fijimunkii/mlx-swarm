@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"slices"
 	"time"
 
 	"github.com/fijimunkii/mlx-swarm/internal/benchmark"
@@ -89,7 +90,17 @@ type outputSummary struct {
 	Decode        benchmark.StageSummary   `json:"decode"`
 	Memory        memorySummary            `json:"memory"`
 	Verification  verificationSummary      `json:"verification"`
+	TokenOnly     tokenOnlySummary         `json:"tokenOnly"`
 	Samples       []generation.StageSample `json:"samples"`
+}
+
+type tokenOnlySummary struct {
+	SessionSetupMicros     int64                    `json:"sessionSetupMicrosExcluded"`
+	GeneratedTokenIDsMatch bool                     `json:"generatedTokenIDsMatch"`
+	GeneratedTokenCount    int                      `json:"generatedTokenCount"`
+	Prefill                benchmark.StageSummary   `json:"prefill"`
+	Decode                 benchmark.StageSummary   `json:"decode"`
+	Samples                []generation.StageSample `json:"samples"`
 }
 
 type sampleCollector struct {
@@ -237,6 +248,48 @@ func run() error {
 			len(prefill), len(decode), *prefillSamples, *decodeSamples,
 		)
 	}
+
+	tokenCollector := &sampleCollector{enabled: true}
+	tokenSession, err := generation.NewSession(
+		ctx, producer.Caller, consumer.Caller, nil,
+		generation.SessionConfig{
+			Model: *model, ForwardTimeout: *forwardTimeout,
+			TerminalSampling: true, Observer: tokenCollector.observe,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("token-only session: %w", err)
+	}
+	var tokenMeasured generation.Result
+	for index := 0; index < *prefillSamples; index++ {
+		maxTokens := 1
+		if index == *prefillSamples-1 {
+			maxTokens = *decodeSamples + 1
+		}
+		tokenMeasured, err = tokenSession.Generate(ctx, generation.Request{
+			Prompt: *prompt, MaxTokens: maxTokens,
+			SequenceID: fmt.Sprintf("benchmark-token-only-%d", index), IgnoreEOS: true,
+		})
+		if err != nil {
+			return fmt.Errorf("token-only measurement %d: %w", index+1, err)
+		}
+		if tokenMeasured.StopReason != "max_tokens" || len(tokenMeasured.GeneratedTokenIDs) != maxTokens {
+			return fmt.Errorf(
+				"token-only measurement %d produced %d tokens and stopped on %s",
+				index+1, len(tokenMeasured.GeneratedTokenIDs), tokenMeasured.StopReason,
+			)
+		}
+	}
+	tokenPrefill, tokenDecode := splitSamples(tokenCollector.samples)
+	if len(tokenPrefill) != *prefillSamples || len(tokenDecode) != *decodeSamples {
+		return fmt.Errorf(
+			"recorded token-only prefill/decode samples %d/%d, want %d/%d",
+			len(tokenPrefill), len(tokenDecode), *prefillSamples, *decodeSamples,
+		)
+	}
+	if !slices.Equal(tokenMeasured.GeneratedTokenIDs, measured.GeneratedTokenIDs) {
+		return errors.New("token-only generation did not match full-logit generation")
+	}
 	if err := smoke.RequireNoSequenceState(ctx, producer.Caller, consumer.Caller, reference.Caller); err != nil {
 		return err
 	}
@@ -245,8 +298,11 @@ func run() error {
 		return err
 	}
 	hostname, _ := os.Hostname()
+	allSamples := make([]generation.StageSample, 0, len(collector.samples)+len(tokenCollector.samples))
+	allSamples = append(allSamples, collector.samples...)
+	allSamples = append(allSamples, tokenCollector.samples...)
 	summary := outputSummary{
-		SchemaVersion: "1", RecordedAt: time.Now().UTC(),
+		SchemaVersion: "2", RecordedAt: time.Now().UTC(),
 		Configuration: configuration{
 			Model: info.Model.ModelID, ModelType: info.Model.ModelType,
 			CheckpointFingerprint: info.Model.CheckpointFingerprint,
@@ -269,11 +325,19 @@ func run() error {
 		},
 		Prefill: benchmark.Summarize(prefill), Decode: benchmark.Summarize(decode),
 		Memory: memorySummary{
-			Producer:  memoryForRole(loadedMemory[0], finalStates[0], collector.samples, "producer"),
-			Consumer:  memoryForRole(loadedMemory[1], finalStates[1], collector.samples, "consumer"),
-			Reference: memoryForRole(loadedMemory[2], finalStates[2], collector.samples, "reference"),
+			Producer:  memoryForRole(loadedMemory[0], finalStates[0], allSamples, "producer"),
+			Consumer:  memoryForRole(loadedMemory[1], finalStates[1], allSamples, "consumer"),
+			Reference: memoryForRole(loadedMemory[2], finalStates[2], allSamples, "reference"),
 		},
-		Verification: verification, Samples: collector.samples,
+		Verification: verification,
+		TokenOnly: tokenOnlySummary{
+			SessionSetupMicros:     tokenSession.Info().SessionSetupMicros,
+			GeneratedTokenIDsMatch: true,
+			GeneratedTokenCount:    len(tokenMeasured.GeneratedTokenIDs),
+			Prefill:                benchmark.Summarize(tokenPrefill), Decode: benchmark.Summarize(tokenDecode),
+			Samples: tokenCollector.samples,
+		},
+		Samples: collector.samples,
 	}
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")

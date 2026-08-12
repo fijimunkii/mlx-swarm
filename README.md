@@ -92,12 +92,15 @@ go run ./cmd/swarm-generate \
 ```
 
 The command resolves the checkpoint's registered adapter and layer count,
-tokenizes with that checkpoint's tokenizer, prefills both shards once, chooses
-each next token by deterministic greedy decoding, and returns JSON containing
+tokenizes with that checkpoint's tokenizer, prefills both shards once, has the
+output-owning shard choose each next token by deterministic greedy decoding,
+and returns JSON containing
 the prompt and generated token IDs, decoded text, model and shard plan,
 sequence ID, EOS/max stop reason, KV bytes, timings, and numerical tolerance.
-Add `-verify` to compare every distributed logit vector and greedy token with a
-separate full-checkpoint cached reference.
+Normal serving returns only that token from the terminal shard instead of
+serializing the full vocabulary logits. Add `-verify` to retain full logits and
+compare every distributed vector and greedy token with a separate
+full-checkpoint cached reference.
 
 Direct mode starts temporary local workers. To keep weights resident across
 separate command invocations, run `swarmd` on both Macs and address both
@@ -212,9 +215,12 @@ produces a 7,680-byte `bfloat16` boundary and logits shaped `[1, 6, 262144]`.
 
 `swarm-benchmark` separates model setup and an explicit warmup from measured
 work. By default it records five fresh-sequence prefills and 100 cached decode
-steps. Each distributed sample reports producer wall/compute time,
+steps for both the verified full-logit path and the token-only serving path.
+The two paths must generate the exact same token IDs. Each sample reports
+producer wall/compute time,
 representative boundary JSON serialization, consumer round-trip/compute time,
-transport overhead, end-to-end token latency, tensor/wire bytes, and memory.
+transport overhead, end-to-end token latency, boundary and terminal-response
+tensor/wire bytes, and memory.
 The cached full-model oracle receives the identical prompt and greedy token
 plan but runs outside the distributed hot-path timer. JSON contains both raw
 samples and nearest-rank p50/p95 summaries; CI uploads it as an artifact and

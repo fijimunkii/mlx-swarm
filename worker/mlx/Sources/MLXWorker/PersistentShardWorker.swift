@@ -45,6 +45,7 @@ struct PersistentForwardRequest: Codable {
     let position: UInt64
     let inputKind: String
     let input: WireTensor
+    let returnSampledToken: Bool?
 }
 
 struct PersistentModelRequest: Codable {
@@ -114,6 +115,7 @@ struct PersistentForwardResult: Codable {
     let position: UInt64
     let nextPosition: UInt64
     let output: WireTensor
+    let sampledTokenID: Int32?
     let computeMicros: UInt64
     let kvCacheBytes: Int
     let memory: StageMemory
@@ -225,6 +227,11 @@ private final class PersistentSequenceState {
     }
 }
 
+private enum PersistentMutationOutcome {
+    case success(PersistentForwardResult)
+    case failure(String)
+}
+
 private struct PersistentCompletedMutation {
     let operation: String
     let position: UInt64
@@ -232,7 +239,8 @@ private struct PersistentCompletedMutation {
     let inputShape: [Int]
     let inputDType: WireTensor.ElementType
     let inputDigest: Data
-    let result: PersistentForwardResult
+    let returnSampledToken: Bool
+    let outcome: PersistentMutationOutcome
 
     init(
         operation: String,
@@ -245,7 +253,46 @@ private struct PersistentCompletedMutation {
         self.inputShape = request.input.shape
         self.inputDType = request.input.dtype
         self.inputDigest = Data(SHA256.hash(data: request.input.data))
-        self.result = result
+        self.returnSampledToken = request.returnSampledToken == true
+        self.outcome = .success(result)
+    }
+
+    init(
+        operation: String,
+        request: PersistentForwardRequest,
+        failureReason: String
+    ) {
+        self.operation = operation
+        self.position = request.position
+        self.inputKind = request.inputKind
+        self.inputShape = request.input.shape
+        self.inputDType = request.input.dtype
+        self.inputDigest = Data(SHA256.hash(data: request.input.data))
+        self.returnSampledToken = request.returnSampledToken == true
+        self.outcome = .failure(failureReason)
+    }
+
+    var isFailure: Bool {
+        if case .failure = outcome {
+            return true
+        }
+        return false
+    }
+
+    var result: PersistentForwardResult? {
+        if case .success(let result) = outcome {
+            return result
+        }
+        return nil
+    }
+
+    func replay() throws -> PersistentForwardResult {
+        switch outcome {
+        case .success(let result):
+            return result
+        case .failure(let reason):
+            throw PersistentWorkerError.invalidRequest(reason)
+        }
     }
 
     func matches(operation: String, request: PersistentForwardRequest) -> Bool {
@@ -254,6 +301,7 @@ private struct PersistentCompletedMutation {
             && inputKind == request.inputKind
             && inputShape == request.input.shape
             && inputDType == request.input.dtype
+            && returnSampledToken == (request.returnSampledToken == true)
             && inputDigest == Data(SHA256.hash(data: request.input.data))
     }
 }
@@ -635,11 +683,21 @@ final class PersistentShardService {
         guard let sequence = shard.sequences[request.sequenceID] else {
             throw PersistentWorkerError.sequenceNotFound(request.shardID, request.sequenceID)
         }
-        if operation != "forward",
-           let completed = sequence.completedMutation,
-           completed.matches(operation: operation, request: request)
-        {
-            return completed.result
+        if request.returnSampledToken == true && !shard.ownsOutput {
+            throw PersistentWorkerError.invalidRequest(
+                "returnSampledToken requires an output-owning shard"
+            )
+        }
+        if operation != "forward", let completed = sequence.completedMutation {
+            if completed.matches(operation: operation, request: request) {
+                return try completed.replay()
+            }
+            if completed.isFailure {
+                throw PersistentWorkerError.invalidRequest(
+                    "sequence \(request.sequenceID) cannot continue after failed "
+                        + "\(completed.operation); close it before retrying"
+                )
+            }
         }
 
         let input: MLXArray
@@ -735,7 +793,33 @@ final class PersistentShardService {
         default:
             throw PersistentWorkerError.invalidRequest("unknown inference operation \(operation)")
         }
-        let tensor = WireTensor(output)
+        let tensor: WireTensor
+        let sampledTokenID: Int32?
+        if request.returnSampledToken == true {
+            let finalLogits = output[0..., -1, 0...]
+            guard !isNaN(finalLogits).any().item(Bool.self) else {
+                throw recordMutationFailure(
+                    "cannot sample logits containing NaN",
+                    operation: operation,
+                    request: request,
+                    sequence: sequence
+                )
+            }
+            let token = argMax(finalLogits, axis: -1).item(Int32.self)
+            guard token >= 0 else {
+                throw recordMutationFailure(
+                    "sampled token ID must be non-negative, got \(token)",
+                    operation: operation,
+                    request: request,
+                    sequence: sequence
+                )
+            }
+            tensor = .empty
+            sampledTokenID = token
+        } else {
+            tensor = WireTensor(output)
+            sampledTokenID = nil
+        }
         let elapsed = DispatchTime.now().uptimeNanoseconds - start
         shard.forwardCount += 1
         forwardCount += 1
@@ -746,6 +830,7 @@ final class PersistentShardService {
             position: request.position,
             nextPosition: UInt64(sequence.nextPosition),
             output: tensor,
+            sampledTokenID: sampledTokenID,
             computeMicros: elapsed / 1_000,
             kvCacheBytes: sequence.cache.memoryBytes,
             memory: CheckpointMemory.snapshot()
@@ -758,6 +843,22 @@ final class PersistentShardService {
             )
         }
         return result
+    }
+
+    private func recordMutationFailure(
+        _ reason: String,
+        operation: String,
+        request: PersistentForwardRequest,
+        sequence: PersistentSequenceState
+    ) -> PersistentWorkerError {
+        if operation == "prefill" || operation == "decode" {
+            sequence.completedMutation = PersistentCompletedMutation(
+                operation: operation,
+                request: request,
+                failureReason: reason
+            )
+        }
+        return .invalidRequest(reason)
     }
 
     private func validatePosition(
@@ -960,9 +1061,17 @@ final class PersistentShardService {
     }
 
     private func retainedBytes(sequence: PersistentSequenceState) -> Int {
-        saturatedAdd(
+        let replayBytes: Int
+        if let result = sequence.completedMutation?.result {
+            replayBytes = result.sampledTokenID == nil
+                ? result.output.data.count
+                : MemoryLayout<Int32>.size
+        } else {
+            replayBytes = 0
+        }
+        return saturatedAdd(
             sequence.cache.memoryBytes,
-            sequence.completedMutation?.result.output.data.count ?? 0
+            replayBytes
         )
     }
 

@@ -78,6 +78,14 @@ struct WireTensor: Codable {
     let dtype: ElementType
     let data: Data
 
+    static let empty = WireTensor(shape: [0], dtype: .uint8, data: Data())
+
+    private init(shape: [Int], dtype: ElementType, data: Data) {
+        self.shape = shape
+        self.dtype = dtype
+        self.data = data
+    }
+
     init(_ array: MLXArray) {
         let payload = array.asData(access: .copy)
         self.shape = payload.shape
