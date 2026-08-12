@@ -25,17 +25,18 @@ The checked-in reference at
 pins checkpoint fingerprint
 `3d9c541c1a66ed7ff266deea20dabb70c19365e10d304b528dad2e13330a387c`.
 An upstream full-model run on a 24 GiB Apple M4 measured a maximum MLX
-footprint of 10,608,178,912 bytes. Both that footprint and the checkpoint byte
-count exceed either serving worker's 7 GiB physical memory. The same reference
-run proved exact logit and greedy-token parity before the token plan was
-recorded.
+footprint of 10,608,178,912 bytes and a macOS lifetime process peak of
+21,726,789,496 bytes. Both the MLX footprint and checkpoint byte count exceed
+either serving worker's 7 GiB physical memory. The same reference run proved
+exact logit and greedy-token parity before the token plan was recorded.
 
 Standard GitHub-hosted Apple-silicon macOS runners expose 7 GB RAM. The 6 GiB
 MLX `memoryLimit` value is an allocator scheduling threshold, not a hard
 allocation cap, so the proof does not rely on it to establish impossibility.
 It leaves the VM and control-plane processes headroom while the `Pooled Memory
 Proof` workflow records actual physical memory, the configured threshold, and
-load/prefill/decode peaks from both fresh runners in its JSON artifact.
+both MLX allocator and macOS process peaks during load/prefill/decode from both
+fresh runners in its JSON artifact. A missing process measurement fails closed.
 
 ## Prepare both Macs
 
@@ -97,12 +98,12 @@ fails unless:
 
 - the two resolved checkpoint fingerprints and byte counts match the reference;
 - the full checkpoint and measured full inference footprint exceed both workers' physical memory;
-- each serving worker's observed load, prefill, and decode footprint stays within its physical memory;
+- each serving worker's macOS lifetime process peak stays within its physical memory through load, prefill, and decode;
 - the serving workers retain only complementary ranges, never a full range;
 - all 32 greedy tokens match the upstream reference; and
 - both sequence caches and retained mutation outputs return to zero.
 
-The JSON preserves hardware inventory, shard ownership, phase memory,
+The JSON preserves hardware inventory, shard ownership, phase MLX/process memory,
 generation timings, token IDs, teardown state, and every acceptance check.
 After capturing that evidence, the command unloads both proof-owned shards on
 success or failure so the same clean daemons can run the proof again.

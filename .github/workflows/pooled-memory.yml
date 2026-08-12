@@ -196,12 +196,12 @@ jobs:
             echo '| Metric | Value |'
             echo '|---|---:|'
             printf '| Checkpoint bytes | %.3f GiB |\n' "$(jq -r '.checkpointBytes / 1073741824' "$result")"
-            printf '| Full-model measured footprint | %.3f GiB |\n' "$(jq -r '.reference.fullCheckpointMemory.maxObservedBytes / 1073741824' "$result")"
+            printf '| Full-model process peak | %.3f GiB |\n' "$(jq -r '.reference.fullCheckpointMemory.maxProcessPhysicalBytes / 1073741824' "$result")"
             printf '| Producer physical memory | %.3f GiB |\n' "$(jq -r '.producer.capabilities.physicalMemoryBytes / 1073741824' "$result")"
             printf '| Consumer physical memory | %.3f GiB |\n' "$(jq -r '.consumer.capabilities.physicalMemoryBytes / 1073741824' "$result")"
             printf '| MLX scheduling threshold | %.3f GiB |\n' "$(jq -r '.configuredMLXMemoryThresholdBytes / 1073741824' "$result")"
-            printf '| Producer maximum | %.3f GiB |\n' "$(jq -r '.producer.memory.maxObservedBytes / 1073741824' "$result")"
-            printf '| Consumer maximum | %.3f GiB |\n' "$(jq -r '.consumer.memory.maxObservedBytes / 1073741824' "$result")"
+            printf '| Producer process peak | %.3f GiB |\n' "$(jq -r '.producer.memory.maxProcessPhysicalBytes / 1073741824' "$result")"
+            printf '| Consumer process peak | %.3f GiB |\n' "$(jq -r '.consumer.memory.maxProcessPhysicalBytes / 1073741824' "$result")"
             printf '| Generated tokens | %s |\n' "$(jq -r '.generation.generatedTokenIDs | length' "$result")"
             printf '| Deterministic reference | **%s** |\n' "$(jq -r 'if .checks.generatedTokensMatchReference then "MATCH" else "MISMATCH" end' "$result")"
             printf '| Serving full-model oracle | **%s** |\n' "$(jq -r 'if .checks.noServingFullModelOracle then "NONE" else "PRESENT" end' "$result")"

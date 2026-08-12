@@ -59,19 +59,26 @@
     "load": {
       "activeBytes": 10381325104,
       "cacheBytes": 0,
-      "peakBytes": 10381325104
+      "peakBytes": 10381325104,
+      "processPhysicalBytes": 21713157984,
+      "processPeakPhysicalBytes": 21713420128
     },
     "prefill": {
       "activeBytes": 10458133360,
       "cacheBytes": 15863074,
-      "peakBytes": 10471805082
+      "peakBytes": 10471805082,
+      "processPhysicalBytes": 10736394568,
+      "processPeakPhysicalBytes": 21726789496
     },
     "decode": {
       "activeBytes": 10536776520,
       "cacheBytes": 47601486,
-      "peakBytes": 10560577426
+      "peakBytes": 10560577426,
+      "processPhysicalBytes": 10882687328,
+      "processPeakPhysicalBytes": 21726789496
     },
-    "maxObservedBytes": 10608178912
+    "maxObservedBytes": 10608178912,
+    "maxProcessPhysicalBytes": 21726789496
   },
   "sourceHardware": {
     "runtime": "mlx-swift",

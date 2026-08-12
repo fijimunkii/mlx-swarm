@@ -33,10 +33,10 @@ func TestCheckedInReferenceIsValid(t *testing.T) {
 			runnerPhysicalBytes,
 		)
 	}
-	if uint64(reference.FullCheckpointMemory.MaxObservedBytes) <= runnerPhysicalBytes {
+	if reference.FullCheckpointMemory.MaxProcessPhysicalBytes <= runnerPhysicalBytes {
 		t.Fatalf(
-			"full inference uses %d bytes, want more than a 7 GiB runner's %d",
-			reference.FullCheckpointMemory.MaxObservedBytes,
+			"full-model process uses %d bytes, want more than a 7 GiB runner's %d",
+			reference.FullCheckpointMemory.MaxProcessPhysicalBytes,
 			runnerPhysicalBytes,
 		)
 	}
@@ -286,20 +286,28 @@ func newProofWorkerServer(
 	}
 }
 
-func TestMemoryEvidenceUsesPeakPlusCache(t *testing.T) {
-	evidence := MemoryEvidence{Load: workerproc.StageMemory{ActiveBytes: 40, PeakBytes: 40}}
+func TestMemoryEvidenceUsesMLXAndProcessPeaks(t *testing.T) {
+	evidence := MemoryEvidence{Load: workerproc.StageMemory{
+		ActiveBytes: 40, PeakBytes: 40,
+		ProcessPhysicalBytes: 100, ProcessPeakPhysicalBytes: 110,
+	}}
 	updateMaxObserved(&evidence, evidence.Load)
 	observePhase(&evidence, "prefill", workerproc.StageMemory{
 		ActiveBytes: 50, CacheBytes: 7, PeakBytes: 100,
+		ProcessPhysicalBytes: 120, ProcessPeakPhysicalBytes: 130,
 	})
 	observePhase(&evidence, "decode", workerproc.StageMemory{
 		ActiveBytes: 80, CacheBytes: 9, PeakBytes: 120,
+		ProcessPhysicalBytes: 140, ProcessPeakPhysicalBytes: 150,
 	})
 	if evidence.MaxObservedBytes != 129 {
 		t.Fatalf("max observed = %d, want 129", evidence.MaxObservedBytes)
 	}
 	if evidence.Prefill.PeakBytes != 100 || evidence.Decode.PeakBytes != 120 {
 		t.Fatalf("unexpected phase evidence: %+v", evidence)
+	}
+	if evidence.MaxProcessPhysicalBytes != 150 {
+		t.Fatalf("max process physical = %d, want 150", evidence.MaxProcessPhysicalBytes)
 	}
 	if !completeMemoryEvidence(evidence) {
 		t.Fatalf("complete evidence was rejected: %+v", evidence)

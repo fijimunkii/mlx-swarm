@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Darwin
 import HuggingFace
 import MLX
 import MLXHuggingFace
@@ -9,6 +10,8 @@ struct StageMemory: Codable {
     let activeBytes: Int
     let cacheBytes: Int
     let peakBytes: Int
+    let processPhysicalBytes: UInt64
+    let processPeakPhysicalBytes: UInt64
 }
 
 struct CheckpointShardResult: Codable {
@@ -182,10 +185,20 @@ enum CheckpointShardError: LocalizedError {
 enum CheckpointMemory {
     static func snapshot() -> StageMemory {
         let snapshot = Memory.snapshot()
+        var usage = rusage_info_v4()
+        let status = withUnsafeMutablePointer(to: &usage) { pointer in
+            pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                proc_pid_rusage(getpid(), RUSAGE_INFO_V4, $0)
+            }
+        }
         return StageMemory(
             activeBytes: snapshot.activeMemory,
             cacheBytes: snapshot.cacheMemory,
-            peakBytes: snapshot.peakMemory
+            peakBytes: snapshot.peakMemory,
+            processPhysicalBytes: status == 0 ? usage.ri_phys_footprint : 0,
+            processPeakPhysicalBytes: status == 0
+                ? usage.ri_lifetime_max_phys_footprint
+                : 0
         )
     }
 }

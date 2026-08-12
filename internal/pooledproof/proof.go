@@ -36,10 +36,11 @@ type Capabilities struct {
 }
 
 type MemoryEvidence struct {
-	Load             workerproc.StageMemory `json:"load"`
-	Prefill          workerproc.StageMemory `json:"prefill"`
-	Decode           workerproc.StageMemory `json:"decode"`
-	MaxObservedBytes int                    `json:"maxObservedBytes"`
+	Load                    workerproc.StageMemory `json:"load"`
+	Prefill                 workerproc.StageMemory `json:"prefill"`
+	Decode                  workerproc.StageMemory `json:"decode"`
+	MaxObservedBytes        int                    `json:"maxObservedBytes"`
+	MaxProcessPhysicalBytes uint64                 `json:"maxProcessPhysicalBytes"`
 }
 
 type Reference struct {
@@ -75,8 +76,8 @@ type Checks struct {
 	FullInferenceExceedsConsumerPhysicalMemory bool `json:"fullInferenceExceedsConsumerPhysicalMemory"`
 	ProducerUsesConfiguredMLXThreshold         bool `json:"producerUsesConfiguredMLXThreshold"`
 	ConsumerUsesConfiguredMLXThreshold         bool `json:"consumerUsesConfiguredMLXThreshold"`
-	ProducerWithinPhysicalMemory               bool `json:"producerWithinPhysicalMemory"`
-	ConsumerWithinPhysicalMemory               bool `json:"consumerWithinPhysicalMemory"`
+	ProducerProcessWithinPhysicalMemory        bool `json:"producerProcessWithinPhysicalMemory"`
+	ConsumerProcessWithinPhysicalMemory        bool `json:"consumerProcessWithinPhysicalMemory"`
 	ComplementaryShardsOnly                    bool `json:"complementaryShardsOnly"`
 	NoServingFullModelOracle                   bool `json:"noServingFullModelOracle"`
 	PromptTokensMatchReference                 bool `json:"promptTokensMatchReference"`
@@ -410,18 +411,18 @@ func Run(ctx context.Context, reference Reference, config RunConfig) (result Res
 			generated.ModelType == reference.ModelType && info.Model.LayerCount == reference.LayerCount,
 		CheckpointExceedsProducerPhysicalMemory:    reference.CheckpointBytes > producerCapabilities.PhysicalMemoryBytes,
 		CheckpointExceedsConsumerPhysicalMemory:    reference.CheckpointBytes > consumerCapabilities.PhysicalMemoryBytes,
-		FullInferenceExceedsProducerPhysicalMemory: uint64(reference.FullCheckpointMemory.MaxObservedBytes) > producerCapabilities.PhysicalMemoryBytes,
-		FullInferenceExceedsConsumerPhysicalMemory: uint64(reference.FullCheckpointMemory.MaxObservedBytes) > consumerCapabilities.PhysicalMemoryBytes,
+		FullInferenceExceedsProducerPhysicalMemory: reference.FullCheckpointMemory.MaxProcessPhysicalBytes > producerCapabilities.PhysicalMemoryBytes,
+		FullInferenceExceedsConsumerPhysicalMemory: reference.FullCheckpointMemory.MaxProcessPhysicalBytes > consumerCapabilities.PhysicalMemoryBytes,
 		ProducerUsesConfiguredMLXThreshold: configuredMLXThreshold(
 			producerCapabilities, producerInitial, config.ExpectedMemoryThresholdBytes,
 		),
 		ConsumerUsesConfiguredMLXThreshold: configuredMLXThreshold(
 			consumerCapabilities, consumerInitial, config.ExpectedMemoryThresholdBytes,
 		),
-		ProducerWithinPhysicalMemory: completeMemoryEvidence(producerEvidence.Memory) &&
-			uint64(producerEvidence.Memory.MaxObservedBytes) <= producerCapabilities.PhysicalMemoryBytes,
-		ConsumerWithinPhysicalMemory: completeMemoryEvidence(consumerEvidence.Memory) &&
-			uint64(consumerEvidence.Memory.MaxObservedBytes) <= consumerCapabilities.PhysicalMemoryBytes,
+		ProducerProcessWithinPhysicalMemory: completeMemoryEvidence(producerEvidence.Memory) &&
+			producerEvidence.Memory.MaxProcessPhysicalBytes <= producerCapabilities.PhysicalMemoryBytes,
+		ConsumerProcessWithinPhysicalMemory: completeMemoryEvidence(consumerEvidence.Memory) &&
+			consumerEvidence.Memory.MaxProcessPhysicalBytes <= consumerCapabilities.PhysicalMemoryBytes,
 		ComplementaryShardsOnly:       complementary,
 		NoServingFullModelOracle:      noOracle,
 		PromptTokensMatchReference:    slices.Equal(generated.PromptTokenIDs, reference.PromptTokenIDs),
@@ -544,6 +545,11 @@ func updateMaxObserved(evidence *MemoryEvidence, memory workerproc.StageMemory) 
 	activeAndCache := saturatedAdd(memory.ActiveBytes, memory.CacheBytes)
 	peakAndCache := saturatedAdd(memory.PeakBytes, memory.CacheBytes)
 	evidence.MaxObservedBytes = max(evidence.MaxObservedBytes, activeAndCache, peakAndCache)
+	evidence.MaxProcessPhysicalBytes = max(
+		evidence.MaxProcessPhysicalBytes,
+		memory.ProcessPhysicalBytes,
+		memory.ProcessPeakPhysicalBytes,
+	)
 }
 
 func maximumMemory(left, right workerproc.StageMemory) workerproc.StageMemory {
@@ -551,20 +557,31 @@ func maximumMemory(left, right workerproc.StageMemory) workerproc.StageMemory {
 		ActiveBytes: max(left.ActiveBytes, right.ActiveBytes),
 		CacheBytes:  max(left.CacheBytes, right.CacheBytes),
 		PeakBytes:   max(left.PeakBytes, right.PeakBytes),
+		ProcessPhysicalBytes: max(
+			left.ProcessPhysicalBytes, right.ProcessPhysicalBytes,
+		),
+		ProcessPeakPhysicalBytes: max(
+			left.ProcessPeakPhysicalBytes, right.ProcessPeakPhysicalBytes,
+		),
 	}
 }
 
 func completeMemoryEvidence(evidence MemoryEvidence) bool {
 	return validMemory(evidence.Load) && validMemory(evidence.Prefill) &&
 		validMemory(evidence.Decode) && evidence.MaxObservedBytes > 0 &&
+		evidence.MaxProcessPhysicalBytes > 0 &&
 		evidence.MaxObservedBytes >= saturatedAdd(evidence.Load.PeakBytes, evidence.Load.CacheBytes) &&
 		evidence.MaxObservedBytes >= saturatedAdd(evidence.Prefill.PeakBytes, evidence.Prefill.CacheBytes) &&
-		evidence.MaxObservedBytes >= saturatedAdd(evidence.Decode.PeakBytes, evidence.Decode.CacheBytes)
+		evidence.MaxObservedBytes >= saturatedAdd(evidence.Decode.PeakBytes, evidence.Decode.CacheBytes) &&
+		evidence.MaxProcessPhysicalBytes >= evidence.Load.ProcessPeakPhysicalBytes &&
+		evidence.MaxProcessPhysicalBytes >= evidence.Prefill.ProcessPeakPhysicalBytes &&
+		evidence.MaxProcessPhysicalBytes >= evidence.Decode.ProcessPeakPhysicalBytes
 }
 
 func validMemory(memory workerproc.StageMemory) bool {
 	return memory.ActiveBytes > 0 && memory.CacheBytes >= 0 &&
-		memory.PeakBytes >= memory.ActiveBytes
+		memory.PeakBytes >= memory.ActiveBytes && memory.ProcessPhysicalBytes > 0 &&
+		memory.ProcessPeakPhysicalBytes >= memory.ProcessPhysicalBytes
 }
 
 func saturatedAdd(left, right int) int {
@@ -620,7 +637,7 @@ func allChecksPassed(checks Checks) bool {
 		checks.CheckpointExceedsProducerPhysicalMemory && checks.CheckpointExceedsConsumerPhysicalMemory &&
 		checks.FullInferenceExceedsProducerPhysicalMemory && checks.FullInferenceExceedsConsumerPhysicalMemory &&
 		checks.ProducerUsesConfiguredMLXThreshold && checks.ConsumerUsesConfiguredMLXThreshold &&
-		checks.ProducerWithinPhysicalMemory && checks.ConsumerWithinPhysicalMemory &&
+		checks.ProducerProcessWithinPhysicalMemory && checks.ConsumerProcessWithinPhysicalMemory &&
 		checks.ComplementaryShardsOnly && checks.NoServingFullModelOracle &&
 		checks.PromptTokensMatchReference && checks.GeneratedTokensMatchReference &&
 		checks.GeneratedAtLeastMinimumTokens && checks.SequenceStateReleased

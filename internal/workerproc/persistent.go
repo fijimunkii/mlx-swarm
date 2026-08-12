@@ -173,9 +173,11 @@ type PersistentWorkerState struct {
 }
 
 type StageMemory struct {
-	ActiveBytes int `json:"activeBytes"`
-	CacheBytes  int `json:"cacheBytes"`
-	PeakBytes   int `json:"peakBytes"`
+	ActiveBytes              int    `json:"activeBytes"`
+	CacheBytes               int    `json:"cacheBytes"`
+	PeakBytes                int    `json:"peakBytes"`
+	ProcessPhysicalBytes     uint64 `json:"processPhysicalBytes"`
+	ProcessPeakPhysicalBytes uint64 `json:"processPeakPhysicalBytes"`
 }
 
 type WorkerResponseError struct {
