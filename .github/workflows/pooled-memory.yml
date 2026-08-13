@@ -6,22 +6,30 @@ on:
     branches: [main]
     paths:
       - 'cmd/swarm-pooled-memory/**'
+      - 'cmd/swarm-scale/**'
       - 'internal/pooledproof/**'
+      - 'internal/scaleproof/**'
       - 'internal/generation/**'
       - 'internal/workerproc/**'
       - 'worker/mlx/**'
       - 'testdata/pooled-memory/**'
       - 'docs/distributed-inference-proof.md'
+      - 'docs/five-mac-scale-proof.md'
+      - '.github/workflows/five-mac-scale.yml'
       - '.github/workflows/pooled-memory.yml'
   pull_request:
     paths:
       - 'cmd/swarm-pooled-memory/**'
+      - 'cmd/swarm-scale/**'
       - 'internal/pooledproof/**'
+      - 'internal/scaleproof/**'
       - 'internal/generation/**'
       - 'internal/workerproc/**'
       - 'worker/mlx/**'
       - 'testdata/pooled-memory/**'
       - 'docs/distributed-inference-proof.md'
+      - 'docs/five-mac-scale-proof.md'
+      - '.github/workflows/five-mac-scale.yml'
       - '.github/workflows/pooled-memory.yml'
 
 permissions:
