@@ -331,10 +331,10 @@ func Run(ctx context.Context, reference Reference, config RunConfig) (result Res
 	defer func() {
 		cleanupErr := cleanupProofShards(
 			proofCleanupTarget{
-				Name: "producer", Caller: producer.Caller, ShardIDPrefix: "generate-producer-",
+				Name: "producer", Caller: producer.Caller, ShardIDPrefix: "generate-stage-",
 			},
 			proofCleanupTarget{
-				Name: "consumer", Caller: consumer.Caller, ShardIDPrefix: "generate-consumer-",
+				Name: "consumer", Caller: consumer.Caller, ShardIDPrefix: "generate-stage-",
 			},
 		)
 		if cleanupErr != nil {

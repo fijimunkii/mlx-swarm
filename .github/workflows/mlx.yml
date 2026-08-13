@@ -14,6 +14,7 @@ on:
       - 'cmd/swarm-benchmark/**'
       - 'cmd/swarm-generate/**'
       - 'cmd/swarm-generate-smoke/**'
+      - 'cmd/swarm-n-stage-smoke/**'
       - 'cmd/swarm-failure-smoke/**'
       - 'cmd/swarm-pooled-memory/**'
       - 'cmd/swarmd/**'
@@ -38,6 +39,7 @@ on:
       - 'cmd/swarm-benchmark/**'
       - 'cmd/swarm-generate/**'
       - 'cmd/swarm-generate-smoke/**'
+      - 'cmd/swarm-n-stage-smoke/**'
       - 'cmd/swarm-failure-smoke/**'
       - 'cmd/swarm-pooled-memory/**'
       - 'cmd/swarmd/**'
@@ -67,7 +69,7 @@ jobs:
   mlx-worker-macos-fork:
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -114,6 +116,31 @@ jobs:
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
           go run ./cmd/swarm-generate-smoke -worker "$worker"
+      - name: Prove five-stage verified and token-only generation
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          proof="$(go run ./cmd/swarm-n-stage-smoke -worker "$worker")"
+          printf '%s\n' "$proof"
+          printf '%s\n' "$proof" | jq -e '
+            (.schemaVersion == "1") and
+            (.stageCount == 5) and
+            (.generatedTokenCount >= 32) and
+            (.comparedTokens == .generatedTokenCount) and
+            .allFinalLogitsMatch and
+            .greedyTokenIDsMatch and
+            .servingTokenIDsMatchVerified and
+            .normalServingReturnsNoLogits and
+            .sequenceTeardownValidated and
+            ((.verificationPlan.stages | length) == 5) and
+            ((.servingPlan.stages | length) == 5) and
+            ((.verificationEvidence.stages | length) == 5) and
+            ((.servingEvidence.stages | length) == 5) and
+            all(.verificationEvidence.stages[]; (.sampleCount >= 32) and (.maxKVCacheBytes > 0)) and
+            all(.servingEvidence.stages[]; (.sampleCount >= 32) and (.maxKVCacheBytes > 0)) and
+            all(.servingEvidence.stages[0:-1][]; .responseTensorBytes.maxBytes > 0) and
+            (.servingEvidence.stages[-1].responseTensorBytes.maxBytes == 0) and
+            all(.teardown[]; (.postRunKVCacheBytes == 0) and (.postRunRetainedBytes == 0))
+          ' >/dev/null
 
   mlx-receiver-macos:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -173,7 +200,7 @@ jobs:
   mlx-producer-macos:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -222,6 +249,31 @@ jobs:
         run: |
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
           go run ./cmd/swarm-generate-smoke -worker "$worker"
+      - name: Prove five-stage verified and token-only generation
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          proof="$(go run ./cmd/swarm-n-stage-smoke -worker "$worker")"
+          printf '%s\n' "$proof"
+          printf '%s\n' "$proof" | jq -e '
+            (.schemaVersion == "1") and
+            (.stageCount == 5) and
+            (.generatedTokenCount >= 32) and
+            (.comparedTokens == .generatedTokenCount) and
+            .allFinalLogitsMatch and
+            .greedyTokenIDsMatch and
+            .servingTokenIDsMatchVerified and
+            .normalServingReturnsNoLogits and
+            .sequenceTeardownValidated and
+            ((.verificationPlan.stages | length) == 5) and
+            ((.servingPlan.stages | length) == 5) and
+            ((.verificationEvidence.stages | length) == 5) and
+            ((.servingEvidence.stages | length) == 5) and
+            all(.verificationEvidence.stages[]; (.sampleCount >= 32) and (.maxKVCacheBytes > 0)) and
+            all(.servingEvidence.stages[]; (.sampleCount >= 32) and (.maxKVCacheBytes > 0)) and
+            all(.servingEvidence.stages[0:-1][]; .responseTensorBytes.maxBytes > 0) and
+            (.servingEvidence.stages[-1].responseTensorBytes.maxBytes == 0) and
+            all(.teardown[]; (.postRunKVCacheBytes == 0) and (.postRunRetainedBytes == 0))
+          ' >/dev/null
       - name: Connect producer to Tailscale
         uses: tailscale/github-action@v4
         with:
