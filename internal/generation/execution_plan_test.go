@@ -40,6 +40,37 @@ func TestBuildBalancedExecutionPlanFiveStages(t *testing.T) {
 	}
 }
 
+func TestBuildExecutionPlanSupportsExplicitOwnershipAwareRanges(t *testing.T) {
+	plan, err := BuildExecutionPlan(
+		testExecutionModel(48), "inventory-7",
+		[]ExecutionStage{
+			{Name: "stage-0", TargetID: "worker-0", ShardID: "ignored", LayerStart: 0, LayerEnd: 8, OwnsInput: true, ResponseMode: StageResponseTensor},
+			{Name: "stage-1", TargetID: "worker-1", LayerStart: 8, LayerEnd: 19, ResponseMode: StageResponseTensor},
+			{Name: "stage-2", TargetID: "worker-2", LayerStart: 19, LayerEnd: 29, ResponseMode: StageResponseTensor},
+			{Name: "stage-3", TargetID: "worker-3", LayerStart: 29, LayerEnd: 40, ResponseMode: StageResponseTensor},
+			{Name: "stage-4", TargetID: "worker-4", LayerStart: 40, LayerEnd: 48, OwnsOutput: true, ResponseMode: StageResponseSampledToken},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.InventoryRevision != "inventory-7" || plan.SchemaVersion == "" || plan.Revision == "" {
+		t.Fatalf("explicit plan omitted immutable identity: %+v", plan)
+	}
+	if plan.Stages[0].ShardID == "ignored" || plan.Stages[0].ShardID == "" {
+		t.Fatalf("explicit plan did not derive its shard identity: %+v", plan.Stages[0])
+	}
+	if got := [][2]int{
+		{plan.Stages[0].LayerStart, plan.Stages[0].LayerEnd},
+		{plan.Stages[1].LayerStart, plan.Stages[1].LayerEnd},
+		{plan.Stages[2].LayerStart, plan.Stages[2].LayerEnd},
+		{plan.Stages[3].LayerStart, plan.Stages[3].LayerEnd},
+		{plan.Stages[4].LayerStart, plan.Stages[4].LayerEnd},
+	}; !reflect.DeepEqual(got, [][2]int{{0, 8}, {8, 19}, {19, 29}, {29, 40}, {40, 48}}) {
+		t.Fatalf("explicit ranges = %v", got)
+	}
+}
+
 func TestBuildBalancedExecutionPlanIsDeterministic(t *testing.T) {
 	first, err := BuildBalancedExecutionPlan(
 		testExecutionModel(18), testExecutionTargetIDs(5), StageResponseTensor,

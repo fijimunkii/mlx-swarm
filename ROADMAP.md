@@ -178,7 +178,9 @@ Remove the current producer/consumer assumption before adding scheduling policy.
 Tracking: [#32](https://github.com/fijimunkii/mlx-swarm/issues/32)
 
 Use Linux for orchestration so every available macOS slot can perform real MLX
-inference.
+inference. Implementation and the canonical evidence contract are documented in
+[`docs/five-mac-scale-proof.md`](docs/five-mac-scale-proof.md); the checklist
+remains open until that workflow publishes a fully passing artifact.
 
 ```text
 Linux coordinator

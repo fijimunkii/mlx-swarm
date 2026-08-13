@@ -1,0 +1,232 @@
+name: Five Mac Scale Proof
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'cmd/swarm-scale/**'
+      - 'internal/scaleproof/**'
+      - 'internal/benchmark/**'
+      - 'internal/generation/**'
+      - 'internal/pooledproof/**'
+      - 'internal/workerproc/**'
+      - 'worker/mlx/**'
+      - 'testdata/pooled-memory/**'
+      - 'docs/five-mac-scale-proof.md'
+      - 'ROADMAP.md'
+      - '.github/workflows/five-mac-scale.yml'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: five-mac-scale-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SMALL_MODEL: mlx-community/gemma-3-270m-it-4bit
+  POOLED_MODEL: mlx-community/gemma-3-12b-it-4bit
+  MLX_SWARM_MEMORY_THRESHOLD_BYTES: '6442450944'
+  MLX_SWARM_CACHE_LIMIT_BYTES: '67108864'
+
+jobs:
+  mac-worker:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        index: [0, 1, 2, 3, 4]
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Fingerprint Swift toolchain
+        id: mlx-toolchain
+        run: |
+          toolchain="$( { xcodebuild -version; swift --version; } )"
+          printf '%s\n' "$toolchain"
+          fingerprint="$(printf '%s\n' "$toolchain" | shasum -a 256 | awk '{print $1}')"
+          printf 'fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Restore MLX build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            worker/mlx/.build/source-packages
+            worker/mlx/.build/xcode/Build
+          key: mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-${{ hashFiles('worker/mlx/Sources/**', 'scripts/build-mlx-worker.sh') }}
+          restore-keys: |
+            mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-
+      - name: Restore checkpoint cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface/hub
+          key: mlx-checkpoints-v1-gemma-270m-12b
+      - name: Build worker and prefetch checkpoints
+        run: |
+          ./scripts/build-mlx-worker.sh
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          "$worker" capabilities
+          "$worker" checkpoint-info "$SMALL_MODEL"
+          "$worker" checkpoint-info "$POOLED_MODEL"
+          df -h "$GITHUB_WORKSPACE"
+      - name: Connect worker to the private tailnet
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
+          args: --accept-dns=false
+          hostname: mesh-w${{ matrix.index }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Serve MLX until coordinator completion
+        run: |
+          worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          daemon="$RUNNER_TEMP/swarmd"
+          daemon_pid=""
+          watchdog_pid=""
+          cleanup() {
+            if [ -n "$watchdog_pid" ]; then
+              kill -TERM "$watchdog_pid" 2>/dev/null || true
+              wait "$watchdog_pid" 2>/dev/null || true
+            fi
+            if [ -n "$daemon_pid" ]; then
+              kill -TERM "$daemon_pid" 2>/dev/null || true
+              wait "$daemon_pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          go build -o "$daemon" ./cmd/swarmd
+          ts_ip="$(tailscale ip -4 | head -n 1)"
+          if [ -z "$ts_ip" ]; then
+            echo "Tailscale did not assign an IPv4 address" >&2
+            exit 1
+          fi
+          MLX_SWARM_WORKER="$worker" \
+            SWARMD_ADDR="${ts_ip}:8080" \
+            SWARMD_ALLOW_DEBUG_COMPLETE=1 \
+            "$daemon" &
+          daemon_pid=$!
+          (
+            sleep 3000
+            echo "five-Mac worker watchdog expired after 50 minutes" >&2
+            kill -TERM "$daemon_pid" 2>/dev/null || true
+          ) &
+          watchdog_pid=$!
+          wait "$daemon_pid"
+          daemon_pid=""
+
+  linux-coordinator:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Connect coordinator to the private tailnet
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
+          args: --accept-dns=false
+          hostname: mesh-c-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Prove five-Mac correctness, scaling, and pooled memory
+        run: |
+          proof="$RUNNER_TEMP/swarm-scale"
+          result="$RUNNER_TEMP/mlx-swarm-five-mac-scale.json"
+          peer_ips=()
+          proof_pid=""
+          cleanup() {
+            if [ -n "$proof_pid" ]; then
+              kill -TERM "$proof_pid" 2>/dev/null || true
+              wait "$proof_pid" 2>/dev/null || true
+            fi
+            for peer_ip in "${peer_ips[@]}"; do
+              curl -fsS -X POST --connect-timeout 2 --max-time 5 \
+                "http://${peer_ip}:8080/v1/debug/complete" >/dev/null 2>&1 || true
+            done
+          }
+          trap cleanup EXIT
+
+          for index in 0 1 2 3 4; do
+            peer_name="mesh-w${index}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            peer_ip=""
+            for _ in {1..180}; do
+              peer_ip="$(tailscale status --json | jq -r --arg name "$peer_name" '(.Peer // {})[] | select(.HostName == $name) | .TailscaleIPs[]? | select(contains(":") | not)' | head -n 1)"
+              if [ -n "$peer_ip" ] && curl -fsS --connect-timeout 2 --max-time 5 "http://${peer_ip}:8080/healthz" >/dev/null; then
+                break
+              fi
+              peer_ip=""
+              sleep 2
+            done
+            if [ -z "$peer_ip" ]; then
+              echo "Could not discover ready Tailscale peer $peer_name" >&2
+              tailscale status
+              exit 1
+            fi
+            peer_ips+=("$peer_ip")
+          done
+
+          go build -o "$proof" ./cmd/swarm-scale
+          "$proof" \
+            -node "mac-0=http://${peer_ips[0]}:8080" \
+            -node "mac-1=http://${peer_ips[1]}:8080" \
+            -node "mac-2=http://${peer_ips[2]}:8080" \
+            -node "mac-3=http://${peer_ips[3]}:8080" \
+            -node "mac-4=http://${peer_ips[4]}:8080" \
+            -coordinator-id "linux-${RUNNER_NAME}" \
+            -run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            -inventory-revision "github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            -reference testdata/pooled-memory/gemma-3-12b-it-4bit.json \
+            -memory-threshold-bytes "$MLX_SWARM_MEMORY_THRESHOLD_BYTES" \
+            -tokens 32 \
+            -forward-timeout 2m \
+            -timeout 45m >"$result" &
+          proof_pid=$!
+          while kill -0 "$proof_pid" 2>/dev/null; do
+            printf 'five-Mac proof still running at %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            sleep 30
+          done
+          wait "$proof_pid"
+          proof_pid=""
+
+          jq -e '
+            .checks.allPassed and
+            (.nodes | length == 5) and
+            ([.scaling[].stageCount] == [2,3,4,5]) and
+            (.pooledMemory.run.generation.generatedTokenIDs | length == 32)
+          ' "$result" >/dev/null
+
+          {
+            echo '## Five-Mac scale proof'
+            echo
+            echo '| Stages | TTFT (ms) | Inter-token p50 (ms) | Tokens/s | Boundary wire bytes |'
+            echo '|---:|---:|---:|---:|---:|'
+            jq -r '.scaling[] | [
+              .stageCount,
+              (.prefill.tokenLatencyMicros.p50Micros / 1000),
+              (.decode.tokenLatencyMicros.p50Micros / 1000),
+              .all.tokensPerSecond,
+              ([.all.stages[].inputWireBytes.sumBytes] | add)
+            ] | @tsv' "$result" | while IFS=$'\t' read -r stages ttft decode throughput wire; do
+              printf '| %s | %.3f | %.3f | %.3f | %s |\n' "$stages" "$ttft" "$decode" "$throughput" "$wire"
+            done
+            echo
+            printf '12B reference tokens: **%s**\n' "$(jq -r 'if .pooledMemory.generatedTokensMatchReference then "MATCH" else "MISMATCH" end' "$result")"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          cleanup
+          trap - EXIT
+      - name: Upload five-Mac evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlx-swarm-five-mac-scale-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mlx-swarm-five-mac-scale.json
+          if-no-files-found: error

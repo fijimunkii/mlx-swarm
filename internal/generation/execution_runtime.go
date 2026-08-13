@@ -23,6 +23,16 @@ type boundExecutionTarget struct {
 	Caller workerproc.PersistentCaller
 }
 
+// StageLoad records the materialization cost and resulting memory snapshot for
+// one stage. Reused distinguishes a retained shard from a new checkpoint load.
+type StageLoad struct {
+	Index      int                                `json:"index"`
+	Stage      ExecutionStage                     `json:"stage"`
+	Reused     bool                               `json:"reused"`
+	WallMicros int64                              `json:"wallMicros"`
+	Snapshot   workerproc.PersistentShardSnapshot `json:"snapshot"`
+}
+
 // StageExecution captures one stage invocation in an ordered prefill/decode
 // traversal.
 type StageExecution struct {
@@ -101,7 +111,7 @@ func prepareExecutionTargets(
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := loadExecutionTargets(ctx, plan, bound); err != nil {
+	if _, err := loadExecutionTargets(ctx, plan, bound); err != nil {
 		return nil, nil, err
 	}
 	return bound, model, nil
@@ -147,10 +157,12 @@ func loadExecutionTargets(
 	ctx context.Context,
 	plan ExecutionPlan,
 	bound []boundExecutionTarget,
-) error {
+) ([]StageLoad, error) {
+	loads := make([]StageLoad, 0, len(bound))
 	for index, target := range bound {
 		stage := target.Stage
-		if _, err := ensureShard(ctx, target.Caller, workerproc.PersistentLoadShardRequest{
+		started := time.Now()
+		snapshot, reused, err := ensureShard(ctx, target.Caller, workerproc.PersistentLoadShardRequest{
 			ModelID:               plan.Model.ID,
 			ShardID:               stage.ShardID,
 			CheckpointFingerprint: plan.Model.CheckpointFingerprint,
@@ -158,11 +170,17 @@ func loadExecutionTargets(
 			LayerEnd:              stage.LayerEnd,
 			OwnsInput:             stage.OwnsInput,
 			OwnsOutput:            stage.OwnsOutput,
-		}); err != nil {
-			return &ExecutionStageLoadError{Index: index, Stage: stage, Err: err}
+		})
+		wallMicros := time.Since(started).Microseconds()
+		if err != nil {
+			return loads, &ExecutionStageLoadError{Index: index, Stage: stage, Err: err}
 		}
+		loads = append(loads, StageLoad{
+			Index: index, Stage: stage, Reused: reused,
+			WallMicros: wallMicros, Snapshot: *snapshot,
+		})
 	}
-	return nil
+	return loads, nil
 }
 
 func matchPlanModel(

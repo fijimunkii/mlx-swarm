@@ -1,6 +1,7 @@
 package benchmark
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -19,6 +20,7 @@ func TestSummarizePlannedPreservesEveryStage(t *testing.T) {
 	for sampleIndex := range samples {
 		samples[sampleIndex] = generation.PlannedStageSample{
 			DistributedEndToEndMicros: int64(30 + sampleIndex),
+			TokenLatencyMicros:        int64(40 + sampleIndex),
 			ReferenceKVCacheBytes:     90 + sampleIndex,
 			ReferenceMemory: workerproc.StageMemory{
 				ProcessPhysicalBytes: uint64(100 + sampleIndex),
@@ -48,6 +50,9 @@ func TestSummarizePlannedPreservesEveryStage(t *testing.T) {
 	}
 	if summary.SampleCount != 2 || summary.StageCount != 2 || len(summary.Stages) != 2 {
 		t.Fatalf("unexpected plan summary shape: %+v", summary)
+	}
+	if want := 2_000_000.0 / 81.0; math.Abs(summary.TokensPerSecond-want) > 0.001 {
+		t.Fatalf("planned throughput = %f", summary.TokensPerSecond)
 	}
 	if summary.Stages[0].WallMicros.P50Micros != 10 ||
 		summary.Stages[0].ResponseWireBytes.SumBytes != 38 ||

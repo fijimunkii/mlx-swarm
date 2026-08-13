@@ -43,6 +43,28 @@ func TestPlannedSessionGeneratesAndVerifiesAcrossFiveStages(t *testing.T) {
 	if len(result.ExecutionPlan.Stages) != 5 {
 		t.Fatalf("execution stages = %d", len(result.ExecutionPlan.Stages))
 	}
+	info := session.Info()
+	if len(info.StageLoads) != 5 {
+		t.Fatalf("stage loads = %d, want 5", len(info.StageLoads))
+	}
+	for index, load := range info.StageLoads {
+		if load.Index != index || load.Stage != plan.Stages[index] || load.Reused ||
+			load.WallMicros < 0 || load.Snapshot.ShardID != plan.Stages[index].ShardID {
+			t.Fatalf("stage %d load evidence = %+v", index, load)
+		}
+	}
+	reusedSession, err := NewPlannedSession(
+		context.Background(), plan, targets, reference,
+		PlannedSessionConfig{ForwardTimeout: time.Second},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, load := range reusedSession.Info().StageLoads {
+		if !load.Reused {
+			t.Fatalf("stage %d retained load was not marked reused: %+v", index, load)
+		}
+	}
 	if result.Verification == nil || !result.Verification.GreedyTokenIDsMatch ||
 		result.Verification.ComparedTokens != 3 {
 		t.Fatalf("verification = %+v", result.Verification)

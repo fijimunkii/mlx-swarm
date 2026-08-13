@@ -486,7 +486,9 @@ func cleanupProofShards(targets ...proofCleanupTarget) error {
 	return cleanupErr
 }
 
-func remoteCapabilities(
+// FetchRemoteCapabilities reads the MLX and host-memory limits advertised by
+// a trusted swarmd endpoint.
+func FetchRemoteCapabilities(
 	ctx context.Context,
 	client *http.Client,
 	endpoint string,
@@ -508,6 +510,10 @@ func remoteCapabilities(
 		return Capabilities{}, fmt.Errorf("capabilities returned HTTP %d", response.StatusCode)
 	}
 	return decodeCapabilities(io.LimitReader(response.Body, defaultCapabilitiesMaxBody))
+}
+
+func remoteCapabilities(ctx context.Context, client *http.Client, endpoint string) (Capabilities, error) {
+	return FetchRemoteCapabilities(ctx, client, endpoint)
 }
 
 func localCapabilities(ctx context.Context, workerPath string) (Capabilities, error) {

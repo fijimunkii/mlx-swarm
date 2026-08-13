@@ -93,6 +93,7 @@ type PlannedSession struct {
 	model          workerproc.PersistentModelResult
 	plan           ExecutionPlan
 	referenceShard string
+	stageLoads     []StageLoad
 	setupMicros    int64
 }
 
@@ -100,12 +101,14 @@ type PlannedSessionInfo struct {
 	Model              workerproc.PersistentModelResult `json:"model"`
 	ExecutionPlan      ExecutionPlan                    `json:"executionPlan"`
 	ReferenceShardID   string                           `json:"referenceShardID,omitempty"`
+	StageLoads         []StageLoad                      `json:"stageLoads"`
 	SessionSetupMicros int64                            `json:"sessionSetupMicros"`
 }
 
 func (s *PlannedSession) Info() PlannedSessionInfo {
 	return PlannedSessionInfo{
 		Model: s.model, ExecutionPlan: s.plan, ReferenceShardID: s.referenceShard,
+		StageLoads:         append([]StageLoad(nil), s.stageLoads...),
 		SessionSetupMicros: s.setupMicros,
 	}
 }
@@ -142,12 +145,13 @@ func NewPlannedSession(
 
 	// No target loads until all distributed and reference metadata agrees with
 	// the immutable plan identity.
-	if err := loadExecutionTargets(ctx, plan, bound); err != nil {
+	stageLoads, err := loadExecutionTargets(ctx, plan, bound)
+	if err != nil {
 		return nil, err
 	}
 	if reference != nil {
 		referenceShard = "generate-reference-" + modelHashSuffix(plan.Model.ID, model.CheckpointFingerprint)
-		if _, err := ensureShard(ctx, reference, workerproc.PersistentLoadShardRequest{
+		if _, _, err := ensureShard(ctx, reference, workerproc.PersistentLoadShardRequest{
 			ModelID: plan.Model.ID, ShardID: referenceShard,
 			CheckpointFingerprint: model.CheckpointFingerprint,
 			LayerStart:            0, LayerEnd: model.LayerCount, OwnsInput: true, OwnsOutput: true,
@@ -159,6 +163,7 @@ func NewPlannedSession(
 	return &PlannedSession{
 		targets: bound, reference: reference, config: config,
 		model: *model, plan: plan, referenceShard: referenceShard,
+		stageLoads:  stageLoads,
 		setupMicros: time.Since(started).Microseconds(),
 	}, nil
 }
