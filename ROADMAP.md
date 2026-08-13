@@ -161,16 +161,16 @@ Tracking: [#31](https://github.com/fijimunkii/mlx-swarm/issues/31)
 
 Remove the current producer/consumer assumption before adding scheduling policy.
 
-- [ ] represent an execution plan as an ordered list of stages rather than one
+- [x] represent an execution plan as an ordered list of stages rather than one
   producer and one consumer
-- [ ] support explicit 2-, 3-, 4-, and 5-stage plans without worker-count-specific
+- [x] support explicit 2-, 3-, 4-, and 5-stage plans without worker-count-specific
   generation code
-- [ ] validate contiguous layer coverage, ownership, checkpoint identity, and
+- [x] validate contiguous layer coverage, ownership, checkpoint identity, and
   terminal output semantics before inference
-- [ ] run prefill and cached decode through every planned stage in order
-- [ ] make multi-stage sequence open/close transactional and rollback-safe
-- [ ] generalize KV, memory, timing, and transfer observations to per-stage data
-- [ ] preserve full-reference correctness and the existing two-stage proof as a
+- [x] run prefill and cached decode through every planned stage in order
+- [x] make multi-stage sequence open/close transactional and rollback-safe
+- [x] generalize KV, memory, timing, and transfer observations to per-stage data
+- [x] preserve full-reference correctness and the existing two-stage proof as a
   regression path
 
 ### M8.2 — five real Mac workers with a Linux coordinator
