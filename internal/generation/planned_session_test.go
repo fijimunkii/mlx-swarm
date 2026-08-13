@@ -15,12 +15,12 @@ import (
 )
 
 func TestPlannedSessionGeneratesAndVerifiesAcrossFiveStages(t *testing.T) {
-	workers, reference, targets := plannedFakeSwarm(t, []int32{3, 2, 3})
+	workers, reference, plan, targets := plannedFakeSwarm(t, []int32{3, 2, 3}, StageResponseTensor)
 	var samples []PlannedStageSample
 	session, err := NewPlannedSession(
-		context.Background(), targets, reference,
+		context.Background(), plan, targets, reference,
 		PlannedSessionConfig{
-			Model: "test/model", RTol: 1e-4, ATol: 1e-4,
+			RTol: 1e-4, ATol: 1e-4,
 			Observer: func(sample PlannedStageSample) { samples = append(samples, sample) },
 		},
 	)
@@ -68,6 +68,9 @@ func TestPlannedSessionGeneratesAndVerifiesAcrossFiveStages(t *testing.T) {
 				execution.WallMicros < 0 || execution.ComputeMicros == 0 {
 				t.Fatalf("sample %d stage %d evidence = %+v", sampleIndex, stageIndex, execution)
 			}
+			if execution.Result != nil {
+				t.Fatalf("sample %d stage %d retained its forward tensor", sampleIndex, stageIndex)
+			}
 		}
 		if sample.ReferenceComputeMicros == 0 || sample.ReferenceKVCacheBytes == 0 {
 			t.Fatalf("sample %d missing reference evidence: %+v", sampleIndex, sample)
@@ -77,12 +80,11 @@ func TestPlannedSessionGeneratesAndVerifiesAcrossFiveStages(t *testing.T) {
 }
 
 func TestPlannedSessionUsesTerminalSamplingOnlyOnFinalStage(t *testing.T) {
-	workers, _, targets := plannedFakeSwarm(t, []int32{3, 2})
+	workers, _, plan, targets := plannedFakeSwarm(t, []int32{3, 2}, StageResponseSampledToken)
 	var samples []PlannedStageSample
 	session, err := NewPlannedSession(
-		context.Background(), targets, nil,
+		context.Background(), plan, targets, nil,
 		PlannedSessionConfig{
-			Model: "test/model", TerminalSampling: true,
 			Observer: func(sample PlannedStageSample) { samples = append(samples, sample) },
 		},
 	)
@@ -119,12 +121,12 @@ func TestPlannedSessionUsesTerminalSamplingOnlyOnFinalStage(t *testing.T) {
 }
 
 func TestPlannedSessionReportsFailedMiddleStageAndCleansAllSequences(t *testing.T) {
-	workers, _, targets := plannedFakeSwarm(t, []int32{3, 2})
+	workers, _, plan, targets := plannedFakeSwarm(t, []int32{3, 2}, StageResponseTensor)
 	workers[2].failCommand = "decode"
 	workers[2].inferErr = context.DeadlineExceeded
 	session, err := NewPlannedSession(
-		context.Background(), targets, nil,
-		PlannedSessionConfig{Model: "test/model", ForwardTimeout: time.Second},
+		context.Background(), plan, targets, nil,
+		PlannedSessionConfig{ForwardTimeout: time.Second},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +143,7 @@ func TestPlannedSessionReportsFailedMiddleStageAndCleansAllSequences(t *testing.
 		t.Fatalf("missing structured failure: result=%+v err=%v", result, err)
 	}
 	if result.Failure.Phase != "stage_2_decode" ||
-		result.Failure.ShardID != targets[2].Stage.ShardID ||
+		result.Failure.ShardID != plan.Stages[2].ShardID ||
 		result.Failure.Operation != "decode" ||
 		result.Failure.LastAcceptedTokenIndex != 0 ||
 		result.Failure.LastAcceptedTokenID == nil || *result.Failure.LastAcceptedTokenID != 3 {
@@ -151,35 +153,156 @@ func TestPlannedSessionReportsFailedMiddleStageAndCleansAllSequences(t *testing.
 }
 
 func TestPlannedSessionRejectsTerminalSamplingWithReference(t *testing.T) {
-	_, reference, targets := plannedFakeSwarm(t, []int32{3})
+	_, reference, plan, targets := plannedFakeSwarm(t, []int32{3}, StageResponseSampledToken)
 	_, err := NewPlannedSession(
-		context.Background(), targets, reference,
-		PlannedSessionConfig{Model: "test/model", TerminalSampling: true},
+		context.Background(), plan, targets, reference,
+		PlannedSessionConfig{},
 	)
 	if err == nil {
 		t.Fatal("expected terminal sampling/reference rejection")
 	}
 }
 
-func plannedFakeSwarm(
-	t *testing.T,
-	tokens []int32,
-) ([]*plannedFakeWorker, *plannedFakeWorker, []ExecutionTarget) {
-	t.Helper()
-	plan, err := BuildBalancedExecutionPlan("test/model", "test-checkpoint", 5, 5)
+func TestPlannedSessionPreflightsReferenceBeforeLoadingStages(t *testing.T) {
+	workers, reference, plan, targets := plannedFakeSwarm(
+		t, []int32{3}, StageResponseTensor,
+	)
+	reference.fingerprint = "different-checkpoint"
+	_, err := NewPlannedSession(
+		context.Background(), plan, targets, reference, PlannedSessionConfig{},
+	)
+	if err == nil {
+		t.Fatal("expected reference checkpoint mismatch")
+	}
+	for _, worker := range workers {
+		if worker.loadCount != 0 {
+			t.Fatalf("%s loaded %d shards before reference preflight failed", worker.name, worker.loadCount)
+		}
+	}
+}
+
+func TestPlannedSessionRollsBackPartialStageOpens(t *testing.T) {
+	workers, _, plan, targets := plannedFakeSwarm(
+		t, []int32{3}, StageResponseTensor,
+	)
+	workers[3].failOpen = true
+	session, err := NewPlannedSession(
+		context.Background(), plan, targets, nil, PlannedSessionConfig{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	workers := make([]*plannedFakeWorker, 5)
-	targets := make([]ExecutionTarget, 5)
-	for index := range workers {
-		workers[index] = newPlannedFakeWorker(fmt.Sprintf("stage-%d", index), 5, tokens)
-		workers[index].terminal = index == len(workers)-1
-		targets[index] = ExecutionTarget{Stage: plan.Stages[index], Caller: workers[index]}
+	_, err = session.Generate(context.Background(), Request{
+		Prompt: "hello", MaxTokens: 1, SequenceID: "partial-open",
+	})
+	if err == nil {
+		t.Fatal("expected stage open failure")
 	}
-	reference := newPlannedFakeWorker("reference", 5, tokens)
+	assertPlannedNoSequences(t, workers...)
+}
+
+func TestPlannedSessionRollbackPreservesAnotherOwnersCollidingSequence(t *testing.T) {
+	workers, _, plan, targets := plannedFakeSwarm(
+		t, []int32{3}, StageResponseTensor,
+	)
+	const sequenceID = "colliding-sequence"
+	workers[3].sequences[sequenceID] = "another-owner"
+	session, err := NewPlannedSession(
+		context.Background(), plan, targets, nil, PlannedSessionConfig{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = session.Generate(context.Background(), Request{
+		Prompt: "hello", MaxTokens: 1, SequenceID: sequenceID,
+	})
+	if err == nil {
+		t.Fatal("expected colliding sequence rejection")
+	}
+	for index, worker := range workers {
+		worker.mu.Lock()
+		owner, exists := worker.sequences[sequenceID]
+		count := len(worker.sequences)
+		worker.mu.Unlock()
+		if index == 3 {
+			if !exists || owner != "another-owner" || count != 1 {
+				t.Fatalf("colliding stage state changed: owner=%q count=%d", owner, count)
+			}
+			continue
+		}
+		if count != 0 {
+			t.Fatalf("stage %d retained %d request-owned sequences", index, count)
+		}
+	}
+}
+
+func TestPlannedSessionSupportsTwoThroughFiveStages(t *testing.T) {
+	for stageCount := 2; stageCount <= 5; stageCount++ {
+		t.Run(fmt.Sprintf("%d stages", stageCount), func(t *testing.T) {
+			workers, _, plan, targets := plannedFakeSwarmWithStageCount(
+				t, []int32{3}, StageResponseSampledToken, stageCount, 10,
+			)
+			session, err := NewPlannedSession(
+				context.Background(), plan, targets, nil, PlannedSessionConfig{},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := session.Generate(context.Background(), Request{
+				Prompt: "hello", MaxTokens: 1,
+				SequenceID: fmt.Sprintf("stages-%d", stageCount),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(result.GeneratedTokenIDs, []int32{3}) ||
+				len(result.ExecutionPlan.Stages) != stageCount {
+				t.Fatalf("unexpected result: %+v", result)
+			}
+			assertPlannedNoSequences(t, workers...)
+		})
+	}
+}
+
+func plannedFakeSwarm(
+	t *testing.T,
+	tokens []int32,
+	terminalResponseMode StageResponseMode,
+) ([]*plannedFakeWorker, *plannedFakeWorker, ExecutionPlan, []ExecutionTarget) {
+	return plannedFakeSwarmWithStageCount(t, tokens, terminalResponseMode, 5, 5)
+}
+
+func plannedFakeSwarmWithStageCount(
+	t *testing.T,
+	tokens []int32,
+	terminalResponseMode StageResponseMode,
+	stageCount int,
+	layerCount int,
+) ([]*plannedFakeWorker, *plannedFakeWorker, ExecutionPlan, []ExecutionTarget) {
+	t.Helper()
+	plan, err := BuildBalancedExecutionPlan(
+		ExecutionModel{
+			ID: "test/model", CheckpointFingerprint: "test-checkpoint", LayerCount: layerCount,
+		},
+		testExecutionTargetIDs(stageCount), terminalResponseMode,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workers := make([]*plannedFakeWorker, stageCount)
+	targets := make([]ExecutionTarget, stageCount)
+	for index := range workers {
+		workers[index] = newPlannedFakeWorker(
+			fmt.Sprintf("stage-%d", index), layerCount, tokens,
+		)
+		workers[index].terminal = index == len(workers)-1
+		targets[index] = ExecutionTarget{
+			TargetID: plan.Stages[index].TargetID, Caller: workers[index],
+		}
+	}
+	reference := newPlannedFakeWorker("reference", layerCount, tokens)
 	reference.terminal = true
-	return workers, reference, targets
+	return workers, reference, plan, targets
 }
 
 func assertPlannedNoSequences(t *testing.T, workers ...*plannedFakeWorker) {
@@ -206,12 +329,14 @@ type plannedFakeWorker struct {
 	sequences   map[string]string
 	failCommand string
 	inferErr    error
+	failOpen    bool
+	fingerprint string
 }
 
 func newPlannedFakeWorker(name string, layerCount int, tokens []int32) *plannedFakeWorker {
 	return &plannedFakeWorker{
 		name: name, layerCount: layerCount, tokens: tokens,
-		sequences: map[string]string{},
+		sequences: map[string]string{}, fingerprint: "test-checkpoint",
 	}
 }
 
@@ -229,7 +354,7 @@ func (worker *plannedFakeWorker) Call(
 	case "modelInfo":
 		result.Model = &workerproc.PersistentModelResult{
 			ModelID: request.Model.ModelID, ModelType: "test", LayerCount: worker.layerCount,
-			CheckpointFingerprint: "test-checkpoint", CheckpointBytes: 123,
+			CheckpointFingerprint: worker.fingerprint, CheckpointBytes: 123,
 		}
 	case "state":
 		kv := 0
@@ -245,7 +370,7 @@ func (worker *plannedFakeWorker) Call(
 		snapshot := workerproc.PersistentShardSnapshot{
 			ShardID: load.ShardID, ModelID: load.ModelID,
 			CheckpointFingerprint: "test-checkpoint",
-			LayerStart: load.LayerStart, LayerEnd: load.LayerEnd,
+			LayerStart:            load.LayerStart, LayerEnd: load.LayerEnd,
 			OwnsInput: load.OwnsInput, OwnsOutput: load.OwnsOutput,
 		}
 		worker.loaded = append(worker.loaded, snapshot)
@@ -262,6 +387,11 @@ func (worker *plannedFakeWorker) Call(
 	case "openSequence":
 		if request.Sequence == nil {
 			return workerproc.PersistentResponse{}, errors.New("missing sequence request")
+		}
+		if worker.failOpen {
+			return workerproc.PersistentResponse{}, &workerproc.WorkerResponseError{
+				RequestID: request.RequestID, Message: "injected open failure",
+			}
 		}
 		if owner, exists := worker.sequences[request.Sequence.SequenceID]; exists && owner != request.Sequence.OwnerID {
 			return workerproc.PersistentResponse{}, &workerproc.WorkerResponseError{

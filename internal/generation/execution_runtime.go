@@ -10,39 +10,43 @@ import (
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
 
-// ExecutionTarget binds one serializable execution stage to the concrete
-// persistent caller that will execute it. Placement owns this binding; the
-// model plan itself remains transport- and backend-neutral.
+// ExecutionTarget binds a stable plan target identity to a concrete caller.
+// The stage itself remains solely in ExecutionPlan so plan identity cannot
+// drift from its transport binding.
 type ExecutionTarget struct {
+	TargetID string
+	Caller   workerproc.PersistentCaller
+}
+
+type boundExecutionTarget struct {
 	Stage  ExecutionStage
 	Caller workerproc.PersistentCaller
 }
 
 // StageExecution captures one stage invocation in an ordered prefill/decode
-// traversal. It is intentionally detailed enough to become the per-stage
-// evidence emitted by the generalized generation session.
+// traversal.
 type StageExecution struct {
-	Index              int                    `json:"index"`
-	Stage              ExecutionStage         `json:"stage"`
-	Operation          string                 `json:"operation"`
-	Position           uint64                 `json:"position"`
-	InputKind          string                 `json:"inputKind"`
-	InputTensorBytes   int                    `json:"inputTensorBytes"`
-	InputWireBytes     int                    `json:"inputWireBytes"`
-	ResponseTensorBytes int                   `json:"responseTensorBytes"`
-	ResponseWireBytes  int                    `json:"responseWireBytes"`
-	WallMicros         int64                  `json:"wallMicros"`
-	ComputeMicros      uint64                 `json:"computeMicros"`
-	OverheadMicros     int64                  `json:"overheadMicros"`
-	KVCacheBytes       int                    `json:"kvCacheBytes"`
-	Memory             workerproc.StageMemory `json:"memory"`
-	TerminalSampling   bool                   `json:"terminalSampling"`
-	Result             *workerproc.PersistentForwardResult `json:"-"`
+	Index                       int                                 `json:"index"`
+	Stage                       ExecutionStage                      `json:"stage"`
+	Operation                   string                              `json:"operation"`
+	Position                    uint64                              `json:"position"`
+	InputKind                   string                              `json:"inputKind"`
+	InputTensorBytes            int                                 `json:"inputTensorBytes"`
+	InputWireBytes              int                                 `json:"inputWireBytes"`
+	RequestSerializationMicros  int64                               `json:"requestSerializationMicros"`
+	ResponseTensorBytes         int                                 `json:"responseTensorBytes"`
+	ResponseWireBytes           int                                 `json:"responseWireBytes"`
+	ResponseSerializationMicros int64                               `json:"responseSerializationMicros"`
+	WallMicros                  int64                               `json:"wallMicros"`
+	ComputeMicros               uint64                              `json:"computeMicros"`
+	OverheadMicros              int64                               `json:"overheadMicros"`
+	KVCacheBytes                int                                 `json:"kvCacheBytes"`
+	Memory                      workerproc.StageMemory              `json:"memory"`
+	TerminalSampling            bool                                `json:"terminalSampling"`
+	Result                      *workerproc.PersistentForwardResult `json:"-"`
 }
 
-// ExecutionStageError identifies the exact stage that failed. The caller can
-// translate it into the public generation failure contract without losing the
-// ordered-stage context.
+// ExecutionStageError identifies the exact stage that failed.
 type ExecutionStageError struct {
 	Index     int
 	Stage     ExecutionStage
@@ -60,96 +64,206 @@ func (err *ExecutionStageError) Error() string {
 
 func (err *ExecutionStageError) Unwrap() error { return err.Err }
 
-// PrepareExecutionTargets validates all model metadata and the complete plan
-// before loading any shard. This keeps checkpoint mismatch or invalid topology
-// failures side-effect free. Only after every target agrees on the model does
-// it materialize the requested complementary ranges.
+// ExecutionStageLoadError identifies a partially prepared plan whose earlier
+// stages may need rollback by the owning proof/session.
+type ExecutionStageLoadError struct {
+	Index int
+	Stage ExecutionStage
+	Err   error
+}
+
+func (err *ExecutionStageLoadError) Error() string {
+	return fmt.Sprintf(
+		"stage %d (%s/%s) load shard: %v",
+		err.Index, err.Stage.Name, err.Stage.ShardID, err.Err,
+	)
+}
+
+func (err *ExecutionStageLoadError) Unwrap() error { return err.Err }
+
+// PrepareExecutionTargets validates plan identity and every worker's model
+// metadata before loading any shard.
 func PrepareExecutionTargets(
 	ctx context.Context,
-	modelID string,
+	plan ExecutionPlan,
 	targets []ExecutionTarget,
 ) (*workerproc.PersistentModelResult, error) {
-	if modelID == "" {
-		return nil, errors.New("model is required")
+	_, model, err := prepareExecutionTargets(ctx, plan, targets)
+	return model, err
+}
+
+func prepareExecutionTargets(
+	ctx context.Context,
+	plan ExecutionPlan,
+	targets []ExecutionTarget,
+) ([]boundExecutionTarget, *workerproc.PersistentModelResult, error) {
+	bound, model, err := preflightExecutionTargets(ctx, plan, targets)
+	if err != nil {
+		return nil, nil, err
 	}
-	if len(targets) == 0 {
-		return nil, errors.New("at least one execution target is required")
+	if err := loadExecutionTargets(ctx, plan, bound); err != nil {
+		return nil, nil, err
 	}
-	for index, target := range targets {
-		if target.Caller == nil {
-			return nil, fmt.Errorf("stage %d (%s) has no caller", index, target.Stage.Name)
-		}
+	return bound, model, nil
+}
+
+func preflightExecutionTargets(
+	ctx context.Context,
+	plan ExecutionPlan,
+	targets []ExecutionTarget,
+) ([]boundExecutionTarget, *workerproc.PersistentModelResult, error) {
+	if err := ValidateExecutionPlan(plan); err != nil {
+		return nil, nil, fmt.Errorf("execution plan: %w", err)
+	}
+	bound, err := bindExecutionTargets(plan, targets)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	models := make([]*workerproc.PersistentModelResult, len(targets))
-	for index, target := range targets {
-		model, err := modelInfo(ctx, target.Caller, modelID)
-		if err != nil {
-			return nil, fmt.Errorf("stage %d (%s) model info: %w", index, target.Stage.Name, err)
+	models := make([]*workerproc.PersistentModelResult, len(bound))
+	for index, target := range bound {
+		model, modelErr := modelInfo(ctx, target.Caller, plan.Model.ID)
+		if modelErr != nil {
+			return nil, nil, fmt.Errorf(
+				"stage %d (%s) model info: %w", index, target.Stage.Name, modelErr,
+			)
+		}
+		if err := matchPlanModel(plan.Model, model, target.Stage.Name); err != nil {
+			return nil, nil, err
 		}
 		models[index] = model
 	}
 	model := models[0]
 	for index := 1; index < len(models); index++ {
-		if err := matchModel(model, models[index], targets[index].Stage.Name); err != nil {
-			return nil, err
+		if err := matchModel(model, models[index], bound[index].Stage.Name); err != nil {
+			return nil, nil, err
 		}
 	}
+	copy := *model
+	return bound, &copy, nil
+}
 
-	plan := ExecutionPlan{Stages: make([]ExecutionStage, len(targets))}
-	for index, target := range targets {
-		plan.Stages[index] = target.Stage
-	}
-	if err := ValidateExecutionPlan(plan, model.LayerCount); err != nil {
-		return nil, fmt.Errorf("execution plan: %w", err)
-	}
-
-	for index, target := range targets {
+func loadExecutionTargets(
+	ctx context.Context,
+	plan ExecutionPlan,
+	bound []boundExecutionTarget,
+) error {
+	for index, target := range bound {
 		stage := target.Stage
 		if _, err := ensureShard(ctx, target.Caller, workerproc.PersistentLoadShardRequest{
-			ModelID:               modelID,
+			ModelID:               plan.Model.ID,
 			ShardID:               stage.ShardID,
-			CheckpointFingerprint: model.CheckpointFingerprint,
+			CheckpointFingerprint: plan.Model.CheckpointFingerprint,
 			LayerStart:            stage.LayerStart,
 			LayerEnd:              stage.LayerEnd,
 			OwnsInput:             stage.OwnsInput,
 			OwnsOutput:            stage.OwnsOutput,
 		}); err != nil {
-			return nil, fmt.Errorf("stage %d (%s) load shard: %w", index, stage.Name, err)
+			return &ExecutionStageLoadError{Index: index, Stage: stage, Err: err}
 		}
 	}
-	copy := *model
-	return &copy, nil
+	return nil
 }
 
-// ExecutionSequenceTargets converts the ordered execution targets into the
-// owner-safe lifecycle targets used by workerproc.OpenSequences.
-func ExecutionSequenceTargets(targets []ExecutionTarget) []workerproc.SequenceTarget {
-	result := make([]workerproc.SequenceTarget, 0, len(targets))
+func matchPlanModel(
+	expected ExecutionModel,
+	actual *workerproc.PersistentModelResult,
+	role string,
+) error {
+	if expected.ID != actual.ModelID ||
+		expected.CheckpointFingerprint != actual.CheckpointFingerprint ||
+		expected.LayerCount != actual.LayerCount {
+		return fmt.Errorf(
+			"%s model does not match execution plan: plan=%+v actual=%+v",
+			role, expected, *actual,
+		)
+	}
+	return nil
+}
+
+func bindExecutionTargets(
+	plan ExecutionPlan,
+	targets []ExecutionTarget,
+) ([]boundExecutionTarget, error) {
+	if len(targets) != len(plan.Stages) {
+		return nil, fmt.Errorf(
+			"execution target count %d does not match stage count %d",
+			len(targets), len(plan.Stages),
+		)
+	}
+	byID := make(map[string]workerproc.PersistentCaller, len(targets))
 	for index, target := range targets {
-		name := target.Stage.Name
-		if name == "" {
-			name = fmt.Sprintf("stage-%d", index)
+		if target.TargetID == "" {
+			return nil, fmt.Errorf("execution target %d has no target ID", index)
 		}
+		if target.Caller == nil {
+			return nil, fmt.Errorf("execution target %q has no caller", target.TargetID)
+		}
+		if _, exists := byID[target.TargetID]; exists {
+			return nil, fmt.Errorf("execution target %q is duplicated", target.TargetID)
+		}
+		byID[target.TargetID] = target.Caller
+	}
+	bound := make([]boundExecutionTarget, len(plan.Stages))
+	for index, stage := range plan.Stages {
+		caller, exists := byID[stage.TargetID]
+		if !exists {
+			return nil, fmt.Errorf(
+				"stage %d (%s) target %q is not bound",
+				index, stage.Name, stage.TargetID,
+			)
+		}
+		bound[index] = boundExecutionTarget{Stage: stage, Caller: caller}
+		delete(byID, stage.TargetID)
+	}
+	if len(byID) != 0 {
+		return nil, errors.New("execution targets contain identities not present in the plan")
+	}
+	return bound, nil
+}
+
+func executionSequenceTargets(targets []boundExecutionTarget) []workerproc.SequenceTarget {
+	result := make([]workerproc.SequenceTarget, 0, len(targets))
+	for _, target := range targets {
 		result = append(result, workerproc.SequenceTarget{
-			Name: name, Caller: target.Caller, ShardID: target.Stage.ShardID,
+			Name: target.Stage.Name, Caller: target.Caller, ShardID: target.Stage.ShardID,
 		})
 	}
 	return result
 }
 
-// ExecuteStageChain forwards one prefill or decode input through every target
-// in order. The first stage receives tokens, all later stages receive hidden
-// state, and only the final output-owning stage may return a sampled token.
+// ExecuteStageChain validates and binds the plan, then forwards one prefill or
+// decode input through each stage in order.
 func ExecuteStageChain(
 	ctx context.Context,
 	timeout time.Duration,
+	plan ExecutionPlan,
 	targets []ExecutionTarget,
 	operation string,
 	sequenceID string,
 	position uint64,
 	input workerproc.WireTensor,
-	terminalSampling bool,
+) ([]StageExecution, *workerproc.PersistentForwardResult, error) {
+	if err := ValidateExecutionPlan(plan); err != nil {
+		return nil, nil, fmt.Errorf("execution plan: %w", err)
+	}
+	bound, err := bindExecutionTargets(plan, targets)
+	if err != nil {
+		return nil, nil, err
+	}
+	return executeBoundStageChain(
+		ctx, timeout, bound, operation, sequenceID, position, input,
+	)
+}
+
+func executeBoundStageChain(
+	ctx context.Context,
+	timeout time.Duration,
+	targets []boundExecutionTarget,
+	operation string,
+	sequenceID string,
+	position uint64,
+	input workerproc.WireTensor,
 ) ([]StageExecution, *workerproc.PersistentForwardResult, error) {
 	if len(targets) == 0 {
 		return nil, nil, errors.New("at least one execution target is required")
@@ -165,8 +279,7 @@ func ExecuteStageChain(
 	current := input
 	inputKind := "tokens"
 	for index, target := range targets {
-		isTerminal := index == len(targets)-1
-		returnSampledToken := terminalSampling && isTerminal
+		returnSampledToken := target.Stage.ResponseMode == StageResponseSampledToken
 		result, wallMicros, err := measuredInfer(
 			ctx, timeout, target.Caller,
 			operation, target.Stage.ShardID, sequenceID, position, inputKind, current,
@@ -174,7 +287,8 @@ func ExecuteStageChain(
 		)
 		if err != nil {
 			return executions, nil, &ExecutionStageError{
-				Index: index, Stage: target.Stage, Operation: operation, Position: position, Err: err,
+				Index: index, Stage: target.Stage, Operation: operation,
+				Position: position, Err: err,
 			}
 		}
 		execution := newStageExecution(
@@ -182,7 +296,7 @@ func ExecuteStageChain(
 			result, wallMicros,
 		)
 		executions = append(executions, execution)
-		if isTerminal {
+		if index == len(targets)-1 {
 			return executions, result, nil
 		}
 		current = result.Output
@@ -202,27 +316,33 @@ func newStageExecution(
 	result *workerproc.PersistentForwardResult,
 	wallMicros int64,
 ) StageExecution {
+	requestStarted := time.Now()
 	requestPayload, _ := json.Marshal(workerproc.PersistentRequest{
 		Command: operation, DeadlineUnixMillis: time.Now().UnixMilli(),
 		Forward: &workerproc.PersistentForwardRequest{
 			ShardID: stage.ShardID, SequenceID: sequenceID, Position: position,
 			InputKind: inputKind, Input: input,
-			ReturnSampledToken: result.SampledTokenID != nil,
+			ReturnSampledToken: stage.ResponseMode == StageResponseSampledToken,
 		},
 	})
+	requestSerializationMicros := time.Since(requestStarted).Microseconds()
+	responseStarted := time.Now()
 	responsePayload, _ := json.Marshal(workerproc.PersistentResponse{
-		OK: true,
+		OK:     true,
 		Result: &workerproc.PersistentWorkerResult{Forward: result},
 	})
+	responseSerializationMicros := time.Since(responseStarted).Microseconds()
 	return StageExecution{
 		Index: index, Stage: stage, Operation: operation, Position: position,
-		InputKind: inputKind,
+		InputKind:        inputKind,
 		InputTensorBytes: len(input.Data), InputWireBytes: len(requestPayload),
-		ResponseTensorBytes: len(result.Output.Data), ResponseWireBytes: len(responsePayload),
-		WallMicros: wallMicros, ComputeMicros: result.ComputeMicros,
+		RequestSerializationMicros: requestSerializationMicros,
+		ResponseTensorBytes:        len(result.Output.Data), ResponseWireBytes: len(responsePayload),
+		ResponseSerializationMicros: responseSerializationMicros,
+		WallMicros:                  wallMicros, ComputeMicros: result.ComputeMicros,
 		OverheadMicros: positiveDifference(wallMicros, result.ComputeMicros),
-		KVCacheBytes: result.KVCacheBytes, Memory: result.Memory,
+		KVCacheBytes:   result.KVCacheBytes, Memory: result.Memory,
 		TerminalSampling: result.SampledTokenID != nil,
-		Result: result,
+		Result:           result,
 	}
 }

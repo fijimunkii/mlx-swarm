@@ -254,6 +254,12 @@ func TestCancellationClosesOpenedSequences(t *testing.T) {
 	if !errors.As(err, &generationErr) || result.Failure == nil {
 		t.Fatalf("missing structured generation failure: result=%+v err=%v", result, err)
 	}
+	if generationErr.Failure.Phase != result.Failure.Phase {
+		t.Fatalf(
+			"error failure phase %q differs from result phase %q",
+			generationErr.Failure.Phase, result.Failure.Phase,
+		)
+	}
 	if result.Failure.Phase != "producer_decode" ||
 		result.Failure.ShardID != session.plan.Producer.ID ||
 		result.Failure.Operation != "decode" || !result.Failure.TimedOut ||

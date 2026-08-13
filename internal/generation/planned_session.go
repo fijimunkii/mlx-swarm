@@ -20,18 +20,18 @@ type PlannedStageObserver func(PlannedStageSample)
 // memory, and KV evidence without collapsing it back into producer/consumer
 // fields.
 type PlannedStageSample struct {
-	Operation                   string           `json:"operation"`
-	Position                    uint64           `json:"position"`
-	InputTokenCount             int              `json:"inputTokenCount"`
-	Stages                      []StageExecution `json:"stages"`
-	DistributedEndToEndMicros   int64            `json:"distributedEndToEndMicros"`
-	SamplingMicros              int64            `json:"samplingMicros"`
-	TokenLatencyMicros          int64            `json:"tokenLatencyMicros"`
-	ReferenceWallMicros         int64            `json:"referenceWallMicros,omitempty"`
-	ReferenceComputeMicros      uint64           `json:"referenceComputeMicros,omitempty"`
-	ReferenceSamplingMicros     int64            `json:"referenceSamplingMicros,omitempty"`
-	ReferenceTokenLatencyMicros int64            `json:"referenceTokenLatencyMicros,omitempty"`
-	ReferenceKVCacheBytes       int              `json:"referenceKVCacheBytes,omitempty"`
+	Operation                   string                 `json:"operation"`
+	Position                    uint64                 `json:"position"`
+	InputTokenCount             int                    `json:"inputTokenCount"`
+	Stages                      []StageExecution       `json:"stages"`
+	DistributedEndToEndMicros   int64                  `json:"distributedEndToEndMicros"`
+	SamplingMicros              int64                  `json:"samplingMicros"`
+	TokenLatencyMicros          int64                  `json:"tokenLatencyMicros"`
+	ReferenceWallMicros         int64                  `json:"referenceWallMicros,omitempty"`
+	ReferenceComputeMicros      uint64                 `json:"referenceComputeMicros,omitempty"`
+	ReferenceSamplingMicros     int64                  `json:"referenceSamplingMicros,omitempty"`
+	ReferenceTokenLatencyMicros int64                  `json:"referenceTokenLatencyMicros,omitempty"`
+	ReferenceKVCacheBytes       int                    `json:"referenceKVCacheBytes,omitempty"`
 	ReferenceMemory             workerproc.StageMemory `json:"referenceMemory,omitempty"`
 }
 
@@ -39,13 +39,11 @@ type PlannedStageSample struct {
 // arbitrary execution plan while using an N-stage observer instead of the
 // legacy producer/consumer observer.
 type PlannedSessionConfig struct {
-	Model            string
-	RTol             float64
-	ATol             float64
-	ForwardTimeout   time.Duration
-	TerminalSampling bool
-	Observer         PlannedStageObserver
-	LogitsObserver   LogitsObserver
+	RTol           float64
+	ATol           float64
+	ForwardTimeout time.Duration
+	Observer       PlannedStageObserver
+	LogitsObserver LogitsObserver
 }
 
 type PlannedTiming struct {
@@ -85,11 +83,11 @@ type PlannedResult struct {
 	Failure               *Failure      `json:"failure,omitempty"`
 }
 
-// PlannedSession executes one model through an explicit set of ordered stage
-// targets. It intentionally coexists with the legacy Session while #31 is
-// integrated so the two-Mac proof remains an independent regression path.
+// PlannedSession is the canonical generation runtime for an explicit ordered
+// execution plan. Session remains a two-stage compatibility facade over this
+// implementation so existing proof commands exercise the same code path.
 type PlannedSession struct {
-	targets        []ExecutionTarget
+	targets        []boundExecutionTarget
 	reference      workerproc.PersistentCaller
 	config         PlannedSessionConfig
 	model          workerproc.PersistentModelResult
@@ -114,45 +112,52 @@ func (s *PlannedSession) Info() PlannedSessionInfo {
 
 func NewPlannedSession(
 	ctx context.Context,
+	plan ExecutionPlan,
 	targets []ExecutionTarget,
 	reference workerproc.PersistentCaller,
 	config PlannedSessionConfig,
 ) (*PlannedSession, error) {
 	started := time.Now()
-	if err := validatePlannedSessionConfig(&config, reference); err != nil {
+	if err := validatePlannedSessionConfig(&config, plan, reference); err != nil {
 		return nil, err
 	}
-	model, err := PrepareExecutionTargets(ctx, config.Model, targets)
+	bound, model, err := preflightExecutionTargets(ctx, plan, targets)
 	if err != nil {
 		return nil, err
-	}
-	plan := ExecutionPlan{Stages: make([]ExecutionStage, len(targets))}
-	for index, target := range targets {
-		plan.Stages[index] = target.Stage
 	}
 
 	referenceShard := ""
 	if reference != nil {
-		referenceModel, infoErr := modelInfo(ctx, reference, config.Model)
+		referenceModel, infoErr := modelInfo(ctx, reference, plan.Model.ID)
 		if infoErr != nil {
 			return nil, fmt.Errorf("reference model info: %w", infoErr)
+		}
+		if err := matchPlanModel(plan.Model, referenceModel, "reference"); err != nil {
+			return nil, err
 		}
 		if err := matchModel(model, referenceModel, "reference"); err != nil {
 			return nil, err
 		}
-		referenceShard = "generate-reference-" + modelHashSuffix(config.Model, model.CheckpointFingerprint)
+	}
+
+	// No target loads until all distributed and reference metadata agrees with
+	// the immutable plan identity.
+	if err := loadExecutionTargets(ctx, plan, bound); err != nil {
+		return nil, err
+	}
+	if reference != nil {
+		referenceShard = "generate-reference-" + modelHashSuffix(plan.Model.ID, model.CheckpointFingerprint)
 		if _, err := ensureShard(ctx, reference, workerproc.PersistentLoadShardRequest{
-			ModelID: config.Model, ShardID: referenceShard,
+			ModelID: plan.Model.ID, ShardID: referenceShard,
 			CheckpointFingerprint: model.CheckpointFingerprint,
-			LayerStart: 0, LayerEnd: model.LayerCount, OwnsInput: true, OwnsOutput: true,
+			LayerStart:            0, LayerEnd: model.LayerCount, OwnsInput: true, OwnsOutput: true,
 		}); err != nil {
 			return nil, fmt.Errorf("reference shard: %w", err)
 		}
 	}
 
-	copiedTargets := append([]ExecutionTarget(nil), targets...)
 	return &PlannedSession{
-		targets: copiedTargets, reference: reference, config: config,
+		targets: bound, reference: reference, config: config,
 		model: *model, plan: plan, referenceShard: referenceShard,
 		setupMicros: time.Since(started).Microseconds(),
 	}, nil
@@ -160,10 +165,11 @@ func NewPlannedSession(
 
 func validatePlannedSessionConfig(
 	config *PlannedSessionConfig,
+	plan ExecutionPlan,
 	reference workerproc.PersistentCaller,
 ) error {
-	if config.Model == "" {
-		return errors.New("model is required")
+	if err := ValidateExecutionPlan(plan); err != nil {
+		return fmt.Errorf("execution plan: %w", err)
 	}
 	if config.RTol < 0 || config.ATol < 0 ||
 		math.IsNaN(config.RTol) || math.IsNaN(config.ATol) ||
@@ -179,10 +185,54 @@ func validatePlannedSessionConfig(
 	if config.ForwardTimeout == 0 {
 		config.ForwardTimeout = DefaultForwardTimeout
 	}
-	if config.TerminalSampling && (reference != nil || config.LogitsObserver != nil) {
+	terminalSampling := plan.Stages[len(plan.Stages)-1].ResponseMode == StageResponseSampledToken
+	if terminalSampling && (reference != nil || config.LogitsObserver != nil) {
 		return errors.New("terminal sampling cannot return logits for reference verification")
 	}
 	return nil
+}
+
+// NewBalancedPlannedSession discovers the pinned model identity, constructs a
+// deterministic balanced plan for the supplied target IDs, and prepares the
+// canonical N-stage session. It exists for explicit correctness experiments;
+// automatic placement will construct ExecutionPlan directly.
+func NewBalancedPlannedSession(
+	ctx context.Context,
+	modelID string,
+	targets []ExecutionTarget,
+	reference workerproc.PersistentCaller,
+	terminalResponseMode StageResponseMode,
+	config PlannedSessionConfig,
+) (*PlannedSession, error) {
+	started := time.Now()
+	if modelID == "" {
+		return nil, errors.New("model is required")
+	}
+	if len(targets) == 0 || targets[0].Caller == nil {
+		return nil, errors.New("at least one execution target is required")
+	}
+	model, err := modelInfo(ctx, targets[0].Caller, modelID)
+	if err != nil {
+		return nil, fmt.Errorf("discover model for execution plan: %w", err)
+	}
+	targetIDs := make([]string, len(targets))
+	for index, target := range targets {
+		targetIDs[index] = target.TargetID
+	}
+	plan, err := BuildBalancedExecutionPlan(ExecutionModel{
+		ID:                    model.ModelID,
+		CheckpointFingerprint: model.CheckpointFingerprint,
+		LayerCount:            model.LayerCount,
+	}, targetIDs, terminalResponseMode)
+	if err != nil {
+		return nil, err
+	}
+	session, err := NewPlannedSession(ctx, plan, targets, reference, config)
+	if err != nil {
+		return nil, err
+	}
+	session.setupMicros = time.Since(started).Microseconds()
+	return session, nil
 }
 
 func (s *PlannedSession) Generate(
@@ -209,13 +259,13 @@ func (s *PlannedSession) Generate(
 	}
 
 	result = PlannedResult{
-		Model: s.config.Model, ModelType: s.model.ModelType,
+		Model: s.plan.Model.ID, ModelType: s.model.ModelType,
 		CheckpointFingerprint: s.model.CheckpointFingerprint,
-		CheckpointBytes: s.model.CheckpointBytes, ExecutionPlan: s.plan,
+		CheckpointBytes:       s.model.CheckpointBytes, ExecutionPlan: s.plan,
 		SequenceID: request.SequenceID, Prompt: request.Prompt, MaxTokens: request.MaxTokens,
 		RTol: s.config.RTol, ATol: s.config.ATol,
 		ForwardTimeoutMillis: s.config.ForwardTimeout.Milliseconds(),
-		StageKVCacheBytes: make([]int, len(s.targets)),
+		StageKVCacheBytes:    make([]int, len(s.targets)),
 		Timing: PlannedTiming{
 			SessionSetupMicros: s.setupMicros,
 			StageComputeMicros: make([]uint64, len(s.targets)),
@@ -233,7 +283,7 @@ func (s *PlannedSession) Generate(
 
 	inputCaller := s.targets[0].Caller
 	tokenizeStarted := time.Now()
-	tokenized, err := tokenize(ctx, inputCaller, s.config.Model, request.Prompt)
+	tokenized, err := tokenize(ctx, inputCaller, s.plan.Model.ID, request.Prompt)
 	result.Timing.TokenizeMicros = time.Since(tokenizeStarted).Microseconds()
 	if err != nil {
 		return result, fmt.Errorf("tokenize prompt: %w", err)
@@ -244,7 +294,7 @@ func (s *PlannedSession) Generate(
 	result.PromptTokenIDs = tokenized.TokenIDs
 	result.EOSTokenID = tokenized.EOSTokenID
 
-	targets := ExecutionSequenceTargets(s.targets)
+	targets := executionSequenceTargets(s.targets)
 	if s.reference != nil {
 		targets = append(targets, workerproc.SequenceTarget{
 			Name: "reference", Caller: s.reference, ShardID: s.referenceShard,
@@ -274,9 +324,9 @@ func (s *PlannedSession) Generate(
 	prefillStarted := time.Now()
 	distributedStarted := time.Now()
 	point = failurePoint{phase: "distributed_prefill", operation: "prefill", position: 0}
-	stageExecutions, terminalResult, err := ExecuteStageChain(
+	stageExecutions, terminalResult, err := executeBoundStageChain(
 		ctx, s.config.ForwardTimeout, s.targets,
-		"prefill", request.SequenceID, 0, prompt, s.config.TerminalSampling,
+		"prefill", request.SequenceID, 0, prompt,
 	)
 	if err != nil {
 		point = failurePointForStageError("prefill", 0, err)
@@ -395,9 +445,9 @@ func (s *PlannedSession) Generate(
 		point = failurePoint{
 			phase: "distributed_decode", operation: "decode", position: position,
 		}
-		stageExecutions, terminalResult, err = ExecuteStageChain(
+		stageExecutions, terminalResult, err = executeBoundStageChain(
 			ctx, s.config.ForwardTimeout, s.targets,
-			"decode", request.SequenceID, position, token, s.config.TerminalSampling,
+			"decode", request.SequenceID, position, token,
 		)
 		if err != nil {
 			point = failurePointForStageError("decode", position, err)
@@ -438,7 +488,7 @@ func (s *PlannedSession) Generate(
 
 	point = failurePoint{phase: "detokenize", shardID: s.targets[0].Stage.ShardID}
 	detokenizeStarted := time.Now()
-	text, err := detokenize(ctx, inputCaller, s.config.Model, result.GeneratedTokenIDs)
+	text, err := detokenize(ctx, inputCaller, s.plan.Model.ID, result.GeneratedTokenIDs)
 	result.Timing.DetokenizeMicros = time.Since(detokenizeStarted).Microseconds()
 	if err != nil {
 		return result, fmt.Errorf("detokenize generated tokens: %w", err)
@@ -467,9 +517,15 @@ func newPlannedStageSample(
 	reference *workerproc.PersistentForwardResult,
 	referenceWallMicros int64,
 ) PlannedStageSample {
+	stages := append([]StageExecution(nil), executions...)
+	for index := range stages {
+		// Observers only need measurements. Retaining forward results here would
+		// keep every boundary/logit tensor alive when a benchmark stores samples.
+		stages[index].Result = nil
+	}
 	sample := PlannedStageSample{
 		Operation: operation, Position: position, InputTokenCount: inputTokenCount,
-		Stages: append([]StageExecution(nil), executions...),
+		Stages:                    stages,
 		DistributedEndToEndMicros: distributedEndToEndMicros,
 	}
 	if reference != nil {
@@ -499,8 +555,8 @@ func failureFromPlanned(point failurePoint, result PlannedResult, err error) Fai
 		SequenceID: result.SequenceID, ShardID: point.shardID,
 		Phase: point.phase, Operation: point.operation, Position: point.position,
 		LastAcceptedTokenIndex: len(result.GeneratedTokenIDs) - 1,
-		TimedOut: errors.Is(err, context.DeadlineExceeded),
-		Canceled: errors.Is(err, context.Canceled), Cause: err.Error(),
+		TimedOut:               errors.Is(err, context.DeadlineExceeded),
+		Canceled:               errors.Is(err, context.Canceled), Cause: err.Error(),
 	}
 	if len(result.GeneratedTokenIDs) > 0 {
 		token := result.GeneratedTokenIDs[len(result.GeneratedTokenIDs)-1]

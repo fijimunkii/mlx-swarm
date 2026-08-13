@@ -11,7 +11,10 @@ import (
 )
 
 func TestPrepareExecutionTargetsPreflightsAllModelsBeforeLoading(t *testing.T) {
-	plan, err := BuildBalancedExecutionPlan("test/model", "expected", 6, 3)
+	plan, err := BuildBalancedExecutionPlan(
+		ExecutionModel{ID: "test/model", CheckpointFingerprint: "expected", LayerCount: 6},
+		testExecutionTargetIDs(3), StageResponseTensor,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +25,7 @@ func TestPrepareExecutionTargetsPreflightsAllModelsBeforeLoading(t *testing.T) {
 	}
 	targets := bindExecutionFakeTargets(plan, workers)
 
-	_, err = PrepareExecutionTargets(context.Background(), "test/model", targets)
+	_, err = PrepareExecutionTargets(context.Background(), plan, targets)
 	if err == nil {
 		t.Fatal("expected checkpoint mismatch")
 	}
@@ -34,7 +37,10 @@ func TestPrepareExecutionTargetsPreflightsAllModelsBeforeLoading(t *testing.T) {
 }
 
 func TestPrepareExecutionTargetsLoadsFiveComplementaryStages(t *testing.T) {
-	plan, err := BuildBalancedExecutionPlan("test/model", "expected", 18, 5)
+	plan, err := BuildBalancedExecutionPlan(
+		ExecutionModel{ID: "test/model", CheckpointFingerprint: "expected", LayerCount: 18},
+		testExecutionTargetIDs(5), StageResponseTensor,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +50,7 @@ func TestPrepareExecutionTargetsLoadsFiveComplementaryStages(t *testing.T) {
 	}
 	targets := bindExecutionFakeTargets(plan, workers)
 
-	model, err := PrepareExecutionTargets(context.Background(), "test/model", targets)
+	model, err := PrepareExecutionTargets(context.Background(), plan, targets)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,8 +71,51 @@ func TestPrepareExecutionTargetsLoadsFiveComplementaryStages(t *testing.T) {
 	}
 }
 
+func TestPrepareExecutionTargetsCanReuseWorkersAcrossPlanSizes(t *testing.T) {
+	workers := make([]*executionFakeWorker, 5)
+	for index := range workers {
+		workers[index] = newExecutionFakeWorker(fmt.Sprintf("worker-%d", index), "expected", 18)
+	}
+	two, err := BuildBalancedExecutionPlan(
+		ExecutionModel{ID: "test/model", CheckpointFingerprint: "expected", LayerCount: 18},
+		testExecutionTargetIDs(2), StageResponseTensor,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PrepareExecutionTargets(
+		context.Background(), two, bindExecutionFakeTargets(two, workers[:2]),
+	); err != nil {
+		t.Fatal(err)
+	}
+	five, err := BuildBalancedExecutionPlan(
+		ExecutionModel{ID: "test/model", CheckpointFingerprint: "expected", LayerCount: 18},
+		testExecutionTargetIDs(5), StageResponseTensor,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PrepareExecutionTargets(
+		context.Background(), five, bindExecutionFakeTargets(five, workers),
+	); err != nil {
+		t.Fatalf("prepare five-stage plan after two-stage plan: %v", err)
+	}
+	if workers[0].loadCount != 2 || workers[1].loadCount != 2 {
+		t.Fatalf(
+			"shared workers did not retain distinct plan shards: loads=%d/%d",
+			workers[0].loadCount, workers[1].loadCount,
+		)
+	}
+	if workers[0].loaded[0].ShardID == workers[0].loaded[1].ShardID {
+		t.Fatalf("worker reused colliding shard ID %q", workers[0].loaded[0].ShardID)
+	}
+}
+
 func TestExecuteStageChainTraversesFiveStagesInOrder(t *testing.T) {
-	plan, err := BuildBalancedExecutionPlan("test/model", "expected", 10, 5)
+	plan, err := BuildBalancedExecutionPlan(
+		ExecutionModel{ID: "test/model", CheckpointFingerprint: "expected", LayerCount: 10},
+		testExecutionTargetIDs(5), StageResponseSampledToken,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,14 +125,14 @@ func TestExecuteStageChainTraversesFiveStagesInOrder(t *testing.T) {
 		workers[index].marker = byte(index + 1)
 	}
 	targets := bindExecutionFakeTargets(plan, workers)
-	if _, err := PrepareExecutionTargets(context.Background(), "test/model", targets); err != nil {
+	if _, err := PrepareExecutionTargets(context.Background(), plan, targets); err != nil {
 		t.Fatal(err)
 	}
 
 	input := workerproc.WireTensor{Shape: []int{1, 2}, DType: "int32", Data: []byte{1, 2, 3, 4}}
 	executions, terminal, err := ExecuteStageChain(
-		context.Background(), time.Second, targets,
-		"prefill", "sequence", 0, input, true,
+		context.Background(), time.Second, plan, targets,
+		"prefill", "sequence", 0, input,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +171,10 @@ func TestExecuteStageChainTraversesFiveStagesInOrder(t *testing.T) {
 }
 
 func TestExecuteStageChainReportsExactFailedStage(t *testing.T) {
-	plan, err := BuildBalancedExecutionPlan("test/model", "expected", 6, 3)
+	plan, err := BuildBalancedExecutionPlan(
+		ExecutionModel{ID: "test/model", CheckpointFingerprint: "expected", LayerCount: 6},
+		testExecutionTargetIDs(3), StageResponseTensor,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,15 +185,14 @@ func TestExecuteStageChainReportsExactFailedStage(t *testing.T) {
 	}
 	workers[1].inferErr = context.DeadlineExceeded
 	targets := bindExecutionFakeTargets(plan, workers)
-	if _, err := PrepareExecutionTargets(context.Background(), "test/model", targets); err != nil {
+	if _, err := PrepareExecutionTargets(context.Background(), plan, targets); err != nil {
 		t.Fatal(err)
 	}
 
 	executions, terminal, err := ExecuteStageChain(
-		context.Background(), time.Second, targets,
+		context.Background(), time.Second, plan, targets,
 		"decode", "sequence", 9,
 		workerproc.WireTensor{Shape: []int{1, 1}, DType: "int32", Data: []byte{1, 0, 0, 0}},
-		false,
 	)
 	if terminal != nil || len(executions) != 1 {
 		t.Fatalf("unexpected partial execution: terminal=%+v executions=%d", terminal, len(executions))
@@ -157,7 +208,10 @@ func TestExecuteStageChainReportsExactFailedStage(t *testing.T) {
 }
 
 func TestExecutionSequenceTargetsPreservePlanOrder(t *testing.T) {
-	plan, err := BuildBalancedExecutionPlan("test/model", "expected", 8, 4)
+	plan, err := BuildBalancedExecutionPlan(
+		ExecutionModel{ID: "test/model", CheckpointFingerprint: "expected", LayerCount: 8},
+		testExecutionTargetIDs(4), StageResponseTensor,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +220,11 @@ func TestExecutionSequenceTargetsPreservePlanOrder(t *testing.T) {
 		workers[index] = newExecutionFakeWorker(fmt.Sprintf("worker-%d", index), "expected", 8)
 	}
 	targets := bindExecutionFakeTargets(plan, workers)
-	sequenceTargets := ExecutionSequenceTargets(targets)
+	bound, err := bindExecutionTargets(plan, targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequenceTargets := executionSequenceTargets(bound)
 	if len(sequenceTargets) != len(targets) {
 		t.Fatalf("sequence targets = %d, want %d", len(sequenceTargets), len(targets))
 	}
@@ -182,7 +240,7 @@ func TestExecutionSequenceTargetsPreservePlanOrder(t *testing.T) {
 func bindExecutionFakeTargets(plan ExecutionPlan, workers []*executionFakeWorker) []ExecutionTarget {
 	targets := make([]ExecutionTarget, len(plan.Stages))
 	for index, stage := range plan.Stages {
-		targets[index] = ExecutionTarget{Stage: stage, Caller: workers[index]}
+		targets[index] = ExecutionTarget{TargetID: stage.TargetID, Caller: workers[index]}
 	}
 	return targets
 }
@@ -194,14 +252,14 @@ type executionInferenceCall struct {
 }
 
 type executionFakeWorker struct {
-	name                  string
-	fingerprint           string
-	layerCount            int
-	marker                byte
-	loadCount             int
-	loaded                []workerproc.PersistentShardSnapshot
-	inferenceCalls        []executionInferenceCall
-	inferErr              error
+	name           string
+	fingerprint    string
+	layerCount     int
+	marker         byte
+	loadCount      int
+	loaded         []workerproc.PersistentShardSnapshot
+	inferenceCalls []executionInferenceCall
+	inferErr       error
 }
 
 func newExecutionFakeWorker(name, fingerprint string, layerCount int) *executionFakeWorker {
@@ -219,24 +277,24 @@ func (worker *executionFakeWorker) Call(
 	switch request.Command {
 	case "modelInfo":
 		result.Model = &workerproc.PersistentModelResult{
-			ModelID: request.Model.ModelID,
-			ModelType: "test",
-			LayerCount: worker.layerCount,
+			ModelID:               request.Model.ModelID,
+			ModelType:             "test",
+			LayerCount:            worker.layerCount,
 			CheckpointFingerprint: worker.fingerprint,
-			CheckpointBytes: 123,
+			CheckpointBytes:       123,
 		}
 	case "state":
 		result.State = &workerproc.PersistentWorkerState{LoadedShards: worker.loaded, LoadCount: worker.loadCount}
 	case "loadShard":
 		load := request.LoadShard
 		snapshot := workerproc.PersistentShardSnapshot{
-			ShardID: load.ShardID,
-			ModelID: load.ModelID,
+			ShardID:               load.ShardID,
+			ModelID:               load.ModelID,
 			CheckpointFingerprint: worker.fingerprint,
-			LayerStart: load.LayerStart,
-			LayerEnd: load.LayerEnd,
-			OwnsInput: load.OwnsInput,
-			OwnsOutput: load.OwnsOutput,
+			LayerStart:            load.LayerStart,
+			LayerEnd:              load.LayerEnd,
+			OwnsInput:             load.OwnsInput,
+			OwnsOutput:            load.OwnsOutput,
 		}
 		worker.loaded = append(worker.loaded, snapshot)
 		worker.loadCount++
@@ -251,15 +309,15 @@ func (worker *executionFakeWorker) Call(
 		worker.inferenceCalls = append(worker.inferenceCalls, executionInferenceCall{
 			operation: request.Command,
 			inputKind: request.Forward.InputKind,
-			sample: request.Forward.ReturnSampledToken,
+			sample:    request.Forward.ReturnSampledToken,
 		})
 		forward := &workerproc.PersistentForwardResult{
-			ShardID: request.Forward.ShardID,
-			SequenceID: request.Forward.SequenceID,
-			Operation: request.Command,
-			Position: request.Forward.Position,
+			ShardID:       request.Forward.ShardID,
+			SequenceID:    request.Forward.SequenceID,
+			Operation:     request.Command,
+			Position:      request.Forward.Position,
 			ComputeMicros: 1,
-			KVCacheBytes: 1,
+			KVCacheBytes:  1,
 		}
 		if request.Forward.ReturnSampledToken {
 			token := int32(7)
