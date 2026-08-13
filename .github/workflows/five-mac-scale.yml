@@ -17,6 +17,7 @@ on:
       - '.github/workflows/five-mac-scale.yml'
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -31,8 +32,46 @@ env:
   MLX_SWARM_CACHE_LIMIT_BYTES: '67108864'
 
 jobs:
+  mac-regressions:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - name: Wait for the smaller Mac regression workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            echo "Manual run: no same-revision PR regressions to sequence"
+            exit 0
+          fi
+          for workflow in mlx.yml pooled-memory.yml; do
+            run_id=""
+            for _ in {1..120}; do
+              run_id="$(gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow "$workflow" \
+                --branch "$GITHUB_HEAD_REF" \
+                --event pull_request \
+                --limit 20 \
+                --json databaseId,headSha \
+                --jq '.[] | select(.headSha == env.HEAD_SHA) | .databaseId' | head -n 1)"
+              if [ -n "$run_id" ]; then
+                break
+              fi
+              sleep 5
+            done
+            if [ -z "$run_id" ]; then
+              echo "Could not find $workflow for $HEAD_SHA" >&2
+              exit 1
+            fi
+            gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 15
+          done
+
   mac-worker:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: mac-regressions
     strategy:
       fail-fast: false
       matrix:
@@ -121,6 +160,7 @@ jobs:
 
   linux-coordinator:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: mac-regressions
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
