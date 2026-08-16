@@ -222,7 +222,7 @@ Once explicit N-stage execution is correct, let the control plane build the plan
 - [x] distinguish lease liveness from server-stamped dynamic-status freshness
 - [ ] measure or ingest compute latency, RTT, bandwidth, memory, health, and
   retained-shard state
-- [ ] represent plan constraints independently from a fixed worker count or
+- [x] represent plan constraints independently from a fixed worker count or
   backend
 - [ ] place complementary ranges subject to memory, adapter, fingerprint,
   topology, input/output ownership, and retained-state constraints
