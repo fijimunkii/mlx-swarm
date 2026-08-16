@@ -217,8 +217,8 @@ Tracking: [#35](https://github.com/fijimunkii/mlx-swarm/issues/35)
 
 Once explicit N-stage execution is correct, let the control plane build the plan.
 
-- [ ] define a versioned capability and inventory record
-- [ ] register workers and expire stale membership through heartbeats
+- [x] define a versioned capability and inventory record
+- [x] register workers and expire stale membership through heartbeats
 - [ ] measure or ingest compute latency, RTT, bandwidth, memory, health, and
   retained-shard state
 - [ ] represent plan constraints independently from a fixed worker count or

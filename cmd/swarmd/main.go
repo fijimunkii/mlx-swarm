@@ -57,6 +57,28 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("persistent MLX worker health: %w", err)
 	}
+	membershipConfig, membershipEnabled, err := membershipConfigFromEnvironment()
+	if err != nil {
+		return err
+	}
+	var membership *membershipAgent
+	if membershipEnabled {
+		membershipContext, cancelMembership := context.WithTimeout(context.Background(), 10*time.Second)
+		membership, err = newMembershipAgent(
+			membershipContext, membershipConfig, worker, persistentWorker,
+		)
+		if err == nil {
+			err = membership.Register(membershipContext)
+		}
+		cancelMembership()
+		if err != nil {
+			return fmt.Errorf("join mesh membership: %w", err)
+		}
+		log.Printf(
+			"swarmd registered worker %s instance %s with %s",
+			membershipConfig.WorkerID, membershipConfig.InstanceID, membershipConfig.ControlURL,
+		)
+	}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -146,8 +168,26 @@ func run() error {
 		syscall.SIGTERM,
 	)
 	defer stopSignals()
+	var membershipFailure <-chan error
+	var membershipStopped <-chan struct{}
+	stopMembership := func() {}
+	if membership != nil {
+		membershipContext, cancelMembership := context.WithCancel(context.Background())
+		failures := make(chan error, 1)
+		stopped := make(chan struct{})
+		membershipFailure = failures
+		membershipStopped = stopped
+		stopMembership = cancelMembership
+		go func() {
+			defer close(stopped)
+			if err := membership.Run(membershipContext); err != nil {
+				failures <- err
+			}
+		}()
+	}
 	serverStopped := make(chan struct{})
 	shutdownComplete := make(chan struct{})
+	var membershipErr error
 	var debugShutdown <-chan struct{}
 	if exitAfterDebugShard || allowDebugComplete {
 		debugShutdown = debugShardComplete
@@ -160,6 +200,8 @@ func run() error {
 			shutdownReason = "signal"
 		case <-debugShutdown:
 			shutdownReason = "debug one-shot"
+		case membershipErr = <-membershipFailure:
+			shutdownReason = "membership failure"
 		case <-serverStopped:
 			return
 		}
@@ -173,7 +215,20 @@ func run() error {
 	log.Printf("swarmd listening on %s", addr)
 	serveErr := server.ListenAndServe()
 	close(serverStopped)
+	stopMembership()
+	if membershipStopped != nil {
+		<-membershipStopped
+	}
 	<-shutdownComplete
+	if membershipErr == nil && membershipFailure != nil {
+		select {
+		case membershipErr = <-membershipFailure:
+		default:
+		}
+	}
+	if membershipErr != nil {
+		return fmt.Errorf("membership: %w", membershipErr)
+	}
 	if serveErr != nil && serveErr != http.ErrServerClosed {
 		return fmt.Errorf("serve: %w", serveErr)
 	}
