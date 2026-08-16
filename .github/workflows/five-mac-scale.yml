@@ -81,45 +81,32 @@ jobs:
 
   mac-worker:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    needs: mac-regressions
+    needs: build-worker
     strategy:
       fail-fast: false
       matrix:
         index: [0, 1, 2, 3, 4]
     runs-on: macos-15
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Fingerprint Swift toolchain
-        id: mlx-toolchain
-        run: |
-          toolchain="$( { xcodebuild -version; swift --version; } )"
-          printf '%s\n' "$toolchain"
-          fingerprint="$(printf '%s\n' "$toolchain" | shasum -a 256 | awk '{print $1}')"
-          printf 'fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
-      - name: Restore MLX build cache
-        uses: actions/cache@v4
+      - name: Download MLX worker
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            worker/mlx/.build/source-packages
-            worker/mlx/.build/xcode/Build
-          key: mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-${{ hashFiles('worker/mlx/Sources/**', 'scripts/build-mlx-worker.sh') }}
-          restore-keys: |
-            mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-
+          name: five-mac-mlx-worker
+          path: worker/mlx/.build/xcode/Build/Products/Debug
       - name: Restore checkpoint cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface/hub
           key: mlx-checkpoints-v1-gemma-270m-12b
-      - name: Build worker and prefetch checkpoints
+      - name: Verify worker and prefetch checkpoints
         run: |
-          ./scripts/build-mlx-worker.sh
           worker="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug/MLXWorker"
+          chmod +x "$worker"
           "$worker" capabilities
           "$worker" checkpoint-info "$SMALL_MODEL"
           "$worker" checkpoint-info "$POOLED_MODEL"
@@ -183,9 +170,50 @@ jobs:
           wait "$daemon_pid"
           daemon_pid=""
 
-  linux-coordinator:
+  build-worker:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     needs: mac-regressions
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fingerprint Swift toolchain
+        id: mlx-toolchain
+        run: |
+          toolchain="$( { xcodebuild -version; swift --version; } )"
+          printf '%s\n' "$toolchain"
+          fingerprint="$(printf '%s\n' "$toolchain" | shasum -a 256 | awk '{print $1}')"
+          printf 'fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Restore MLX build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            worker/mlx/.build/source-packages
+            worker/mlx/.build/xcode/Build
+          key: mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-${{ hashFiles('worker/mlx/Sources/**', 'scripts/build-mlx-worker.sh') }}
+          restore-keys: |
+            mlx-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.mlx-toolchain.outputs.fingerprint }}-${{ hashFiles('worker/mlx/Package.swift', 'worker/mlx/Package.resolved') }}-
+      - name: Build portable MLX worker
+        run: |
+          ./scripts/build-mlx-worker.sh
+          product="$GITHUB_WORKSPACE/worker/mlx/.build/xcode/Build/Products/Debug"
+          runtime="$RUNNER_TEMP/mlx-worker-runtime"
+          mkdir -p "$runtime"
+          install -m 0755 "$product/MLXWorker" "$runtime/MLXWorker"
+          find "$product" -maxdepth 1 -type d -name '*.bundle' \
+            -exec cp -R '{}' "$runtime/" \;
+          "$runtime/MLXWorker" capabilities
+      - name: Upload MLX worker
+        uses: actions/upload-artifact@v4
+        with:
+          name: five-mac-mlx-worker
+          path: ${{ runner.temp }}/mlx-worker-runtime
+          if-no-files-found: error
+          retention-days: 1
+
+  linux-coordinator:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: build-worker
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
