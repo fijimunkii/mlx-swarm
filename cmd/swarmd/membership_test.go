@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -46,6 +47,32 @@ func (worker *fixtureMembershipWorker) Call(
 
 func (worker *fixtureMembershipWorker) RestartCount() int { return worker.restarts }
 
+type blockingMembershipWorker struct {
+	state   workerproc.PersistentWorkerState
+	calls   atomic.Int32
+	blocked chan struct{}
+}
+
+func (worker *blockingMembershipWorker) Call(
+	ctx context.Context,
+	_ workerproc.PersistentRequest,
+) (workerproc.PersistentResponse, error) {
+	if worker.calls.Add(1) == 1 {
+		state := worker.state
+		return workerproc.PersistentResponse{
+			OK: true, Result: &workerproc.PersistentWorkerResult{State: &state},
+		}, nil
+	}
+	select {
+	case worker.blocked <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return workerproc.PersistentResponse{}, ctx.Err()
+}
+
+func (*blockingMembershipWorker) RestartCount() int { return 0 }
+
 func TestMembershipAgentRegistersRefreshesAndRejoins(t *testing.T) {
 	membership := registry.New(time.Minute)
 	server := httptest.NewServer(registry.NewHTTPHandler(membership))
@@ -82,6 +109,7 @@ func TestMembershipAgentRegistersRefreshesAndRejoins(t *testing.T) {
 
 	worker.restarts = 2
 	worker.state.LoadedShards[0].OpenSequenceCount = 1
+	agent.registration.Status = agent.probeStatus(context.Background(), agent.registration.Status)
 	if err := agent.heartbeat(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -98,6 +126,60 @@ func TestMembershipAgentRegistersRefreshesAndRejoins(t *testing.T) {
 	}
 	if workers := membership.Snapshot().Workers; len(workers) != 1 || workers[0].InstanceID != "process-a" {
 		t.Fatalf("unexpected rejoined inventory: %+v", workers)
+	}
+}
+
+func TestMembershipAgentRefreshesLeaseWhileStateProbeIsBlocked(t *testing.T) {
+	membership := registry.New(250 * time.Millisecond)
+	server := httptest.NewServer(registry.NewHTTPHandler(membership))
+	defer server.Close()
+	worker := &blockingMembershipWorker{
+		state: testMembershipState(), blocked: make(chan struct{}, 1),
+	}
+	agent, err := newMembershipAgent(
+		context.Background(),
+		membershipConfig{
+			ControlURL: server.URL, WorkerID: "mac-a", InstanceID: "process-a",
+			PublicURL: "http://mac-a:8080", Backend: "mlx", HeartbeatInterval: 20 * time.Millisecond,
+		},
+		fixtureCapabilityRunner{capabilities: localCapabilities{
+			Runtime: "mlx-swift", Device: "gpu",
+			CheckpointShardModelTypes: []string{"adapter-a"}, PhysicalMemoryBytes: 8192,
+		}},
+		worker,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.Register(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	registeredAt := membership.Snapshot().Workers[0].LastSeen
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- agent.Run(ctx) }()
+	select {
+	case <-worker.blocked:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("worker state probe did not block")
+	}
+	time.Sleep(500 * time.Millisecond)
+	inventory := membership.Snapshot()
+	if len(inventory.Workers) != 1 || !inventory.Workers[0].LastSeen.After(registeredAt) {
+		cancel()
+		t.Fatalf("blocked state probe allowed membership lease to expire: %+v", inventory)
+	}
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("membership agent stopped with error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("membership agent did not stop")
 	}
 }
 

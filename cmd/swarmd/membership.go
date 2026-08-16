@@ -172,11 +172,27 @@ func (agent *membershipAgent) Run(ctx context.Context) error {
 	ticker := time.NewTicker(agent.interval)
 	defer ticker.Stop()
 	defer agent.remove()
+	probeResults := make(chan registry.Status, 1)
+	probeInFlight := false
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case status := <-probeResults:
+			agent.registration.Status = status
+			probeInFlight = false
 		case <-ticker.C:
+			if !probeInFlight {
+				probeInFlight = true
+				previous := agent.registration.Status
+				go func() {
+					status := agent.probeStatus(ctx, previous)
+					select {
+					case probeResults <- status:
+					case <-ctx.Done():
+					}
+				}()
+			}
 			if err := agent.heartbeat(ctx); err != nil {
 				return err
 			}
@@ -184,33 +200,34 @@ func (agent *membershipAgent) Run(ctx context.Context) error {
 	}
 }
 
-func (agent *membershipAgent) heartbeat(ctx context.Context) error {
+func (agent *membershipAgent) probeStatus(ctx context.Context, previous registry.Status) registry.Status {
 	state, stateErr := workerproc.State(ctx, agent.worker)
-	status := agent.registration.Status
 	if stateErr != nil {
-		status.Health = registry.HealthDegraded
-		status.AvailableMemoryBytes = 0
-		status.RestartCount = agent.worker.RestartCount()
-		status.RecentFailureCount++
-	} else {
-		status = membershipStatus(
-			state, agent.worker.RestartCount(), agent.registration.Capabilities.PhysicalMemoryBytes,
-		)
-		status.RecentFailureCount = agent.registration.Status.RecentFailureCount
+		previous.Health = registry.HealthDegraded
+		previous.AvailableMemoryBytes = 0
+		previous.RestartCount = agent.worker.RestartCount()
+		previous.RecentFailureCount++
+		return previous
 	}
+	status := membershipStatus(
+		state, agent.worker.RestartCount(), agent.registration.Capabilities.PhysicalMemoryBytes,
+	)
+	status.RecentFailureCount = previous.RecentFailureCount
+	return status
+}
+
+func (agent *membershipAgent) heartbeat(ctx context.Context) error {
 	heartbeat := registry.Heartbeat{
 		SchemaVersion: registry.SchemaVersion,
 		InstanceID:    agent.registration.InstanceID,
-		Status:        status,
+		Status:        agent.registration.Status,
 	}
 	_, err := agent.client.Heartbeat(ctx, agent.registration.ID, heartbeat)
 	if err == nil {
-		agent.registration.Status = status
 		return nil
 	}
 	var remote *registry.RemoteError
 	if errors.As(err, &remote) && (remote.Code == "worker_not_found" || remote.Code == "lease_expired") {
-		agent.registration.Status = status
 		if registerErr := agent.Register(ctx); registerErr != nil {
 			var registerRemote *registry.RemoteError
 			if errors.As(registerErr, &registerRemote) && registerRemote.StatusCode < 500 {

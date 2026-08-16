@@ -121,6 +121,47 @@ func TestRegistryExpiresAndAllowsRejoin(t *testing.T) {
 	}
 }
 
+func TestRegistryCanonicalizesEndpointUniqueness(t *testing.T) {
+	tests := []struct {
+		name          string
+		firstEndpoint string
+		aliasEndpoint string
+		wantEndpoint  string
+	}{
+		{
+			name: "hostname case", firstEndpoint: "http://worker-a:8080",
+			aliasEndpoint: "HTTP://WORKER-A:8080/", wantEndpoint: "http://worker-a:8080",
+		},
+		{
+			name: "default HTTP port", firstEndpoint: "http://worker-a",
+			aliasEndpoint: "http://WORKER-A:80/", wantEndpoint: "http://worker-a",
+		},
+		{
+			name: "default HTTPS port", firstEndpoint: "https://worker-a",
+			aliasEndpoint: "HTTPS://WORKER-A:443/", wantEndpoint: "https://worker-a",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			registry := New(time.Minute)
+			first := testRegistration("worker-a", "instance-a")
+			first.Endpoint = test.firstEndpoint
+			mutation, err := registry.Register(first)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mutation.Worker.Endpoint != test.wantEndpoint {
+				t.Fatalf("canonical endpoint = %q, want %q", mutation.Worker.Endpoint, test.wantEndpoint)
+			}
+			alias := testRegistration("worker-b", "instance-b")
+			alias.Endpoint = test.aliasEndpoint
+			if _, err := registry.Register(alias); !errors.Is(err, ErrDuplicateEndpoint) {
+				t.Fatalf("endpoint alias registration error = %v", err)
+			}
+		})
+	}
+}
+
 func TestRegistryRejectsIncompleteRecords(t *testing.T) {
 	registry := New(time.Minute)
 	tests := []struct {

@@ -3,6 +3,7 @@ package registry
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"reflect"
 	"slices"
@@ -309,7 +310,7 @@ func validateStatus(status Status, capabilities Capabilities) error {
 }
 
 func normalizeRegistration(input *Registration) {
-	input.Endpoint = strings.TrimRight(input.Endpoint, "/")
+	input.Endpoint = canonicalEndpoint(input.Endpoint)
 	input.Capabilities.Adapters = normalizeStrings(input.Capabilities.Adapters)
 	input.Capabilities.Operations = normalizeStrings(input.Capabilities.Operations)
 	input.Capabilities.CheckpointFingerprints = normalizeStrings(input.Capabilities.CheckpointFingerprints)
@@ -322,6 +323,34 @@ func normalizeRegistration(input *Registration) {
 		return strings.Compare(left.Protocol, right.Protocol)
 	})
 	normalizeStatus(&input.Status)
+}
+
+func canonicalEndpoint(value string) string {
+	value = strings.TrimRight(value, "/")
+	endpoint, err := url.Parse(value)
+	if err != nil {
+		return value
+	}
+	endpoint.Scheme = strings.ToLower(endpoint.Scheme)
+	hostname := endpoint.Hostname()
+	if zone := strings.LastIndex(hostname, "%"); zone >= 0 {
+		hostname = strings.ToLower(hostname[:zone]) + hostname[zone:]
+	} else {
+		hostname = strings.ToLower(hostname)
+	}
+	port := endpoint.Port()
+	if (endpoint.Scheme == "http" && port == "80") ||
+		(endpoint.Scheme == "https" && port == "443") {
+		port = ""
+	}
+	if port != "" {
+		endpoint.Host = net.JoinHostPort(hostname, port)
+	} else if strings.Contains(hostname, ":") {
+		endpoint.Host = "[" + hostname + "]"
+	} else {
+		endpoint.Host = hostname
+	}
+	return strings.TrimRight(endpoint.String(), "/")
 }
 
 func normalizeStatus(status *Status) {
