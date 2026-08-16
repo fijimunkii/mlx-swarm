@@ -160,7 +160,20 @@ jobs:
             "$daemon" &
           daemon_pid=$!
           (
-            sleep 3000
+            for _ in {1..100}; do
+              sleep 30
+              if ! kill -0 "$daemon_pid" 2>/dev/null; then
+                exit 0
+              fi
+              if curl -fsS --connect-timeout 2 --max-time 5 \
+                "http://${ts_ip}:8080/healthz" >/dev/null; then
+                printf 'mac-%s swarmd healthy at %s\n' \
+                  '${{ matrix.index }}' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+              else
+                printf 'mac-%s swarmd local health check failed at %s\n' \
+                  '${{ matrix.index }}' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >&2
+              fi
+            done
             echo "five-Mac worker watchdog expired after 50 minutes" >&2
             kill -TERM "$daemon_pid" 2>/dev/null || true
           ) &
