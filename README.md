@@ -152,6 +152,12 @@ lease independently from server-stamped status freshness, and removes it on
 clean shutdown. See the
 [membership runbook and API contract](docs/mesh-membership.md).
 
+The placement foundation evaluates every worker against one proposed stage
+using deterministic, backend-neutral hard constraints. It rejects stale or
+incompatible candidates with stable machine-readable reasons and accounts for
+compatible retained-shard reuse. See the
+[placement eligibility contract](docs/mesh-placement.md).
+
 ### Failure characterization
 
 Run the deterministic process and transport fault proof without a model or
