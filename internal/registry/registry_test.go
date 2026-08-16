@@ -29,6 +29,10 @@ func TestRegistryLifecycleIsLeasedAndDeterministic(t *testing.T) {
 		inventory.Workers[0].ID != "worker-a" || inventory.Workers[1].ID != "worker-b" {
 		t.Fatalf("unexpected inventory: %+v", inventory)
 	}
+	statusObservedAt := inventory.Workers[0].StatusObservedAt
+	if !statusObservedAt.Equal(now) || !inventory.Workers[0].StatusFresh(now, time.Second) {
+		t.Fatalf("registration status freshness was not server-stamped: %+v", inventory.Workers[0])
+	}
 	operations := inventory.Workers[0].Capabilities.Operations
 	if len(operations) != 2 || operations[0] != "decode" || operations[1] != "prefill" {
 		t.Fatalf("operations were not canonicalized: %v", operations)
@@ -56,28 +60,60 @@ func TestRegistryLifecycleIsLeasedAndDeterministic(t *testing.T) {
 	if _, err := registry.Register(duplicateEndpoint); !errors.Is(err, ErrDuplicateEndpoint) {
 		t.Fatalf("duplicate endpoint error = %v", err)
 	}
+	staleStatus := first.Status
 	if _, err := registry.Heartbeat("worker-a", Heartbeat{
-		SchemaVersion: SchemaVersion, InstanceID: "new-instance", Status: first.Status,
+		SchemaVersion: SchemaVersion, InstanceID: "new-instance", Status: &staleStatus,
 	}); !errors.Is(err, ErrStaleInstance) {
 		t.Fatalf("stale heartbeat error = %v", err)
 	}
 
 	now = now.Add(4 * time.Second)
+	leaseOnly, err := registry.Heartbeat("worker-a", Heartbeat{
+		SchemaVersion: SchemaVersion, InstanceID: "instance-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaseOnly.InventoryRevision != 2 || !leaseOnly.Worker.LastSeen.Equal(now) ||
+		!leaseOnly.Worker.ExpiresAt.Equal(now.Add(10*time.Second)) ||
+		!leaseOnly.Worker.StatusObservedAt.Equal(statusObservedAt) ||
+		leaseOnly.Worker.Status.RestartCount != first.Status.RestartCount {
+		t.Fatalf("lease-only heartbeat changed dynamic status: %+v", leaseOnly)
+	}
+	if !leaseOnly.Worker.StatusFresh(now, 4*time.Second) ||
+		leaseOnly.Worker.StatusFresh(now, 3*time.Second) ||
+		leaseOnly.Worker.StatusFresh(statusObservedAt.Add(-time.Second), time.Minute) ||
+		leaseOnly.Worker.StatusFresh(now, 0) {
+		t.Fatalf("unexpected conservative freshness result: %+v", leaseOnly.Worker)
+	}
+	freshInventory := Inventory{
+		GeneratedAt: now, LeaseTTLMillis: (10 * time.Second).Milliseconds(),
+	}
+	staleInventory := freshInventory
+	staleInventory.GeneratedAt = now.Add(7 * time.Second)
+	if !freshInventory.WorkerStatusFresh(leaseOnly.Worker) ||
+		staleInventory.WorkerStatusFresh(leaseOnly.Worker) {
+		t.Fatalf("inventory lease TTL did not provide a conservative freshness window")
+	}
+
+	now = now.Add(time.Second)
 	status := first.Status
 	status.AvailableMemoryBytes--
 	heartbeat, err := registry.Heartbeat("worker-a", Heartbeat{
-		SchemaVersion: SchemaVersion, InstanceID: "instance-a", Status: status,
+		SchemaVersion: SchemaVersion, InstanceID: "instance-a", Status: &status,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if heartbeat.InventoryRevision != 3 || !heartbeat.Worker.LastSeen.Equal(now) ||
-		!heartbeat.Worker.ExpiresAt.Equal(now.Add(10*time.Second)) {
+		!heartbeat.Worker.ExpiresAt.Equal(now.Add(10*time.Second)) ||
+		!heartbeat.Worker.StatusObservedAt.Equal(now) {
 		t.Fatalf("unexpected heartbeat mutation: %+v", heartbeat)
 	}
+	now = now.Add(time.Second)
 	if renewed, err := registry.Heartbeat("worker-a", Heartbeat{
-		SchemaVersion: SchemaVersion, InstanceID: "instance-a", Status: status,
-	}); err != nil || renewed.InventoryRevision != 3 {
+		SchemaVersion: SchemaVersion, InstanceID: "instance-a", Status: &status,
+	}); err != nil || renewed.InventoryRevision != 3 || !renewed.Worker.StatusObservedAt.Equal(now) {
 		t.Fatalf("unchanged heartbeat changed revision: mutation=%+v err=%v", renewed, err)
 	}
 
@@ -104,7 +140,6 @@ func TestRegistryExpiresAndAllowsRejoin(t *testing.T) {
 	if _, err := registry.Heartbeat("worker-a", Heartbeat{
 		SchemaVersion: SchemaVersion,
 		InstanceID:    "instance-a",
-		Status:        testRegistration("worker-a", "instance-a").Status,
 	}); !errors.Is(err, ErrLeaseExpired) {
 		t.Fatalf("expired heartbeat error = %v", err)
 	}
@@ -118,6 +153,44 @@ func TestRegistryExpiresAndAllowsRejoin(t *testing.T) {
 	}
 	if mutation.InventoryRevision != 3 || mutation.Worker.InstanceID != "instance-b" {
 		t.Fatalf("unexpected rejoin mutation: %+v", mutation)
+	}
+}
+
+func TestRegistrationWithoutFreshStatusRequiresANewObservation(t *testing.T) {
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	registry := New(5*time.Second, WithClock(func() time.Time { return now }))
+	input := testRegistration("worker-a", "instance-a")
+	registered, err := registry.register(input, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !registered.Worker.StatusObservedAt.IsZero() ||
+		registered.Worker.StatusFresh(now, time.Minute) {
+		t.Fatalf("cached registration was represented as fresh: %+v", registered)
+	}
+
+	now = now.Add(time.Second)
+	leaseOnly, err := registry.Heartbeat("worker-a", Heartbeat{
+		SchemaVersion: SchemaVersion, InstanceID: "instance-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaseOnly.InventoryRevision != 1 || !leaseOnly.Worker.StatusObservedAt.IsZero() {
+		t.Fatalf("lease renewal published cached status: %+v", leaseOnly)
+	}
+
+	now = now.Add(time.Second)
+	status := input.Status
+	observed, err := registry.Heartbeat("worker-a", Heartbeat{
+		SchemaVersion: SchemaVersion, InstanceID: "instance-a", Status: &status,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.InventoryRevision != 2 || !observed.Worker.StatusObservedAt.Equal(now) ||
+		!observed.Worker.StatusFresh(now, 5*time.Second) {
+		t.Fatalf("fresh status did not restore placement eligibility: %+v", observed)
 	}
 }
 

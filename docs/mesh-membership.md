@@ -3,8 +3,10 @@
 The first Dynamic Trusted Mesh control-plane primitive is a leased inventory of
 workers on a private LAN or tailnet. `swarm-control` owns the inventory;
 participating `swarmd` processes register themselves and refresh their live
-state through heartbeats. This is trusted-network discovery, not public peer
-discovery or an authentication boundary.
+state when a worker probe completes. Lease-only heartbeats continue while a
+serialized worker operation is in flight, so liveness never represents cached
+capacity or retained state as current. This is trusted-network discovery, not
+public peer discovery or an authentication boundary.
 
 ## Run the control plane
 
@@ -45,16 +47,25 @@ Every worker record uses membership schema version 1 and contains:
   transports;
 - concurrency, open-sequence, and retained-byte admission limits;
 - health, schedulable memory available under the backend's configured runtime
-  limit, process pressure, restart/failure counters, and
+  limit, process pressure, restart/failure counters, server-stamped
+  `statusObservedAt`, and
   open sequence state; and
 - retained shard ranges, ownership, checkpoint identities, memory, and open
   sequence counts.
 
-The controller supplies `registeredAt`, `lastSeen`, and `expiresAt`. Inventory
-snapshots are sorted by worker ID. Their monotonic revision changes for joins,
-removals, expiry, capability changes, and live status changes, but not for an
-otherwise identical lease renewal. This gives later placement decisions a
-stable input revision without turning every heartbeat into a new shard plan.
+The controller supplies `registeredAt`, `lastSeen`, `expiresAt`, and
+`statusObservedAt`. Inventory snapshots are sorted by worker ID. Their monotonic
+revision changes for joins, removals, expiry, capability changes, and live
+status-content changes. A fresh observation also advances the revision when it
+makes default-stale status eligible again, but not when identical status was
+already fresh. Lease-only renewal and temporal fields may therefore advance
+without a revision change.
+
+Placement must reject stale status even while a worker's lease remains live.
+The default `WorkerStatusFresh` guard uses the inventory lease TTL as the
+maximum observation age; placement may supply a stricter positive window with
+`Worker.StatusFresh`. Zero, future, and over-age observations fail
+conservatively.
 
 ## HTTP API
 
@@ -62,9 +73,15 @@ stable input revision without turning every heartbeat into a new shard plan.
 |---|---|---|
 | `GET` | `/healthz` | Reports controller health, inventory revision, and active worker count. |
 | `GET` | `/v1/membership` | Returns the current versioned inventory and expires overdue leases before responding. |
-| `POST` | `/v1/membership/workers` | Registers or refreshes one complete worker record. |
-| `POST` | `/v1/membership/workers/{id}/heartbeat` | Refreshes dynamic state for the active process instance. |
+| `POST` | `/v1/membership/workers` | Registers or refreshes one complete worker record; `statusFresh` controls whether its status receives a new server observation time. |
+| `POST` | `/v1/membership/workers/{id}/heartbeat` | Renews the active process lease and optionally publishes a fresh `status` snapshot. |
 | `DELETE` | `/v1/membership/workers/{id}?instanceID=...` | Explicitly removes the caller-owned lease. |
+
+An initial join sets `statusFresh` after synchronously sampling worker state.
+When a controller loses its record during a long worker operation, `swarmd`
+re-registers its identity and capabilities with cached status explicitly marked
+unobserved. A later successful asynchronous probe publishes the status and
+establishes a new server `statusObservedAt`.
 
 An active worker ID cannot be taken over by a different `instanceID`. The
 controller returns machine-readable `duplicate_worker`, `duplicate_instance`,

@@ -81,18 +81,36 @@ type Registration struct {
 	Status        Status       `json:"status"`
 }
 
+// RegistrationRequest distinguishes a newly sampled status from cached state
+// carried while reclaiming a lease after control-plane loss.
+type RegistrationRequest struct {
+	Registration
+	StatusFresh bool `json:"statusFresh"`
+}
+
 type Heartbeat struct {
-	SchemaVersion int    `json:"schemaVersion"`
-	InstanceID    string `json:"instanceID"`
-	Status        Status `json:"status"`
+	SchemaVersion int     `json:"schemaVersion"`
+	InstanceID    string  `json:"instanceID"`
+	Status        *Status `json:"status,omitempty"`
 }
 
 // Worker is the server-authoritative leased membership record.
 type Worker struct {
 	Registration
-	RegisteredAt time.Time `json:"registeredAt"`
-	LastSeen     time.Time `json:"lastSeen"`
-	ExpiresAt    time.Time `json:"expiresAt"`
+	RegisteredAt     time.Time `json:"registeredAt"`
+	LastSeen         time.Time `json:"lastSeen"`
+	ExpiresAt        time.Time `json:"expiresAt"`
+	StatusObservedAt time.Time `json:"statusObservedAt"`
+}
+
+// StatusFresh reports whether the server-observed worker state is recent
+// enough to be considered by placement. Non-positive windows and timestamps
+// from after the caller's reference time fail conservatively.
+func (worker Worker) StatusFresh(at time.Time, maxAge time.Duration) bool {
+	if maxAge <= 0 || worker.StatusObservedAt.IsZero() || worker.StatusObservedAt.After(at) {
+		return false
+	}
+	return at.Sub(worker.StatusObservedAt) <= maxAge
 }
 
 type Mutation struct {
@@ -106,6 +124,13 @@ type Inventory struct {
 	GeneratedAt    time.Time `json:"generatedAt"`
 	LeaseTTLMillis int64     `json:"leaseTTLMillis"`
 	Workers        []Worker  `json:"workers"`
+}
+
+// WorkerStatusFresh applies the inventory lease TTL as the default maximum
+// status age. Placement may impose a stricter window through Worker.StatusFresh.
+func (inventory Inventory) WorkerStatusFresh(worker Worker) bool {
+	maxAge := time.Duration(inventory.LeaseTTLMillis) * time.Millisecond
+	return worker.StatusFresh(inventory.GeneratedAt, maxAge)
 }
 
 type APIError struct {

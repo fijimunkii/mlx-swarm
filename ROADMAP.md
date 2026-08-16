@@ -219,6 +219,7 @@ Once explicit N-stage execution is correct, let the control plane build the plan
 
 - [x] define a versioned capability and inventory record
 - [x] register workers and expire stale membership through heartbeats
+- [x] distinguish lease liveness from server-stamped dynamic-status freshness
 - [ ] measure or ingest compute latency, RTT, bandwidth, memory, health, and
   retained-shard state
 - [ ] represent plan constraints independently from a fixed worker count or

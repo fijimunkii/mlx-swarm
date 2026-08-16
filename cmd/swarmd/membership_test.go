@@ -51,6 +51,7 @@ type blockingMembershipWorker struct {
 	state   workerproc.PersistentWorkerState
 	calls   atomic.Int32
 	blocked chan struct{}
+	release chan struct{}
 }
 
 func (worker *blockingMembershipWorker) Call(
@@ -67,8 +68,15 @@ func (worker *blockingMembershipWorker) Call(
 	case worker.blocked <- struct{}{}:
 	default:
 	}
-	<-ctx.Done()
-	return workerproc.PersistentResponse{}, ctx.Err()
+	select {
+	case <-worker.release:
+		state := worker.state
+		return workerproc.PersistentResponse{
+			OK: true, Result: &workerproc.PersistentWorkerResult{State: &state},
+		}, nil
+	case <-ctx.Done():
+		return workerproc.PersistentResponse{}, ctx.Err()
+	}
 }
 
 func (*blockingMembershipWorker) RestartCount() int { return 0 }
@@ -109,7 +117,7 @@ func TestMembershipAgentRegistersRefreshesAndRejoins(t *testing.T) {
 
 	worker.restarts = 2
 	worker.state.LoadedShards[0].OpenSequenceCount = 1
-	agent.registration.Status = agent.probeStatus(context.Background(), agent.registration.Status)
+	agent.recordStatus(agent.probeStatus(context.Background(), agent.registration.Status))
 	if err := agent.heartbeat(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -118,13 +126,16 @@ func TestMembershipAgentRegistersRefreshesAndRejoins(t *testing.T) {
 		t.Fatalf("heartbeat did not refresh status: %+v", refreshed.Status)
 	}
 
+	agent.recordStatus(agent.registration.Status)
+	agent.statusSampledAt = time.Now().Add(-2 * time.Minute)
 	if err := membership.Remove("mac-a", "process-a"); err != nil {
 		t.Fatal(err)
 	}
 	if err := agent.heartbeat(context.Background()); err != nil {
 		t.Fatalf("agent did not re-register after removal: %v", err)
 	}
-	if workers := membership.Snapshot().Workers; len(workers) != 1 || workers[0].InstanceID != "process-a" {
+	if workers := membership.Snapshot().Workers; len(workers) != 1 ||
+		workers[0].InstanceID != "process-a" || !workers[0].StatusObservedAt.IsZero() {
 		t.Fatalf("unexpected rejoined inventory: %+v", workers)
 	}
 }
@@ -134,7 +145,7 @@ func TestMembershipAgentRefreshesLeaseWhileStateProbeIsBlocked(t *testing.T) {
 	server := httptest.NewServer(registry.NewHTTPHandler(membership))
 	defer server.Close()
 	worker := &blockingMembershipWorker{
-		state: testMembershipState(), blocked: make(chan struct{}, 1),
+		state: testMembershipState(), blocked: make(chan struct{}, 1), release: make(chan struct{}),
 	}
 	agent, err := newMembershipAgent(
 		context.Background(),
@@ -154,7 +165,9 @@ func TestMembershipAgentRefreshesLeaseWhileStateProbeIsBlocked(t *testing.T) {
 	if err := agent.Register(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	registeredAt := membership.Snapshot().Workers[0].LastSeen
+	registered := membership.Snapshot()
+	registeredAt := registered.Workers[0].LastSeen
+	statusObservedAt := registered.Workers[0].StatusObservedAt
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
@@ -167,9 +180,23 @@ func TestMembershipAgentRefreshesLeaseWhileStateProbeIsBlocked(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond)
 	inventory := membership.Snapshot()
-	if len(inventory.Workers) != 1 || !inventory.Workers[0].LastSeen.After(registeredAt) {
+	if len(inventory.Workers) != 1 || !inventory.Workers[0].LastSeen.After(registeredAt) ||
+		!inventory.Workers[0].StatusObservedAt.Equal(statusObservedAt) {
 		cancel()
-		t.Fatalf("blocked state probe allowed membership lease to expire: %+v", inventory)
+		t.Fatalf("blocked state probe changed lease or status freshness incorrectly: %+v", inventory)
+	}
+	close(worker.release)
+	deadline := time.Now().Add(time.Second)
+	for !time.Now().After(deadline) {
+		inventory = membership.Snapshot()
+		if len(inventory.Workers) == 1 && inventory.Workers[0].StatusObservedAt.After(statusObservedAt) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(inventory.Workers) != 1 || !inventory.Workers[0].StatusObservedAt.After(statusObservedAt) {
+		cancel()
+		t.Fatalf("fresh worker state did not advance status observation time: %+v", inventory)
 	}
 
 	cancel()

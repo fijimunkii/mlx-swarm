@@ -57,6 +57,10 @@ func New(ttl time.Duration, options ...Option) *Registry {
 }
 
 func (r *Registry) Register(input Registration) (Mutation, error) {
+	return r.register(input, true)
+}
+
+func (r *Registry) register(input Registration, statusFresh bool) (Mutation, error) {
 	input = cloneRegistration(input)
 	normalizeRegistration(&input)
 	if err := validateRegistration(input); err != nil {
@@ -82,24 +86,37 @@ func (r *Registry) Register(input Registration) (Mutation, error) {
 		if existing.InstanceID != input.InstanceID {
 			return Mutation{}, fmt.Errorf("%w: %q", ErrDuplicateWorker, input.ID)
 		}
+		statusObservedAt := existing.StatusObservedAt
+		if statusFresh {
+			statusObservedAt = now
+		} else {
+			input.Status = cloneStatus(existing.Status)
+		}
 		worker := Worker{
-			Registration: input,
-			RegisteredAt: existing.RegisteredAt,
-			LastSeen:     now,
-			ExpiresAt:    now.Add(r.ttl),
+			Registration:     input,
+			RegisteredAt:     existing.RegisteredAt,
+			LastSeen:         now,
+			ExpiresAt:        now.Add(r.ttl),
+			StatusObservedAt: statusObservedAt,
 		}
 		r.workers[input.ID] = worker
-		if !reflect.DeepEqual(existing.Registration, input) {
+		if !reflect.DeepEqual(existing.Registration, input) ||
+			(statusFresh && !existing.StatusFresh(now, r.ttl)) {
 			r.revision++
 		}
 		return Mutation{InventoryRevision: r.revision, Worker: cloneWorker(worker)}, nil
 	}
 
+	statusObservedAt := time.Time{}
+	if statusFresh {
+		statusObservedAt = now
+	}
 	worker := Worker{
-		Registration: input,
-		RegisteredAt: now,
-		LastSeen:     now,
-		ExpiresAt:    now.Add(r.ttl),
+		Registration:     input,
+		RegisteredAt:     now,
+		LastSeen:         now,
+		ExpiresAt:        now.Add(r.ttl),
+		StatusObservedAt: statusObservedAt,
 	}
 	r.workers[input.ID] = worker
 	r.revision++
@@ -107,7 +124,11 @@ func (r *Registry) Register(input Registration) (Mutation, error) {
 }
 
 func (r *Registry) Heartbeat(id string, heartbeat Heartbeat) (Mutation, error) {
-	normalizeStatus(&heartbeat.Status)
+	if heartbeat.Status != nil {
+		status := cloneStatus(*heartbeat.Status)
+		normalizeStatus(&status)
+		heartbeat.Status = &status
+	}
 	if err := validateIdentity(id, heartbeat.SchemaVersion, heartbeat.InstanceID); err != nil {
 		return Mutation{}, err
 	}
@@ -129,11 +150,16 @@ func (r *Registry) Heartbeat(id string, heartbeat Heartbeat) (Mutation, error) {
 	if existing.InstanceID != heartbeat.InstanceID {
 		return Mutation{}, fmt.Errorf("%w: %q", ErrStaleInstance, id)
 	}
-	if err := validateStatus(heartbeat.Status, existing.Capabilities); err != nil {
-		return Mutation{}, err
+	statusChanged := false
+	if heartbeat.Status != nil {
+		if err := validateStatus(*heartbeat.Status, existing.Capabilities); err != nil {
+			return Mutation{}, err
+		}
+		statusChanged = !reflect.DeepEqual(existing.Status, *heartbeat.Status) ||
+			!existing.StatusFresh(now, r.ttl)
+		existing.Status = cloneStatus(*heartbeat.Status)
+		existing.StatusObservedAt = now
 	}
-	statusChanged := !reflect.DeepEqual(existing.Status, heartbeat.Status)
-	existing.Status = cloneStatus(heartbeat.Status)
 	existing.LastSeen = now
 	existing.ExpiresAt = now.Add(r.ttl)
 	r.workers[id] = existing

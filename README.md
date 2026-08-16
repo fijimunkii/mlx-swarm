@@ -148,7 +148,8 @@ The framed request contract is documented in
 `swarm-control` maintains a versioned, leased inventory for private-LAN or
 tailnet workers. A configured `swarmd` advertises backend-neutral capabilities,
 admission limits, health, memory pressure, and retained shard state, renews its
-lease with heartbeats, and removes it on clean shutdown. See the
+lease independently from server-stamped status freshness, and removes it on
+clean shutdown. See the
 [membership runbook and API contract](docs/mesh-membership.md).
 
 ### Failure characterization

@@ -33,12 +33,12 @@ func (h *HTTPHandler) inventory(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (h *HTTPHandler) register(w http.ResponseWriter, request *http.Request) {
-	var input Registration
+	var input RegistrationRequest
 	if err := decodeJSON(w, request, &input); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid_request", err)
 		return
 	}
-	mutation, err := h.registry.Register(input)
+	mutation, err := h.registry.register(input.Registration, input.StatusFresh)
 	if err != nil {
 		writeRegistryError(w, err)
 		return
@@ -142,9 +142,10 @@ func NewClient(endpoint string, httpClient *http.Client) (*Client, error) {
 	return &Client{endpoint: parsed.String(), http: httpClient}, nil
 }
 
-func (c *Client) Register(ctx context.Context, input Registration) (Mutation, error) {
+func (c *Client) Register(ctx context.Context, input Registration, statusFresh bool) (Mutation, error) {
 	var result Mutation
-	err := c.call(ctx, http.MethodPost, "/v1/membership/workers", input, &result)
+	request := RegistrationRequest{Registration: input, StatusFresh: statusFresh}
+	err := c.call(ctx, http.MethodPost, "/v1/membership/workers", request, &result)
 	return result, err
 }
 

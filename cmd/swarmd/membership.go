@@ -52,10 +52,13 @@ type localCapabilities struct {
 }
 
 type membershipAgent struct {
-	client       *registry.Client
-	worker       membershipWorker
-	registration registry.Registration
-	interval     time.Duration
+	client          *registry.Client
+	worker          membershipWorker
+	registration    registry.Registration
+	interval        time.Duration
+	statusPending   bool
+	statusSampledAt time.Time
+	freshnessWindow time.Duration
 }
 
 func membershipConfigFromEnvironment() (membershipConfig, bool, error) {
@@ -152,11 +155,13 @@ func newMembershipAgent(
 	}
 	return &membershipAgent{
 		client: client, worker: worker, registration: registration, interval: config.HeartbeatInterval,
+		statusPending: true, statusSampledAt: time.Now(),
 	}, nil
 }
 
 func (agent *membershipAgent) Register(ctx context.Context) error {
-	mutation, err := agent.client.Register(ctx, agent.registration)
+	statusFresh := agent.freshStatusPending(time.Now())
+	mutation, err := agent.client.Register(ctx, agent.registration, statusFresh)
 	if err != nil {
 		return err
 	}
@@ -165,6 +170,8 @@ func (agent *membershipAgent) Register(ctx context.Context) error {
 		_ = agent.client.Remove(ctx, agent.registration.ID, agent.registration.InstanceID)
 		return fmt.Errorf("heartbeat interval %s must be shorter than lease TTL %s", agent.interval, leaseTTL)
 	}
+	agent.freshnessWindow = leaseTTL
+	agent.statusPending = false
 	return nil
 }
 
@@ -179,7 +186,7 @@ func (agent *membershipAgent) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case status := <-probeResults:
-			agent.registration.Status = status
+			agent.recordStatus(status)
 			probeInFlight = false
 		case <-ticker.C:
 			if !probeInFlight {
@@ -198,6 +205,24 @@ func (agent *membershipAgent) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (agent *membershipAgent) recordStatus(status registry.Status) {
+	agent.registration.Status = status
+	agent.statusPending = true
+	agent.statusSampledAt = time.Now()
+}
+
+func (agent *membershipAgent) freshStatusPending(now time.Time) bool {
+	if !agent.statusPending {
+		return false
+	}
+	if agent.statusSampledAt.IsZero() || agent.statusSampledAt.After(now) ||
+		(agent.freshnessWindow > 0 && now.Sub(agent.statusSampledAt) > agent.freshnessWindow) {
+		agent.statusPending = false
+		return false
+	}
+	return true
 }
 
 func (agent *membershipAgent) probeStatus(ctx context.Context, previous registry.Status) registry.Status {
@@ -220,10 +245,17 @@ func (agent *membershipAgent) heartbeat(ctx context.Context) error {
 	heartbeat := registry.Heartbeat{
 		SchemaVersion: registry.SchemaVersion,
 		InstanceID:    agent.registration.InstanceID,
-		Status:        agent.registration.Status,
+	}
+	statusFresh := agent.freshStatusPending(time.Now())
+	if statusFresh {
+		status := agent.registration.Status
+		heartbeat.Status = &status
 	}
 	_, err := agent.client.Heartbeat(ctx, agent.registration.ID, heartbeat)
 	if err == nil {
+		if statusFresh {
+			agent.statusPending = false
+		}
 		return nil
 	}
 	var remote *registry.RemoteError

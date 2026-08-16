@@ -20,12 +20,16 @@ func TestMembershipHTTPClientLifecycle(t *testing.T) {
 	}
 	ctx := context.Background()
 	input := testRegistration("worker-a", "instance-a")
-	registered, err := client.Register(ctx, input)
+	registered, err := client.Register(ctx, input, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if registered.Worker.ID != input.ID || registered.InventoryRevision != 1 {
 		t.Fatalf("unexpected registration: %+v", registered)
+	}
+	statusObservedAt := registered.Worker.StatusObservedAt
+	if statusObservedAt.IsZero() {
+		t.Fatalf("registration omitted status observation time: %+v", registered)
 	}
 
 	inventory, err := client.Inventory(ctx)
@@ -36,9 +40,19 @@ func TestMembershipHTTPClientLifecycle(t *testing.T) {
 		t.Fatalf("unexpected inventory: %+v", inventory)
 	}
 
+	leaseOnly, err := client.Heartbeat(ctx, input.ID, Heartbeat{
+		SchemaVersion: SchemaVersion, InstanceID: input.InstanceID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !leaseOnly.Worker.StatusObservedAt.Equal(statusObservedAt) || leaseOnly.InventoryRevision != 1 {
+		t.Fatalf("lease-only heartbeat changed status observation: %+v", leaseOnly)
+	}
+
 	input.Status.RestartCount = 2
 	if _, err := client.Heartbeat(ctx, input.ID, Heartbeat{
-		SchemaVersion: SchemaVersion, InstanceID: input.InstanceID, Status: input.Status,
+		SchemaVersion: SchemaVersion, InstanceID: input.InstanceID, Status: &input.Status,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -61,10 +75,12 @@ func TestMembershipHTTPReturnsMachineReadableConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Register(context.Background(), testRegistration("worker-a", "instance-a")); err != nil {
+	if _, err := client.Register(
+		context.Background(), testRegistration("worker-a", "instance-a"), true,
+	); err != nil {
 		t.Fatal(err)
 	}
-	_, err = client.Register(context.Background(), testRegistration("worker-a", "instance-b"))
+	_, err = client.Register(context.Background(), testRegistration("worker-a", "instance-b"), true)
 	var remote *RemoteError
 	if !errors.As(err, &remote) || remote.StatusCode != http.StatusConflict || remote.Code != "duplicate_worker" {
 		t.Fatalf("duplicate registration error = %#v", err)
