@@ -152,10 +152,13 @@ The global network is dynamic. A worker may disappear at any point. We therefore
 
 The implemented network is narrower than that direction: `swarmd` exposes
 an unauthenticated, unencrypted HTTP debug API for a private LAN or tailnet.
-It provides no peer identity, authorization, confidentiality, integrity
-protection, malicious-worker defense, NAT traversal, or multi-tenant resource
-isolation. Binding that endpoint to a public interface is outside the trust
-model.
+An optional `swarm-control` process maintains a versioned leased inventory on
+that same trusted network. Workers advertise backend-neutral capabilities and
+live state, refresh their lease through heartbeats, and deterministically
+expire when heartbeats stop. This supplies scheduling identity, not cryptographic
+identity: it provides no authorization, confidentiality, integrity protection,
+malicious-worker defense, NAT traversal, or multi-tenant resource isolation.
+Binding either endpoint to a public interface is outside the trust model.
 
 Stable local groups may later use MLX Ring/JACCL/NCCL internally, while the swarm treats each group as an execution island.
 

@@ -143,6 +143,15 @@ go run ./cmd/swarm-generate-smoke -worker "$worker"
 The framed request contract is documented in
 [`docs/persistent-worker-protocol.md`](docs/persistent-worker-protocol.md).
 
+### Trusted mesh membership
+
+`swarm-control` maintains a versioned, leased inventory for private-LAN or
+tailnet workers. A configured `swarmd` advertises backend-neutral capabilities,
+admission limits, health, memory pressure, and retained shard state, renews its
+lease independently from server-stamped status freshness, and removes it on
+clean shutdown. See the
+[membership runbook and API contract](docs/mesh-membership.md).
+
 ### Failure characterization
 
 Run the deterministic process and transport fault proof without a model or
