@@ -8,7 +8,10 @@ model stage runs on macOS.
 The proof is implemented by
 [`cmd/swarm-scale`](../cmd/swarm-scale/main.go), with reusable orchestration and
 evidence types in [`internal/scaleproof`](../internal/scaleproof). The canonical
-run is [`.github/workflows/five-mac-scale.yml`](../.github/workflows/five-mac-scale.yml).
+run is the on-demand
+[`.github/workflows/five-mac-scale.yml`](../.github/workflows/five-mac-scale.yml)
+workflow. The smaller MLX and pooled-memory workflows remain the deterministic
+pull-request gates.
 
 ## Topology and trust boundary
 
@@ -78,9 +81,11 @@ to improve single-sequence latency automatically.
 ## Bounded completion
 
 The workflow builds the Swift 6.3 MLX worker once in a short macOS 26 job and
-passes the runtime artifact to all five stable macOS 15 serving jobs. This keeps
-the long-lived inference workers on the reliable runner image and avoids five
-duplicate native builds.
+passes the runtime artifact to five macOS 15 serving jobs. This avoids five
+duplicate native builds. It runs on demand because one proof depends on five
+hosted Mac runners remaining alive simultaneously; a provider eviction can
+cancel an otherwise healthy worker, so that infrastructure-sensitive result is
+kept out of required pull-request status.
 
 Every model request has a deadline, the coordinator proof has a 45-minute
 limit, every macOS daemon has a 50-minute watchdog, and all six jobs have a

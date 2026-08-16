@@ -2,19 +2,6 @@ name: Five Mac Scale Proof
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - 'cmd/swarm-scale/**'
-      - 'internal/scaleproof/**'
-      - 'internal/benchmark/**'
-      - 'internal/generation/**'
-      - 'internal/pooledproof/**'
-      - 'internal/workerproc/**'
-      - 'worker/mlx/**'
-      - 'testdata/pooled-memory/**'
-      - 'docs/five-mac-scale-proof.md'
-      - 'ROADMAP.md'
-      - '.github/workflows/five-mac-scale.yml'
 
 permissions:
   actions: read
@@ -32,55 +19,7 @@ env:
   MLX_SWARM_CACHE_LIMIT_BYTES: '67108864'
 
 jobs:
-  mac-regressions:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    timeout-minutes: 55
-    steps:
-      - name: Wait for the smaller Mac workflows to release their runners
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
-            echo "Manual run: no same-revision PR regressions to sequence"
-            exit 0
-          fi
-          for workflow in mlx.yml pooled-memory.yml; do
-            run_id=""
-            for _ in {1..120}; do
-              run_id="$(gh run list \
-                --repo "$GITHUB_REPOSITORY" \
-                --workflow "$workflow" \
-                --branch "$GITHUB_HEAD_REF" \
-                --event pull_request \
-                --limit 20 \
-                --json databaseId,headSha \
-                --jq '.[] | select(.headSha == env.HEAD_SHA) | .databaseId' | head -n 1)"
-              if [ -n "$run_id" ]; then
-                break
-              fi
-              sleep 5
-            done
-            if [ -z "$run_id" ]; then
-              echo "Could not find $workflow for $HEAD_SHA" >&2
-              exit 1
-            fi
-            # This is a capacity barrier, not a duplicate correctness gate.
-            # The watched workflow reports its own conclusion on the PR. Wait
-            # for all of its Mac jobs to terminate even when one check fails,
-            # then let the five-worker proof acquire the released runners.
-            gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --interval 15
-            conclusion="$(gh run view "$run_id" \
-              --repo "$GITHUB_REPOSITORY" \
-              --json conclusion \
-              --jq '.conclusion')"
-            printf '%s completed with conclusion %s; Mac runners are released\n' \
-              "$workflow" "$conclusion"
-          done
-
   mac-worker:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     needs: build-worker
     strategy:
       fail-fast: false
@@ -171,8 +110,6 @@ jobs:
           daemon_pid=""
 
   build-worker:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    needs: mac-regressions
     runs-on: macos-26
     timeout-minutes: 20
     steps:
@@ -212,7 +149,6 @@ jobs:
           retention-days: 1
 
   linux-coordinator:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     needs: build-worker
     runs-on: ubuntu-latest
     timeout-minutes: 60

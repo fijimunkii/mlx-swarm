@@ -180,7 +180,8 @@ Tracking: [#32](https://github.com/fijimunkii/mlx-swarm/issues/32)
 Use Linux for orchestration so every available macOS slot can perform real MLX
 inference. Implementation and the canonical evidence contract are documented in
 [`docs/five-mac-scale-proof.md`](docs/five-mac-scale-proof.md); the checklist
-is complete after the canonical workflow published a fully passing artifact.
+is complete after the canonical on-demand workflow published a fully passing
+artifact. Smaller MLX and pooled-memory workflows remain the pull-request gates.
 
 ```text
 Linux coordinator
