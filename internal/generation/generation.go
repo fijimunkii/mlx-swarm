@@ -386,13 +386,13 @@ func ensureShard(
 	ctx context.Context,
 	caller workerproc.PersistentCaller,
 	request workerproc.PersistentLoadShardRequest,
-) (*workerproc.PersistentShardSnapshot, error) {
+) (*workerproc.PersistentShardSnapshot, bool, error) {
 	state, err := workerState(ctx, caller)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if shard, found, err := findLoadedShard(state, request); found || err != nil {
-		return shard, err
+		return shard, found, err
 	}
 	response, err := call(ctx, caller, workerproc.PersistentRequest{Command: "loadShard", LoadShard: &request})
 	if err != nil {
@@ -403,19 +403,19 @@ func ensureShard(
 			// current state before failing this session.
 			if refreshed, stateErr := workerState(ctx, caller); stateErr == nil {
 				if shard, found, validationErr := findLoadedShard(refreshed, request); found || validationErr != nil {
-					return shard, validationErr
+					return shard, found, validationErr
 				}
 			}
 		}
-		return nil, err
+		return nil, false, err
 	}
 	if response.Result == nil || response.Result.Shard == nil {
-		return nil, errors.New("loadShard returned no shard snapshot")
+		return nil, false, errors.New("loadShard returned no shard snapshot")
 	}
 	if err := validateLoadedShard(response.Result.Shard, request); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return response.Result.Shard, nil
+	return response.Result.Shard, false, nil
 }
 
 func findLoadedShard(

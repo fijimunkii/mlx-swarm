@@ -22,6 +22,8 @@ type PlannedSummary struct {
 	ReferenceComputeMicros      Distribution           `json:"referenceComputeMicros"`
 	ReferenceSamplingMicros     Distribution           `json:"referenceSamplingMicros"`
 	ReferenceTokenLatencyMicros Distribution           `json:"referenceTokenLatencyMicros"`
+	TokensPerSecond             float64                `json:"tokensPerSecond"`
+	ReferenceTokensPerSecond    float64                `json:"referenceTokensPerSecond"`
 	MaxReferenceKVCacheBytes    int                    `json:"maxReferenceKVCacheBytes"`
 	ReferenceMemoryHighWater    workerproc.StageMemory `json:"referenceMemoryHighWater"`
 }
@@ -111,6 +113,12 @@ func SummarizePlanned(samples []generation.PlannedStageSample) (PlannedSummary, 
 	summary.ReferenceTokenLatencyMicros = plannedMicros(samples, func(sample generation.PlannedStageSample) int64 {
 		return sample.ReferenceTokenLatencyMicros
 	})
+	summary.TokensPerSecond = plannedThroughput(samples, func(sample generation.PlannedStageSample) int64 {
+		return sample.TokenLatencyMicros
+	})
+	summary.ReferenceTokensPerSecond = plannedThroughput(samples, func(sample generation.PlannedStageSample) int64 {
+		return sample.ReferenceTokenLatencyMicros
+	})
 	for stageIndex := range summary.Stages {
 		stage := &summary.Stages[stageIndex]
 		stage.WallMicros = plannedStageMicros(samples, stageIndex, func(execution generation.StageExecution) int64 {
@@ -147,6 +155,20 @@ func SummarizePlanned(samples []generation.PlannedStageSample) (PlannedSummary, 
 		}
 	}
 	return summary, nil
+}
+
+func plannedThroughput(
+	samples []generation.PlannedStageSample,
+	duration func(generation.PlannedStageSample) int64,
+) float64 {
+	var totalMicros int64
+	for _, sample := range samples {
+		totalMicros += duration(sample)
+	}
+	if totalMicros <= 0 {
+		return 0
+	}
+	return float64(len(samples)) * 1_000_000 / float64(totalMicros)
 }
 
 func plannedMicros(

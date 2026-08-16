@@ -178,7 +178,10 @@ Remove the current producer/consumer assumption before adding scheduling policy.
 Tracking: [#32](https://github.com/fijimunkii/mlx-swarm/issues/32)
 
 Use Linux for orchestration so every available macOS slot can perform real MLX
-inference.
+inference. Implementation and the canonical evidence contract are documented in
+[`docs/five-mac-scale-proof.md`](docs/five-mac-scale-proof.md); the checklist
+is complete after the canonical on-demand workflow published a fully passing
+artifact. Smaller MLX and pooled-memory workflows remain the pull-request gates.
 
 ```text
 Linux coordinator
@@ -190,18 +193,18 @@ Linux coordinator
        +-- Mac worker 4: late layers + output head
 ```
 
-- [ ] start five independent Apple-silicon `swarmd` workers plus one Linux
+- [x] start five independent Apple-silicon `swarmd` workers plus one Linux
   coordinator in one private-tailnet workflow
-- [ ] prove five-stage 270M generation with reference-matched logits and tokens
-- [ ] reuse the same five-worker pool to measure 2-, 3-, 4-, and 5-stage plans
+- [x] prove five-stage 270M generation with reference-matched logits and tokens
+- [x] reuse the same five-worker pool to measure 2-, 3-, 4-, and 5-stage plans
   under one fixed model/prompt/token plan
-- [ ] record stage count versus per-worker memory, load time, TTFT, inter-token
+- [x] record stage count versus per-worker memory, load time, TTFT, inter-token
   latency, throughput, boundary bytes, wire bytes, and failure surface
-- [ ] run the 12B pooled-memory proof across all five serving Macs using a
+- [x] run the 12B pooled-memory proof across all five serving Macs using a
   memory-aware split rather than equal layer counts by assumption
-- [ ] keep the full-model oracle off the serving Macs and preserve physical
+- [x] keep the full-model oracle off the serving Macs and preserve physical
   memory evidence for every worker
-- [ ] guarantee all worker jobs exit after success or bounded failure so scarce
+- [x] guarantee all worker jobs exit after success or bounded failure so scarce
   macOS concurrency is released
 
 The expected benefit of more serial stages is **capacity and lower per-worker

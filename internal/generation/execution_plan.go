@@ -51,6 +51,28 @@ type ExecutionPlan struct {
 	Stages            []ExecutionStage `json:"stages"`
 }
 
+// BuildExecutionPlan constructs an immutable plan from caller-selected stage
+// ranges. It supplies the schema version, revision, and collision-safe shard
+// IDs so experiments can use explicit non-balanced layouts without duplicating
+// plan identity logic. Any caller-supplied ShardID values are replaced.
+func BuildExecutionPlan(
+	model ExecutionModel,
+	inventoryRevision string,
+	stages []ExecutionStage,
+) (ExecutionPlan, error) {
+	plan := ExecutionPlan{
+		SchemaVersion:     executionPlanSchemaVersion,
+		InventoryRevision: inventoryRevision,
+		Model:             model,
+		Stages:            append([]ExecutionStage(nil), stages...),
+	}
+	finalizeExecutionPlan(&plan)
+	if err := ValidateExecutionPlan(plan); err != nil {
+		return ExecutionPlan{}, err
+	}
+	return plan, nil
+}
+
 // BuildBalancedExecutionPlan produces a deterministic contiguous split for
 // experiments that need an explicit plan before the dynamic scheduler exists.
 // Remainder layers are assigned to earlier targets. This is a correctness
@@ -69,11 +91,7 @@ func BuildBalancedExecutionPlan(
 		)
 	}
 
-	plan := ExecutionPlan{
-		SchemaVersion: executionPlanSchemaVersion,
-		Model:         model,
-		Stages:        make([]ExecutionStage, 0, len(targetIDs)),
-	}
+	stages := make([]ExecutionStage, 0, len(targetIDs))
 	base := model.LayerCount / len(targetIDs)
 	remainder := model.LayerCount % len(targetIDs)
 	start := 0
@@ -87,7 +105,7 @@ func BuildBalancedExecutionPlan(
 		if index == len(targetIDs)-1 {
 			responseMode = terminalResponseMode
 		}
-		plan.Stages = append(plan.Stages, ExecutionStage{
+		stages = append(stages, ExecutionStage{
 			Name:         fmt.Sprintf("stage-%d", index),
 			TargetID:     targetID,
 			LayerStart:   start,
@@ -98,11 +116,7 @@ func BuildBalancedExecutionPlan(
 		})
 		start = end
 	}
-	finalizeExecutionPlan(&plan)
-	if err := ValidateExecutionPlan(plan); err != nil {
-		return ExecutionPlan{}, err
-	}
-	return plan, nil
+	return BuildExecutionPlan(model, "", stages)
 }
 
 // ValidateExecutionPlan rejects incomplete, ambiguous, stale, or mutated
