@@ -9,6 +9,7 @@ Call `placement.EvaluateCandidates` with a membership inventory and a
 `placement.StageRequirement`. The requirement pins:
 
 - model ID, checkpoint fingerprint, and total layer count;
+- the expected execution shard ID when retained reuse is possible;
 - the proposed layer range and input/output ownership;
 - the model-family adapter and worker operations implied by that ownership;
 - incremental model-load and per-sequence retained-memory estimates; and
@@ -41,10 +42,12 @@ reserve. Exact retained-shard reuse requires only the sequence reserve. The
 retained-byte budget covers sequence KV/replay/output state rather than model
 weights, so it is checked against the current retained bytes plus that reserve.
 
-A retained shard is reusable only when model ID, checkpoint fingerprint,
-layer range, and input/output ownership all match exactly. Reuse is reported in
-the candidate result so the later plan scorer can price it without weakening
-any hard constraint.
+A retained shard is reusable only when its runtime shard ID, model ID,
+checkpoint fingerprint, layer range, and input/output ownership all match
+exactly. When a proposed stage does not yet have a runtime shard ID, the
+evaluator conservatively budgets a new load. Reuse is reported in the candidate
+result so the later plan scorer can price it without weakening any hard
+constraint.
 
 ## Rejection codes
 

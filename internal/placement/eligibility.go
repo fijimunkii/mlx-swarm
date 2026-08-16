@@ -42,6 +42,7 @@ type TransportRequirement struct {
 type StageRequirement struct {
 	Model               generation.ExecutionModel `json:"model"`
 	Adapter             string                    `json:"adapter"`
+	ShardID             string                    `json:"shardID,omitempty"`
 	LayerStart          int                       `json:"layerStart"`
 	LayerEnd            int                       `json:"layerEnd"`
 	OwnsInput           bool                      `json:"ownsInput"`
@@ -84,6 +85,7 @@ func EvaluateCandidates(
 	requirement StageRequirement,
 ) (Evaluation, error) {
 	requirement.Adapter = strings.TrimSpace(requirement.Adapter)
+	requirement.ShardID = strings.TrimSpace(requirement.ShardID)
 	requirement.Transport.Protocol = strings.TrimSpace(requirement.Transport.Protocol)
 	requirement.Transport.TensorEncoding = strings.TrimSpace(
 		requirement.Transport.TensorEncoding,
@@ -285,9 +287,12 @@ func compatibleRetainedShard(
 	shards []registry.RetainedShard,
 	requirement StageRequirement,
 ) *registry.RetainedShard {
+	if requirement.ShardID == "" {
+		return nil
+	}
 	for index := range shards {
 		shard := &shards[index]
-		if shard.ModelID == requirement.Model.ID &&
+		if shard.ID == requirement.ShardID && shard.ModelID == requirement.Model.ID &&
 			shard.CheckpointFingerprint == requirement.Model.CheckpointFingerprint &&
 			shard.LayerStart == requirement.LayerStart && shard.LayerEnd == requirement.LayerEnd &&
 			shard.OwnsInput == requirement.OwnsInput && shard.OwnsOutput == requirement.OwnsOutput {

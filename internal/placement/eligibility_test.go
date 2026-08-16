@@ -13,6 +13,7 @@ import (
 func TestEvaluateCandidatesIsDeterministicAndRecognizesReuse(t *testing.T) {
 	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
 	requirement := testRequirement()
+	requirement.ShardID = "retained-stage"
 	reused := testWorker("worker-b", now)
 	reused.Status.AvailableMemoryBytes = 150
 	reused.Status.RetainedBytes = 100
@@ -50,6 +51,27 @@ func TestEvaluateCandidatesIsDeterministicAndRecognizesReuse(t *testing.T) {
 	}
 	if !reflect.DeepEqual(evaluation, repeated) {
 		t.Fatalf("evaluation depends on inventory order:\nfirst=%+v\nsecond=%+v", evaluation, repeated)
+	}
+}
+
+func TestEvaluateCandidatesDoesNotReuseDifferentShardIdentity(t *testing.T) {
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	requirement := testRequirement()
+	requirement.ShardID = "next-plan-stage"
+	worker := testWorker("worker-a", now)
+	worker.Status.AvailableMemoryBytes = 150
+	worker.Status.RetainedShards = []registry.RetainedShard{testRetainedShard(requirement, 0)}
+	worker.Status.RetainedShards[0].ID = "previous-plan-stage"
+
+	evaluation, err := EvaluateCandidates(testInventory(now, worker), requirement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := evaluation.Candidates[0]
+	if candidate.ReusesRetainedShard || candidate.RetainedShardID != "" ||
+		candidate.RequiredAdditionalMemoryBytes != 1100 ||
+		!slices.Equal(rejectionCodes(candidate), []RejectionCode{RejectionInsufficientMemory}) {
+		t.Fatalf("configuration-compatible shard with a different ID was reused: %+v", candidate)
 	}
 }
 
@@ -94,6 +116,7 @@ func TestEvaluateCandidatesReportsStableRejectionCodes(t *testing.T) {
 func TestEvaluateCandidatesChecksTransportAndRetainedCapacity(t *testing.T) {
 	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
 	requirement := testRequirement()
+	requirement.ShardID = "retained-stage"
 	requirement.Transport.RequireTLS = true
 	worker := testWorker("worker-a", now)
 	worker.Capabilities.Transports[0].TensorEncodings = []string{"raw"}
