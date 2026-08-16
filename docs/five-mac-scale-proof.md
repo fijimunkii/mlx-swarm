@@ -77,6 +77,11 @@ to improve single-sequence latency automatically.
 
 ## Bounded completion
 
+The workflow builds the Swift 6.3 MLX worker once in a short macOS 26 job and
+passes the runtime artifact to all five stable macOS 15 serving jobs. This keeps
+the long-lived inference workers on the reliable runner image and avoids five
+duplicate native builds.
+
 Every model request has a deadline, the coordinator proof has a 45-minute
 limit, every macOS daemon has a 50-minute watchdog, and all six jobs have a
 60-minute job timeout. The coordinator posts the workflow-only completion
