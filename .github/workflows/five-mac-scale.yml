@@ -287,7 +287,8 @@ jobs:
             .hybrid.sequenceStateReleased and
             (.hybrid.postRunWorkers | length == 5) and
             ([.hybrid.postRunWorkers[] | (
-              .workerObservationSequence > 0 and
+              .inventoryObservationSequence > 0 and
+              .workerObservationSequence > .inventoryObservationSequence and
               .openSequenceCount == 0 and
               .kvCacheBytes == 0 and
               .retainedBytes == 0

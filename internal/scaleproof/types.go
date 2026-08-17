@@ -140,12 +140,13 @@ type HybridEvidence struct {
 }
 
 type HybridWorkerObservation struct {
-	WorkerID                  string `json:"workerID"`
-	WorkerObservationSequence uint64 `json:"workerObservationSequence"`
-	LoadedShardCount          int    `json:"loadedShardCount"`
-	OpenSequenceCount         int    `json:"openSequenceCount"`
-	KVCacheBytes              int    `json:"kvCacheBytes"`
-	RetainedBytes             int    `json:"retainedBytes"`
+	WorkerID                     string `json:"workerID"`
+	InventoryObservationSequence uint64 `json:"inventoryObservationSequence"`
+	WorkerObservationSequence    uint64 `json:"workerObservationSequence"`
+	LoadedShardCount             int    `json:"loadedShardCount"`
+	OpenSequenceCount            int    `json:"openSequenceCount"`
+	KVCacheBytes                 int    `json:"kvCacheBytes"`
+	RetainedBytes                int    `json:"retainedBytes"`
 }
 
 type Checks struct {

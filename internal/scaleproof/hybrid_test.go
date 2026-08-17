@@ -154,17 +154,18 @@ func TestPostRunObservationsMustBeOrderedAndReleased(t *testing.T) {
 	workers := make([]HybridWorkerObservation, RequiredNodeCount)
 	for index := range workers {
 		workers[index] = HybridWorkerObservation{
-			WorkerID: fmt.Sprintf("worker-%d", index), WorkerObservationSequence: 1,
+			WorkerID:                     fmt.Sprintf("worker-%d", index),
+			InventoryObservationSequence: 1, WorkerObservationSequence: 2,
 		}
 	}
 	if !postRunObservationsOrdered(workers) {
 		t.Fatal("clean ordered observations were rejected")
 	}
-	workers[0].WorkerObservationSequence = 0
+	workers[0].WorkerObservationSequence = workers[0].InventoryObservationSequence
 	if postRunObservationsOrdered(workers) {
-		t.Fatal("unordered observation was accepted")
+		t.Fatal("non-newer observation was accepted")
 	}
-	workers[0].WorkerObservationSequence = 1
+	workers[0].WorkerObservationSequence = 2
 	workers[1].RetainedBytes = 1
 	if postRunObservationsOrdered(workers) {
 		t.Fatal("retained sequence state was accepted")

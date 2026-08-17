@@ -85,7 +85,7 @@ func runHybrid(
 	rejections, allSyntheticRejected := hybridSyntheticRejections(selection, specs)
 	selectedReal := selectedTargetsAreReal(selection, config.Nodes)
 	selectedFive := selectedTargetsAreDistinct(selection, RequiredNodeCount)
-	postRunWorkers := hybridPostRunWorkers(run.Teardown)
+	postRunWorkers := hybridPostRunWorkers(run.Teardown, inventory)
 	for _, rejection := range rejections {
 		if !slices.Contains(rejection.Codes, placement.RejectionIncompatibleCheckpoint) {
 			allSyntheticRejected = false
@@ -447,14 +447,22 @@ func removeSyntheticPeers(client *registry.Client, specs []meshstress.WorkerSpec
 	return cleanupErr
 }
 
-func hybridPostRunWorkers(teardown []TeardownEvidence) []HybridWorkerObservation {
+func hybridPostRunWorkers(
+	teardown []TeardownEvidence,
+	inventory registry.Inventory,
+) []HybridWorkerObservation {
+	sequences := make(map[string]uint64, len(inventory.Workers))
+	for _, worker := range inventory.Workers {
+		sequences[worker.ID] = worker.Status.WorkerObservationSequence
+	}
 	result := make([]HybridWorkerObservation, len(teardown))
 	for index, worker := range teardown {
 		result[index] = HybridWorkerObservation{
-			WorkerID:                  worker.NodeID,
-			WorkerObservationSequence: worker.WorkerObservationSequence,
-			LoadedShardCount:          worker.LoadedShardCount,
-			OpenSequenceCount:         worker.OpenSequenceCount, KVCacheBytes: worker.KVCacheBytes,
+			WorkerID:                     worker.NodeID,
+			InventoryObservationSequence: sequences[worker.NodeID],
+			WorkerObservationSequence:    worker.WorkerObservationSequence,
+			LoadedShardCount:             worker.LoadedShardCount,
+			OpenSequenceCount:            worker.OpenSequenceCount, KVCacheBytes: worker.KVCacheBytes,
 			RetainedBytes: worker.RetainedBytes,
 		}
 	}
@@ -466,7 +474,9 @@ func postRunObservationsOrdered(workers []HybridWorkerObservation) bool {
 		return false
 	}
 	for _, worker := range workers {
-		if worker.WorkerObservationSequence == 0 || worker.OpenSequenceCount != 0 ||
+		if worker.InventoryObservationSequence == 0 ||
+			worker.WorkerObservationSequence <= worker.InventoryObservationSequence ||
+			worker.OpenSequenceCount != 0 ||
 			worker.KVCacheBytes != 0 || worker.RetainedBytes != 0 {
 			return false
 		}
