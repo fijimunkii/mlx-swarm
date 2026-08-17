@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	hybridInventoryTimeout  = 30 * time.Second
+	hybridInventoryTimeout  = registry.DefaultLeaseTTL + 5*time.Second
 	hybridControlRPCTimeout = 5 * time.Second
 )
 
@@ -32,11 +32,13 @@ func runHybrid(
 	if err != nil {
 		return result, fmt.Errorf("hybrid membership client: %w", err)
 	}
-	inventory, err := waitForRealInventory(ctx, client, config.Nodes)
+	specs := hybridSyntheticSpecs(config.Reference, config.SyntheticPeerCount)
+	inventory, err := waitForRealInventory(
+		ctx, client, config.Nodes, syntheticSpecIDs(specs),
+	)
 	if err != nil {
 		return result, err
 	}
-	specs := hybridSyntheticSpecs(config.Reference, config.SyntheticPeerCount)
 	registered := make([]meshstress.WorkerSpec, 0, len(specs))
 	defer func() {
 		returnErr = errors.Join(returnErr, removeSyntheticPeers(client, registered))
@@ -132,6 +134,7 @@ func waitForRealInventory(
 	ctx context.Context,
 	client *registry.Client,
 	nodes []Node,
+	proofOwnedWorkerIDs []string,
 ) (registry.Inventory, error) {
 	waitContext, cancel := context.WithTimeout(ctx, hybridInventoryTimeout)
 	defer cancel()
@@ -141,7 +144,9 @@ func waitForRealInventory(
 	for {
 		inventory, err := client.Inventory(waitContext)
 		if err == nil {
-			if ready, reason := realInventoryReady(inventory, nodes); ready {
+			if ready, reason := realInventoryReady(
+				inventory, nodes, proofOwnedWorkerIDs,
+			); ready {
 				return inventory, nil
 			} else {
 				lastReason = reason
@@ -152,7 +157,7 @@ func waitForRealInventory(
 		select {
 		case <-waitContext.Done():
 			return registry.Inventory{}, fmt.Errorf(
-				"wait for fresh clean real-worker membership: %s: %w",
+				"wait for fresh clean hybrid membership: %s: %w",
 				lastReason, waitContext.Err(),
 			)
 		case <-ticker.C:
@@ -160,7 +165,11 @@ func waitForRealInventory(
 	}
 }
 
-func realInventoryReady(inventory registry.Inventory, nodes []Node) (bool, string) {
+func realInventoryReady(
+	inventory registry.Inventory,
+	nodes []Node,
+	proofOwnedWorkerIDs []string,
+) (bool, string) {
 	workers := make(map[string]registry.Worker, len(inventory.Workers))
 	for _, worker := range inventory.Workers {
 		workers[worker.ID] = worker
@@ -183,6 +192,11 @@ func realInventoryReady(inventory registry.Inventory, nodes []Node) (bool, strin
 		case len(worker.Status.RetainedShards) != 0 || worker.Status.OpenSequenceCount != 0 ||
 			worker.Status.RetainedBytes != 0:
 			return false, fmt.Sprintf("worker %q has not published clean post-run state", node.ID)
+		}
+	}
+	for _, id := range proofOwnedWorkerIDs {
+		if _, found := workers[id]; found {
+			return false, fmt.Sprintf("proof-owned worker %q still has an active lease", id)
 		}
 	}
 	return true, ""

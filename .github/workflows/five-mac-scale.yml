@@ -17,6 +17,7 @@ env:
   POOLED_MODEL: mlx-community/gemma-3-12b-it-4bit
   MLX_SWARM_MEMORY_THRESHOLD_BYTES: '6442450944'
   MLX_SWARM_CACHE_LIMIT_BYTES: '67108864'
+  MLX_SWARM_RENDEZVOUS_TIMEOUT_SECONDS: '900'
 
 jobs:
   mac-worker:
@@ -26,7 +27,7 @@ jobs:
       matrix:
         index: [0, 1, 2, 3, 4]
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -84,7 +85,8 @@ jobs:
           fi
           control_name="mesh-c-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           control_ip=""
-          for _ in {1..180}; do
+          control_deadline=$((SECONDS + MLX_SWARM_RENDEZVOUS_TIMEOUT_SECONDS))
+          while (( SECONDS < control_deadline )); do
             control_ip="$(tailscale status --json | jq -r --arg name "$control_name" '(.Peer // {})[] | select(.HostName == $name) | .TailscaleIPs[]? | select(contains(":") | not)' | head -n 1)"
             if [ -n "$control_ip" ] && curl -fsS --connect-timeout 2 --max-time 5 "http://${control_ip}:9090/healthz" >/dev/null; then
               break
@@ -171,7 +173,7 @@ jobs:
   linux-coordinator:
     needs: build-worker
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -228,10 +230,11 @@ jobs:
             exit 1
           fi
 
+          peer_deadline=$((SECONDS + MLX_SWARM_RENDEZVOUS_TIMEOUT_SECONDS))
           for index in 0 1 2 3 4; do
             peer_name="mesh-w${index}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             peer_ip=""
-            for _ in {1..180}; do
+            while (( SECONDS < peer_deadline )); do
               peer_ip="$(tailscale status --json | jq -r --arg name "$peer_name" '(.Peer // {})[] | select(.HostName == $name) | .TailscaleIPs[]? | select(contains(":") | not)' | head -n 1)"
               if [ -n "$peer_ip" ] && curl -fsS --connect-timeout 2 --max-time 5 "http://${peer_ip}:8080/healthz" >/dev/null; then
                 break

@@ -40,6 +40,37 @@ func TestHybridSyntheticSpecsAreCheckpointIncompatible(t *testing.T) {
 	}
 }
 
+func TestRealInventoryReadinessWaitsForProofOwnedLeases(t *testing.T) {
+	now := time.Now()
+	nodes := testNodes()
+	inventory := registry.Inventory{
+		SchemaVersion: registry.SchemaVersion, GeneratedAt: now, LeaseTTLMillis: 30_000,
+		Workers: make([]registry.Worker, len(nodes)),
+	}
+	for index, node := range nodes {
+		inventory.Workers[index] = registry.Worker{
+			Registration: registry.Registration{
+				ID: node.ID, InstanceID: node.ID + "-instance", Endpoint: node.Endpoint,
+				Status: registry.Status{
+					Health: registry.HealthHealthy, WorkerObservationSequence: 1,
+				},
+			},
+			StatusObservedAt: now,
+		}
+	}
+	proofOwned := []string{"synthetic-linux-00"}
+	if ready, reason := realInventoryReady(inventory, nodes, proofOwned); !ready {
+		t.Fatalf("clean inventory was not ready: %s", reason)
+	}
+	inventory.Workers = append(inventory.Workers, registry.Worker{
+		Registration: registry.Registration{ID: proofOwned[0]},
+	})
+	if ready, reason := realInventoryReady(inventory, nodes, proofOwned); ready ||
+		!strings.Contains(reason, "active lease") {
+		t.Fatalf("ready = %t, reason = %q", ready, reason)
+	}
+}
+
 func TestFailedSyntheticRegistrationRemainsEligibleForCleanup(t *testing.T) {
 	removed := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
