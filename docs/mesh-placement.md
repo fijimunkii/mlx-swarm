@@ -269,6 +269,8 @@ bounded deterministic plan from supplied model range estimates. The mesh
 runtime binds selected endpoints to a single-use generation session and
 replans from fresh snapshots at the next sequence boundary. It does not yet
 derive range estimates from a real checkpoint adapter, expose construction
-through the control-plane API, or schedule active probes. The five-Mac
-scheduler-selected correctness run consumes these contracts next, while the
-existing explicit-plan path remains the diagnostic fallback.
+through the control-plane API, or schedule active probes. The five-Mac hybrid
+proof consumes measured real-checkpoint range estimates, selects five real
+process instances from a 32-member real/synthetic inventory, and generates
+reference-correct output. The existing explicit-plan path remains the
+diagnostic fallback.

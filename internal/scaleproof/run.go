@@ -21,8 +21,9 @@ const (
 )
 
 // Run proves five-host correctness, compares 2/3/4/5-stage performance on the
-// same persistent worker pool, and finally runs the checked-in pooled-memory
-// model across all five workers.
+// same persistent worker pool, runs the checked-in pooled-memory model across
+// all five workers, and repeats that reference generation through live mesh
+// membership and scheduler-selected instance-bound targets.
 func Run(ctx context.Context, config RunConfig) (result Result, returnErr error) {
 	result = Result{SchemaVersion: SchemaVersion, Coordinator: config.Coordinator}
 	if err := normalizeConfig(&config); err != nil {
@@ -174,8 +175,23 @@ func Run(ctx context.Context, config RunConfig) (result Result, returnErr error)
 	if err := cleanupNodes(config.Nodes); err != nil {
 		return result, fmt.Errorf("unload pooled-memory plan: %w", err)
 	}
+	hybrid, err := runHybrid(ctx, config, pooledRun)
+	if err != nil {
+		return result, fmt.Errorf("hybrid mesh proof: %w", err)
+	}
+	result.Hybrid = hybrid
+	result.Checks.HybridInventoryAtLeast32 = hybrid.InventoryWorkerCount >= 32
+	result.Checks.HybridSelectedRealWorkers = hybrid.SelectedRealWorkersOnly &&
+		hybrid.SelectedFiveDistinctWorkers
+	result.Checks.HybridRejectedSynthetic = hybrid.EverySyntheticWorkerRejected
+	result.Checks.HybridTokensMatch = hybrid.GeneratedTokensMatchReference
+	result.Checks.HybridSequenceStateReleased = hybrid.SequenceStateReleased
+	if err := cleanupNodes(config.Nodes); err != nil {
+		return result, fmt.Errorf("unload hybrid plan: %w", err)
+	}
 	result.Checks.SequenceStateReleased = correctnessRun.SequenceStateReleased &&
-		allRunSequencesReleased(result.Scaling) && pooledRun.SequenceStateReleased
+		allRunSequencesReleased(result.Scaling) && pooledRun.SequenceStateReleased &&
+		hybrid.SequenceStateReleased
 	result.Checks.WorkersCleanAfterProof = nodesClean(config.Nodes)
 	result.Checks.AllPassed = allChecksPassed(result.Checks)
 	if !result.Checks.AllPassed {
@@ -216,6 +232,17 @@ func normalizeConfig(config *RunConfig) error {
 	}
 	if err := validateNodes(config.Nodes); err != nil {
 		return err
+	}
+	if strings.TrimSpace(config.ControlURL) == "" {
+		return errors.New("mesh control URL is required")
+	}
+	if config.SyntheticPeerCount == 0 {
+		config.SyntheticPeerCount = DefaultSyntheticPeerCount
+	}
+	if config.SyntheticPeerCount < DefaultSyntheticPeerCount {
+		return fmt.Errorf(
+			"hybrid proof requires at least %d synthetic peers", DefaultSyntheticPeerCount,
+		)
 	}
 	return nil
 }
@@ -346,16 +373,18 @@ func teardownEvidence(ctx context.Context, nodes []Node) ([]TeardownEvidence, bo
 	evidence := make([]TeardownEvidence, len(nodes))
 	released := true
 	for index, node := range nodes {
-		state, err := workerproc.State(ctx, node.Caller)
+		observation, err := workerproc.ObserveState(ctx, node.Caller)
 		if err != nil {
 			return nil, false, fmt.Errorf("%s teardown state: %w", node.ID, err)
 		}
+		state := observation.State
 		open := 0
 		for _, shard := range state.LoadedShards {
 			open += shard.OpenSequenceCount
 		}
 		evidence[index] = TeardownEvidence{
-			NodeID: node.ID, LoadedShardCount: len(state.LoadedShards),
+			NodeID: node.ID, WorkerObservationSequence: observation.ObservationSequence,
+			LoadedShardCount:  len(state.LoadedShards),
 			OpenSequenceCount: open, KVCacheBytes: state.KVCacheBytes,
 			RetainedBytes: state.RetainedBytes,
 		}
@@ -545,5 +574,8 @@ func allChecksPassed(checks Checks) bool {
 		checks.PooledCheckpointMatches &&
 		checks.PooledPromptTokensMatch && checks.PooledGeneratedTokensMatch &&
 		checks.PooledWorkersWithinMemory && checks.NoServingFullModelOracle &&
+		checks.HybridInventoryAtLeast32 && checks.HybridSelectedRealWorkers &&
+		checks.HybridRejectedSynthetic && checks.HybridTokensMatch &&
+		checks.HybridSequenceStateReleased &&
 		checks.SequenceStateReleased && checks.WorkersCleanAfterProof
 }

@@ -64,9 +64,22 @@ recording membership HTTP request count and retained link/compute series. A
 future active probe service must change that explicit bound rather than hiding
 probe work inside placement.
 
-## Boundary
+## Five-Mac hybrid gate
 
-This closes the Linux synthetic portion of M8.4. The remaining gate combines
-the real five-Mac serving pool with many unsuitable synthetic Linux records,
-selects the real execution plan through the scheduler, and proves the generated
-tokens still match the deterministic reference.
+The five-Mac workflow supplies the real-model counterpart. A Linux coordinator
+runs `swarm-control`; all five `swarmd` processes register their stable worker
+IDs, process instances, serving endpoints, capabilities, and fresh state. After
+the explicit 12B pooled-memory run establishes successful measured stage costs,
+the coordinator waits for clean current membership and adds 27 checkpoint-
+incompatible synthetic Linux peers.
+
+The production sequence scheduler consumes that 32-member snapshot, records
+every synthetic checkpoint rejection, binds five selected real process
+instances over the identity-aware HTTP transport, and generates the same 32
+reference tokens through the scheduler-selected plan. The evidence includes
+the full placement decision, selected bindings, synthetic rejection codes,
+stage/run metrics, and direct post-run sequence/KV cleanup observations.
+
+This closes M8.4 without claiming that synthetic peers execute model math or
+that the current JSON/base64 transport is representative of final network
+performance.

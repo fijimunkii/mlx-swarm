@@ -1,20 +1,25 @@
 package scaleproof
 
 import (
+	"net/http"
 	"time"
 
 	"github.com/fijimunkii/mlx-swarm/internal/benchmark"
 	"github.com/fijimunkii/mlx-swarm/internal/generation"
+	"github.com/fijimunkii/mlx-swarm/internal/mesh"
+	"github.com/fijimunkii/mlx-swarm/internal/placement"
 	"github.com/fijimunkii/mlx-swarm/internal/pooledproof"
+	"github.com/fijimunkii/mlx-swarm/internal/registry"
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
 
 const (
-	SchemaVersion       = 1
-	RequiredNodeCount   = 5
-	DefaultSmallModelID = "mlx-community/gemma-3-270m-it-4bit"
-	DefaultPrompt       = "Write a short story about two computers working together:"
-	DefaultTokenCount   = 32
+	SchemaVersion             = 1
+	RequiredNodeCount         = 5
+	DefaultSmallModelID       = "mlx-community/gemma-3-270m-it-4bit"
+	DefaultPrompt             = "Write a short story about two computers working together:"
+	DefaultTokenCount         = 32
+	DefaultSyntheticPeerCount = 27
 )
 
 type CoordinatorEvidence struct {
@@ -52,14 +57,18 @@ type RunConfig struct {
 	RTol                         float64
 	ATol                         float64
 	ForwardTimeout               time.Duration
+	ControlURL                   string
+	HTTPClient                   *http.Client
+	SyntheticPeerCount           int
 }
 
 type TeardownEvidence struct {
-	NodeID            string `json:"nodeID"`
-	LoadedShardCount  int    `json:"loadedShardCount"`
-	OpenSequenceCount int    `json:"openSequenceCount"`
-	KVCacheBytes      int    `json:"kvCacheBytes"`
-	RetainedBytes     int    `json:"retainedBytes"`
+	NodeID                    string `json:"nodeID"`
+	WorkerObservationSequence uint64 `json:"workerObservationSequence"`
+	LoadedShardCount          int    `json:"loadedShardCount"`
+	OpenSequenceCount         int    `json:"openSequenceCount"`
+	KVCacheBytes              int    `json:"kvCacheBytes"`
+	RetainedBytes             int    `json:"retainedBytes"`
 }
 
 type RunEvidence struct {
@@ -108,21 +117,57 @@ type PooledEvidence struct {
 	Nodes                         []PooledNodeEvidence `json:"nodes"`
 }
 
+type HybridSyntheticRejection struct {
+	WorkerID string                    `json:"workerID"`
+	Codes    []placement.RejectionCode `json:"codes"`
+}
+
+type HybridEvidence struct {
+	InventoryRevision             uint64                     `json:"inventoryRevision"`
+	InventoryGeneratedAt          time.Time                  `json:"inventoryGeneratedAt"`
+	InventoryWorkerCount          int                        `json:"inventoryWorkerCount"`
+	RealWorkerIDs                 []string                   `json:"realWorkerIDs"`
+	SyntheticWorkerIDs            []string                   `json:"syntheticWorkerIDs"`
+	Selection                     mesh.SequenceSelection     `json:"selection"`
+	SyntheticRejections           []HybridSyntheticRejection `json:"syntheticRejections"`
+	Run                           RunEvidence                `json:"run"`
+	SelectedRealWorkersOnly       bool                       `json:"selectedRealWorkersOnly"`
+	SelectedFiveDistinctWorkers   bool                       `json:"selectedFiveDistinctWorkers"`
+	EverySyntheticWorkerRejected  bool                       `json:"everySyntheticWorkerRejected"`
+	GeneratedTokensMatchReference bool                       `json:"generatedTokensMatchReference"`
+	SequenceStateReleased         bool                       `json:"sequenceStateReleased"`
+	PostRunWorkers                []HybridWorkerObservation  `json:"postRunWorkers"`
+}
+
+type HybridWorkerObservation struct {
+	WorkerID                  string `json:"workerID"`
+	WorkerObservationSequence uint64 `json:"workerObservationSequence"`
+	LoadedShardCount          int    `json:"loadedShardCount"`
+	OpenSequenceCount         int    `json:"openSequenceCount"`
+	KVCacheBytes              int    `json:"kvCacheBytes"`
+	RetainedBytes             int    `json:"retainedBytes"`
+}
+
 type Checks struct {
-	FiveDistinctNodes          bool `json:"fiveDistinctNodes"`
-	CleanWorkersAtStart        bool `json:"cleanWorkersAtStart"`
-	SmallModelLogitsMatch      bool `json:"smallModelLogitsMatch"`
-	SmallModelTokensMatch      bool `json:"smallModelTokensMatch"`
-	ScalingRunsTwoThroughFive  bool `json:"scalingRunsTwoThroughFive"`
-	ScalingTokensMatch         bool `json:"scalingTokensMatch"`
-	PooledCheckpointMatches    bool `json:"pooledCheckpointMatches"`
-	PooledPromptTokensMatch    bool `json:"pooledPromptTokensMatch"`
-	PooledGeneratedTokensMatch bool `json:"pooledGeneratedTokensMatch"`
-	PooledWorkersWithinMemory  bool `json:"pooledWorkersWithinMemory"`
-	NoServingFullModelOracle   bool `json:"noServingFullModelOracle"`
-	SequenceStateReleased      bool `json:"sequenceStateReleased"`
-	WorkersCleanAfterProof     bool `json:"workersCleanAfterProof"`
-	AllPassed                  bool `json:"allPassed"`
+	FiveDistinctNodes           bool `json:"fiveDistinctNodes"`
+	CleanWorkersAtStart         bool `json:"cleanWorkersAtStart"`
+	SmallModelLogitsMatch       bool `json:"smallModelLogitsMatch"`
+	SmallModelTokensMatch       bool `json:"smallModelTokensMatch"`
+	ScalingRunsTwoThroughFive   bool `json:"scalingRunsTwoThroughFive"`
+	ScalingTokensMatch          bool `json:"scalingTokensMatch"`
+	PooledCheckpointMatches     bool `json:"pooledCheckpointMatches"`
+	PooledPromptTokensMatch     bool `json:"pooledPromptTokensMatch"`
+	PooledGeneratedTokensMatch  bool `json:"pooledGeneratedTokensMatch"`
+	PooledWorkersWithinMemory   bool `json:"pooledWorkersWithinMemory"`
+	NoServingFullModelOracle    bool `json:"noServingFullModelOracle"`
+	SequenceStateReleased       bool `json:"sequenceStateReleased"`
+	WorkersCleanAfterProof      bool `json:"workersCleanAfterProof"`
+	HybridInventoryAtLeast32    bool `json:"hybridInventoryAtLeast32"`
+	HybridSelectedRealWorkers   bool `json:"hybridSelectedRealWorkers"`
+	HybridRejectedSynthetic     bool `json:"hybridRejectedSynthetic"`
+	HybridTokensMatch           bool `json:"hybridTokensMatch"`
+	HybridSequenceStateReleased bool `json:"hybridSequenceStateReleased"`
+	AllPassed                   bool `json:"allPassed"`
 }
 
 type Result struct {
@@ -132,5 +177,12 @@ type Result struct {
 	Correctness   CorrectnessEvidence `json:"correctness"`
 	Scaling       []RunEvidence       `json:"scaling"`
 	PooledMemory  PooledEvidence      `json:"pooledMemory"`
+	Hybrid        HybridEvidence      `json:"hybrid"`
 	Checks        Checks              `json:"checks"`
 }
+
+type fixedInventory struct {
+	inventory registry.Inventory
+}
+
+func (source fixedInventory) Snapshot() registry.Inventory { return source.inventory }

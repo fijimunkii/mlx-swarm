@@ -15,10 +15,12 @@ pull-request gates.
 
 ## Topology and trust boundary
 
-The workflow starts six separately identified jobs:
+The workflow starts six separately identified jobs plus a control-plane process
+on the Linux coordinator:
 
 ```text
 Linux coordinator
+  -> swarm-control: leased real + synthetic inventory
   -> mac-0: input owner + early layers
   -> mac-1: middle layers
   -> mac-2: middle layers
@@ -27,11 +29,13 @@ Linux coordinator
 ```
 
 `swarmd` remains a trusted-network API. The workflow binds each daemon to its
-Tailscale address, does not expose it publicly, and records the coordinator ID,
-five stable node IDs, endpoints, probe time, device/runtime capabilities,
-physical memory, and MLX memory limits in the result artifact.
+Tailscale address, registers a stable worker ID plus run-specific process
+instance with `swarm-control`, and does not expose either service publicly. The
+artifact records the coordinator ID, five stable node IDs, instance-bound
+endpoints, probe time, device/runtime capabilities, physical memory, and MLX
+memory limits.
 
-## Three gates in one run
+## Four gates in one run
 
 The coordinator requires clean workers before loading any shard and runs these
 gates sequentially on the same five persistent worker processes:
@@ -53,9 +57,18 @@ gates sequentially on the same five persistent worker processes:
    transformer layers across the five nodes. Prompt IDs and all 32 generated
    IDs must match the reference. Each process peak must remain within that
    node's physical memory and each node must report the configured MLX limit.
+4. **Hybrid automatic placement.** After the explicit 12B run supplies measured
+   range costs and every real worker publishes fresh clean state, the
+   coordinator adds 27 checkpoint-incompatible synthetic Linux peers to the
+   same inventory. The production scheduler must reject every synthetic peer,
+   select five distinct real process instances, and reproduce all 32 reference
+   tokens over the identity-bound transport. The explicit path remains the
+   diagnostic baseline; this gate proves the live membership-to-generation
+   integration.
 
-The 12B split is evidence for one pinned checkpoint and worker inventory. It is
-not automatic placement policy; capability-driven placement belongs to M8.3.
+The five measured 12B ranges are evidence for one pinned checkpoint, but worker
+assignment is derived from the current 32-member inventory rather than a fixed
+endpoint list.
 
 ## Reading the artifact
 
@@ -68,6 +81,10 @@ JSON document. The top-level `checks.allPassed` gate is true only when:
 - the 2/3/4/5 runs all reproduce the verified tokens;
 - the 12B prompt and generated tokens match the checked-in reference;
 - all five 12B stages are complementary and no stage is a full-model oracle;
+- the hybrid inventory contains at least 32 workers, every synthetic peer has a
+  machine-readable checkpoint rejection, and five distinct real workers are
+  selected;
+- the scheduler-selected hybrid run reproduces the 12B reference tokens;
 - all five process peaks stay within physical memory; and
 - every sequence releases its KV and retained state.
 

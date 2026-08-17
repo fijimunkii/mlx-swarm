@@ -171,7 +171,10 @@ changed performance evidence cannot mutate an active sequence or reuse a stale
 plan. A Linux-only synthetic proof drives 32 heterogeneous records through the
 same membership HTTP and placement contracts, exercises churn and capability
 changes, and records bounded search, scheduling latency, and stable rejection
-evidence. The scheduler-selected five-Mac hybrid run remains next.
+evidence. The five-Mac workflow then registers the real serving processes in a
+shared control plane, adds 27 incompatible synthetic Linux peers, and requires
+the live scheduler to select five real instance-bound targets whose 12B output
+still matches the deterministic reference.
 See the
 [placement and scoring contract](docs/mesh-placement.md) and the
 [synthetic scale/churn proof](docs/mesh-scale-churn.md).
