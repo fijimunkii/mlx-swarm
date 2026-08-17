@@ -64,9 +64,11 @@ func run() error {
 	if strings.TrimSpace(*controlURL) == "" {
 		return errors.New("-control is required for the hybrid membership proof")
 	}
-	if *syntheticPeers < scaleproof.DefaultSyntheticPeerCount {
+	if *syntheticPeers < scaleproof.DefaultSyntheticPeerCount ||
+		*syntheticPeers > scaleproof.MaxSyntheticPeerCount {
 		return fmt.Errorf(
-			"-synthetic-peers must be at least %d", scaleproof.DefaultSyntheticPeerCount,
+			"-synthetic-peers must be between %d and %d",
+			scaleproof.DefaultSyntheticPeerCount, scaleproof.MaxSyntheticPeerCount,
 		)
 	}
 	reference, err := pooledproof.LoadReference(*referencePath)

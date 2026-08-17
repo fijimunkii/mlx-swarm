@@ -18,7 +18,10 @@ import (
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
 
-const hybridInventoryTimeout = 30 * time.Second
+const (
+	hybridInventoryTimeout  = 30 * time.Second
+	hybridControlRPCTimeout = 5 * time.Second
+)
 
 func runHybrid(
 	ctx context.Context,
@@ -38,13 +41,12 @@ func runHybrid(
 	defer func() {
 		returnErr = errors.Join(returnErr, removeSyntheticPeers(client, registered))
 	}()
-	for _, spec := range specs {
-		if _, err := client.Register(ctx, spec.Registration(), true); err != nil {
-			return result, fmt.Errorf("register hybrid peer %q: %w", spec.ID, err)
-		}
-		registered = append(registered, spec)
+	if err := registerSyntheticPeers(ctx, client, specs, &registered); err != nil {
+		return result, err
 	}
-	inventory, err = client.Inventory(ctx)
+	inventoryContext, cancelInventory := context.WithTimeout(ctx, hybridControlRPCTimeout)
+	inventory, err = client.Inventory(inventoryContext)
+	cancelInventory()
 	if err != nil {
 		return result, fmt.Errorf("snapshot hybrid inventory: %w", err)
 	}
@@ -106,6 +108,24 @@ func runHybrid(
 		PostRunWorkers: postRunWorkers,
 	}
 	return result, nil
+}
+
+func registerSyntheticPeers(
+	ctx context.Context,
+	client *registry.Client,
+	specs []meshstress.WorkerSpec,
+	cleanup *[]meshstress.WorkerSpec,
+) error {
+	for _, spec := range specs {
+		*cleanup = append(*cleanup, spec)
+		registerContext, cancelRegister := context.WithTimeout(ctx, hybridControlRPCTimeout)
+		_, err := client.Register(registerContext, spec.Registration(), true)
+		cancelRegister()
+		if err != nil {
+			return fmt.Errorf("register hybrid peer %q: %w", spec.ID, err)
+		}
+	}
+	return nil
 }
 
 func waitForRealInventory(

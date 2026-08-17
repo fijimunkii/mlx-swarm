@@ -20,6 +20,10 @@ const (
 	DefaultPrompt             = "Write a short story about two computers working together:"
 	DefaultTokenCount         = 32
 	DefaultSyntheticPeerCount = 27
+	// MaxSyntheticPeerCount keeps the proof's serial membership setup and
+	// in-memory evidence bounded while allowing inventories well beyond the
+	// 32-worker acceptance case.
+	MaxSyntheticPeerCount = 256
 )
 
 type CoordinatorEvidence struct {

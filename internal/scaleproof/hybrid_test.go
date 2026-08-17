@@ -1,15 +1,20 @@
 package scaleproof
 
 import (
+	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"testing"
 
 	"github.com/fijimunkii/mlx-swarm/internal/benchmark"
 	"github.com/fijimunkii/mlx-swarm/internal/generation"
 	"github.com/fijimunkii/mlx-swarm/internal/mesh"
+	"github.com/fijimunkii/mlx-swarm/internal/meshstress"
 	"github.com/fijimunkii/mlx-swarm/internal/placement"
 	"github.com/fijimunkii/mlx-swarm/internal/pooledproof"
+	"github.com/fijimunkii/mlx-swarm/internal/registry"
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
 
@@ -30,6 +35,42 @@ func TestHybridSyntheticSpecsAreCheckpointIncompatible(t *testing.T) {
 			) {
 			t.Fatalf("synthetic registration is not narrowly incompatible: %+v", registration)
 		}
+	}
+}
+
+func TestFailedSyntheticRegistrationRemainsEligibleForCleanup(t *testing.T) {
+	removed := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodPost:
+			http.Error(w, "registration response lost", http.StatusInternalServerError)
+		case http.MethodDelete:
+			removed <- request.URL.Path
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+	client, err := registry.NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs := hybridSyntheticSpecs(pooledproof.Reference{
+		ModelType: "adapter", CheckpointFingerprint: "checkpoint",
+	}, 1)
+	cleanup := make([]meshstress.WorkerSpec, 0, 1)
+	if err := registerSyntheticPeers(context.Background(), client, specs, &cleanup); err == nil {
+		t.Fatal("registration failure was not returned")
+	}
+	if len(cleanup) != 1 || cleanup[0].ID != specs[0].ID {
+		t.Fatalf("cleanup candidates = %+v", cleanup)
+	}
+	if err := removeSyntheticPeers(client, cleanup); err != nil {
+		t.Fatal(err)
+	}
+	if path := <-removed; path != "/v1/membership/workers/"+specs[0].ID {
+		t.Fatalf("cleanup path = %q", path)
 	}
 }
 

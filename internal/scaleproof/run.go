@@ -236,12 +236,20 @@ func normalizeConfig(config *RunConfig) error {
 	if strings.TrimSpace(config.ControlURL) == "" {
 		return errors.New("mesh control URL is required")
 	}
-	if config.SyntheticPeerCount == 0 {
-		config.SyntheticPeerCount = DefaultSyntheticPeerCount
+	if err := normalizeSyntheticPeerCount(&config.SyntheticPeerCount); err != nil {
+		return err
 	}
-	if config.SyntheticPeerCount < DefaultSyntheticPeerCount {
+	return nil
+}
+
+func normalizeSyntheticPeerCount(count *int) error {
+	if *count == 0 {
+		*count = DefaultSyntheticPeerCount
+	}
+	if *count < DefaultSyntheticPeerCount || *count > MaxSyntheticPeerCount {
 		return fmt.Errorf(
-			"hybrid proof requires at least %d synthetic peers", DefaultSyntheticPeerCount,
+			"hybrid proof requires between %d and %d synthetic peers",
+			DefaultSyntheticPeerCount, MaxSyntheticPeerCount,
 		)
 	}
 	return nil
