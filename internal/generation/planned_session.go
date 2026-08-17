@@ -107,7 +107,7 @@ type PlannedSessionInfo struct {
 
 func (s *PlannedSession) Info() PlannedSessionInfo {
 	return PlannedSessionInfo{
-		Model: s.model, ExecutionPlan: s.plan, ReferenceShardID: s.referenceShard,
+		Model: s.model, ExecutionPlan: cloneExecutionPlan(s.plan), ReferenceShardID: s.referenceShard,
 		StageLoads:         append([]StageLoad(nil), s.stageLoads...),
 		SessionSetupMicros: s.setupMicros,
 	}
@@ -124,6 +124,10 @@ func NewPlannedSession(
 	if err := validatePlannedSessionConfig(&config, plan, reference); err != nil {
 		return nil, err
 	}
+	// The plan is an immutable sequence contract. Detach its stage slice from
+	// the caller before preflight so later caller mutations cannot retarget an
+	// already prepared session.
+	plan = cloneExecutionPlan(plan)
 	bound, model, err := preflightExecutionTargets(ctx, plan, targets)
 	if err != nil {
 		return nil, err
@@ -266,7 +270,7 @@ func (s *PlannedSession) Generate(
 	result = PlannedResult{
 		Model: s.plan.Model.ID, ModelType: s.model.ModelType,
 		CheckpointFingerprint: s.model.CheckpointFingerprint,
-		CheckpointBytes:       s.model.CheckpointBytes, ExecutionPlan: s.plan,
+		CheckpointBytes:       s.model.CheckpointBytes, ExecutionPlan: cloneExecutionPlan(s.plan),
 		SequenceID: request.SequenceID, Prompt: request.Prompt, MaxTokens: request.MaxTokens,
 		RTol: s.config.RTol, ATol: s.config.ATol,
 		ForwardTimeoutMillis: s.config.ForwardTimeout.Milliseconds(),

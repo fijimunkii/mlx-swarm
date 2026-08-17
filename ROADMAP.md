@@ -228,7 +228,7 @@ Once explicit N-stage execution is correct, let the control plane build the plan
   topology, input/output ownership, and retained-state constraints
 - [x] score plans by observed compute, transfer cost, health, memory pressure,
   and shard reuse
-- [ ] replan between sequences when workers join, leave, slow down, or fail
+- [x] replan between sequences when workers join, leave, slow down, or fail
 - [x] emit selected stages plus rejected-node reasons as machine-readable evidence
 
 The first scheduler should prefer a simple valid contiguous-layer plan over a

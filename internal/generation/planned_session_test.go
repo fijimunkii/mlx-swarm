@@ -203,6 +203,42 @@ func TestPlannedSessionPreflightsReferenceBeforeLoadingStages(t *testing.T) {
 	}
 }
 
+func TestPlannedSessionFreezesCallerPlanAndInfo(t *testing.T) {
+	workers, _, plan, targets := plannedFakeSwarm(
+		t, []int32{3}, StageResponseSampledToken,
+	)
+	wantPlan := cloneExecutionPlan(plan)
+	session, err := NewPlannedSession(
+		context.Background(), plan, targets, nil, PlannedSessionConfig{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plan.Stages[0].Name = "mutated-caller-plan"
+	firstInfo := session.Info()
+	if !reflect.DeepEqual(firstInfo.ExecutionPlan, wantPlan) {
+		t.Fatalf("session plan changed with caller mutation: %+v", firstInfo.ExecutionPlan)
+	}
+	firstInfo.ExecutionPlan.Stages[0].Name = "mutated-info"
+	secondInfo := session.Info()
+	if !reflect.DeepEqual(secondInfo.ExecutionPlan, wantPlan) {
+		t.Fatalf("session plan changed with info mutation: %+v", secondInfo.ExecutionPlan)
+	}
+
+	result, err := session.Generate(context.Background(), Request{
+		Prompt: "hello", MaxTokens: 1, SequenceID: "frozen-plan",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.ExecutionPlan.Stages[0].Name = "mutated-result"
+	if !reflect.DeepEqual(session.Info().ExecutionPlan, wantPlan) {
+		t.Fatal("generation result shared the session plan stage slice")
+	}
+	assertPlannedNoSequences(t, workers...)
+}
+
 func TestPlannedSessionRollsBackPartialStageOpens(t *testing.T) {
 	workers, _, plan, targets := plannedFakeSwarm(
 		t, []int32{3}, StageResponseTensor,

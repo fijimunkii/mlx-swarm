@@ -52,6 +52,11 @@ type ExecutionPlan struct {
 	Stages            []ExecutionStage `json:"stages"`
 }
 
+func cloneExecutionPlan(plan ExecutionPlan) ExecutionPlan {
+	plan.Stages = append([]ExecutionStage(nil), plan.Stages...)
+	return plan
+}
+
 // BuildExecutionPlan constructs an immutable plan from caller-selected stage
 // ranges. It supplies the schema version, revision, and collision-safe shard
 // IDs so experiments can use explicit non-balanced layouts without duplicating
