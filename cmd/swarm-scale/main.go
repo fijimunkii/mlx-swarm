@@ -45,6 +45,8 @@ func run() error {
 	coordinatorID := flag.String("coordinator-id", "linux-coordinator", "stable coordinator identity recorded in evidence")
 	runID := flag.String("run-id", "local", "proof/run identity recorded in evidence")
 	inventoryRevision := flag.String("inventory-revision", "five-mac-static", "explicit inventory revision pinned into plans")
+	controlURL := flag.String("control", "", "swarm-control URL containing the real worker membership")
+	syntheticPeers := flag.Int("synthetic-peers", scaleproof.DefaultSyntheticPeerCount, "incompatible synthetic Linux peers added to the hybrid inventory")
 	edgeReserve := flag.Int("edge-reserve-layers", 2, "virtual transformer layers reserved for each 12B edge owner")
 	memoryThreshold := flag.Int("memory-threshold-bytes", pooledproof.DefaultWorkerMemoryThreshold, "required MLX memory threshold on every worker")
 	rtol := flag.Float64("rtol", 1e-4, "relative logit tolerance")
@@ -58,6 +60,16 @@ func run() error {
 	}
 	if *timeout <= 0 || *forwardTimeout < time.Millisecond {
 		return errors.New("timeouts must be positive and per-stage timeout must be at least 1ms")
+	}
+	if strings.TrimSpace(*controlURL) == "" {
+		return errors.New("-control is required for the hybrid membership proof")
+	}
+	if *syntheticPeers < scaleproof.DefaultSyntheticPeerCount ||
+		*syntheticPeers > scaleproof.MaxSyntheticPeerCount {
+		return fmt.Errorf(
+			"-synthetic-peers must be between %d and %d",
+			scaleproof.DefaultSyntheticPeerCount, scaleproof.MaxSyntheticPeerCount,
+		)
 	}
 	reference, err := pooledproof.LoadReference(*referencePath)
 	if err != nil {
@@ -106,6 +118,7 @@ func run() error {
 		EdgeReserveLayers:            *edgeReserve,
 		ExpectedMemoryThresholdBytes: *memoryThreshold,
 		RTol:                         *rtol, ATol: *atol, ForwardTimeout: *forwardTimeout,
+		ControlURL: *controlURL, HTTPClient: httpClient, SyntheticPeerCount: *syntheticPeers,
 	})
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetEscapeHTML(false)

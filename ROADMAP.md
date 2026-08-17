@@ -250,7 +250,7 @@ additional macOS inference slots.
   incompatible capability changes
 - [x] bound network probing and scheduler work as membership grows
 - [x] record candidate rejection reasons and scheduler decision latency
-- [ ] combine real Mac serving workers with many synthetic Linux peers and prove
+- [x] combine real Mac serving workers with many synthetic Linux peers and prove
   the chosen real plan still generates reference-correct output
 
 Synthetic membership tests control-plane behavior; they do not claim that every

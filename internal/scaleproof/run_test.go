@@ -36,6 +36,33 @@ func TestNormalizeConfigRequiresFiveNodesAndBoundedRequests(t *testing.T) {
 	}
 }
 
+func TestNormalizeSyntheticPeerCountBoundsAllocation(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     int
+		want      int
+		wantError bool
+	}{
+		{name: "default", input: 0, want: DefaultSyntheticPeerCount},
+		{name: "minimum", input: DefaultSyntheticPeerCount, want: DefaultSyntheticPeerCount},
+		{name: "maximum", input: MaxSyntheticPeerCount, want: MaxSyntheticPeerCount},
+		{name: "below", input: DefaultSyntheticPeerCount - 1, wantError: true},
+		{name: "above", input: MaxSyntheticPeerCount + 1, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			count := test.input
+			err := normalizeSyntheticPeerCount(&count)
+			if (err != nil) != test.wantError {
+				t.Fatalf("error = %v, wantError = %t", err, test.wantError)
+			}
+			if !test.wantError && count != test.want {
+				t.Fatalf("count = %d, want %d", count, test.want)
+			}
+		})
+	}
+}
+
 func testNodes() []Node {
 	nodes := make([]Node, RequiredNodeCount)
 	for index := range nodes {

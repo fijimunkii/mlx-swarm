@@ -17,6 +17,7 @@ env:
   POOLED_MODEL: mlx-community/gemma-3-12b-it-4bit
   MLX_SWARM_MEMORY_THRESHOLD_BYTES: '6442450944'
   MLX_SWARM_CACHE_LIMIT_BYTES: '67108864'
+  MLX_SWARM_RENDEZVOUS_TIMEOUT_SECONDS: '900'
 
 jobs:
   mac-worker:
@@ -26,7 +27,7 @@ jobs:
       matrix:
         index: [0, 1, 2, 3, 4]
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -82,13 +83,34 @@ jobs:
             echo "Tailscale did not assign an IPv4 address" >&2
             exit 1
           fi
+          control_name="mesh-c-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          control_ip=""
+          control_deadline=$((SECONDS + MLX_SWARM_RENDEZVOUS_TIMEOUT_SECONDS))
+          while (( SECONDS < control_deadline )); do
+            control_ip="$(tailscale status --json | jq -r --arg name "$control_name" '(.Peer // {})[] | select(.HostName == $name) | .TailscaleIPs[]? | select(contains(":") | not)' | head -n 1)"
+            if [ -n "$control_ip" ] && curl -fsS --connect-timeout 2 --max-time 5 "http://${control_ip}:9090/healthz" >/dev/null; then
+              break
+            fi
+            control_ip=""
+            sleep 2
+          done
+          if [ -z "$control_ip" ]; then
+            echo "Could not discover ready mesh control plane $control_name" >&2
+            tailscale status
+            exit 1
+          fi
           MLX_SWARM_WORKER="$worker" \
             SWARMD_ADDR="${ts_ip}:8080" \
             SWARMD_ALLOW_DEBUG_COMPLETE=1 \
+            SWARMD_CONTROL_URL="http://${control_ip}:9090" \
+            SWARMD_WORKER_ID="mac-${{ matrix.index }}" \
+            SWARMD_INSTANCE_ID="mac-${{ matrix.index }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            SWARMD_PUBLIC_URL="http://${ts_ip}:8080" \
+            SWARMD_HEARTBEAT_INTERVAL=1s \
             "$daemon" &
           daemon_pid=$!
           (
-            for _ in {1..100}; do
+            for _ in {1..140}; do
               sleep 30
               if ! kill -0 "$daemon_pid" 2>/dev/null; then
                 exit 0
@@ -102,7 +124,7 @@ jobs:
                   '${{ matrix.index }}' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >&2
               fi
             done
-            echo "five-Mac worker watchdog expired after 50 minutes" >&2
+            echo "five-Mac worker watchdog expired after 70 minutes" >&2
             kill -TERM "$daemon_pid" 2>/dev/null || true
           ) &
           watchdog_pid=$!
@@ -151,7 +173,7 @@ jobs:
   linux-coordinator:
     needs: build-worker
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -165,12 +187,14 @@ jobs:
           tags: tag:ci
           args: --accept-dns=false
           hostname: mesh-c-${{ github.run_id }}-${{ github.run_attempt }}
-      - name: Prove five-Mac correctness, scaling, and pooled memory
+      - name: Prove five-Mac correctness, scaling, pooled memory, and hybrid placement
         run: |
           proof="$RUNNER_TEMP/swarm-scale"
+          control="$RUNNER_TEMP/swarm-control"
           result="$RUNNER_TEMP/mlx-swarm-five-mac-scale.json"
           peer_ips=()
           proof_pid=""
+          control_pid=""
           cleanup() {
             if [ -n "$proof_pid" ]; then
               kill -TERM "$proof_pid" 2>/dev/null || true
@@ -180,13 +204,37 @@ jobs:
               curl -fsS -X POST --connect-timeout 2 --max-time 5 \
                 "http://${peer_ip}:8080/v1/debug/complete" >/dev/null 2>&1 || true
             done
+            if [ -n "$control_pid" ]; then
+              kill -TERM "$control_pid" 2>/dev/null || true
+              wait "$control_pid" 2>/dev/null || true
+            fi
           }
           trap cleanup EXIT
 
+          go build -o "$control" ./cmd/swarm-control
+          control_ip="$(tailscale ip -4 | head -n 1)"
+          if [ -z "$control_ip" ]; then
+            echo "Tailscale did not assign the coordinator an IPv4 address" >&2
+            exit 1
+          fi
+          SWARM_CONTROL_ADDR="${control_ip}:9090" "$control" &
+          control_pid=$!
+          for _ in {1..30}; do
+            if curl -fsS --connect-timeout 2 --max-time 5 "http://${control_ip}:9090/healthz" >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if ! curl -fsS --connect-timeout 2 --max-time 5 "http://${control_ip}:9090/healthz" >/dev/null; then
+            echo "Mesh control plane did not become ready" >&2
+            exit 1
+          fi
+
+          peer_deadline=$((SECONDS + MLX_SWARM_RENDEZVOUS_TIMEOUT_SECONDS))
           for index in 0 1 2 3 4; do
             peer_name="mesh-w${index}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             peer_ip=""
-            for _ in {1..180}; do
+            while (( SECONDS < peer_deadline )); do
               peer_ip="$(tailscale status --json | jq -r --arg name "$peer_name" '(.Peer // {})[] | select(.HostName == $name) | .TailscaleIPs[]? | select(contains(":") | not)' | head -n 1)"
               if [ -n "$peer_ip" ] && curl -fsS --connect-timeout 2 --max-time 5 "http://${peer_ip}:8080/healthz" >/dev/null; then
                 break
@@ -212,6 +260,8 @@ jobs:
             -coordinator-id "linux-${RUNNER_NAME}" \
             -run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             -inventory-revision "github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            -control "http://${control_ip}:9090" \
+            -synthetic-peers 27 \
             -reference testdata/pooled-memory/gemma-3-12b-it-4bit.json \
             -memory-threshold-bytes "$MLX_SWARM_MEMORY_THRESHOLD_BYTES" \
             -tokens 32 \
@@ -229,7 +279,23 @@ jobs:
             .checks.allPassed and
             (.nodes | length == 5) and
             ([.scaling[].stageCount] == [2,3,4,5]) and
-            (.pooledMemory.run.generation.generatedTokenIDs | length == 32)
+            (.pooledMemory.run.generation.generatedTokenIDs | length == 32) and
+            (.hybrid.inventoryWorkerCount >= 32) and
+            (.hybrid.syntheticWorkerIDs | length == 27) and
+            (.hybrid.selection.targets | length == 5) and
+            .hybrid.selectedRealWorkersOnly and
+            .hybrid.selectedFiveDistinctWorkers and
+            .hybrid.everySyntheticWorkerRejected and
+            .hybrid.generatedTokensMatchReference and
+            .hybrid.sequenceStateReleased and
+            (.hybrid.postRunWorkers | length == 5) and
+            ([.hybrid.postRunWorkers[] | (
+              .inventoryObservationSequence > 0 and
+              .workerObservationSequence > .inventoryObservationSequence and
+              .openSequenceCount == 0 and
+              .kvCacheBytes == 0 and
+              .retainedBytes == 0
+            )] | all)
           ' "$result" >/dev/null
 
           {
@@ -248,6 +314,10 @@ jobs:
             done
             echo
             printf '12B reference tokens: **%s**\n' "$(jq -r 'if .pooledMemory.generatedTokensMatchReference then "MATCH" else "MISMATCH" end' "$result")"
+            printf 'Hybrid scheduler: **%s real targets selected from %s workers; tokens %s**\n' \
+              "$(jq -r '.hybrid.selection.targets | length' "$result")" \
+              "$(jq -r '.hybrid.inventoryWorkerCount' "$result")" \
+              "$(jq -r 'if .hybrid.generatedTokensMatchReference then "MATCH" else "MISMATCH" end' "$result")"
           } >> "$GITHUB_STEP_SUMMARY"
 
           cleanup
