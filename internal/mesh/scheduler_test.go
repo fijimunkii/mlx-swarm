@@ -92,6 +92,9 @@ func TestSequenceSchedulerFreezesOneSequenceAndReplansTheNext(t *testing.T) {
 	if active.Info().ExecutionPlan.Revision != initialPlan.Revision {
 		t.Fatal("membership removal changed the already prepared active plan")
 	}
+	if err := next.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// A materially better worker affects only a later sequence.
 	now = now.Add(time.Second)
@@ -105,7 +108,7 @@ func TestSequenceSchedulerFreezesOneSequenceAndReplansTheNext(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, afterJoin, err := scheduler.Prepare(
+	joined, afterJoin, err := scheduler.Prepare(
 		context.Background(), request, nil, generation.PlannedSessionConfig{},
 	)
 	if err != nil {
@@ -114,6 +117,9 @@ func TestSequenceSchedulerFreezesOneSequenceAndReplansTheNext(t *testing.T) {
 	if afterJoin.Construction.SelectedPlan == nil ||
 		!slices.Contains(planTargetIDs(afterJoin.Construction.SelectedPlan.Plan), "worker-d") {
 		t.Fatalf("better worker did not affect later placement: %+v", afterJoin)
+	}
+	if err := joined.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	// A fresh failure signal is considered only when admitting another
@@ -132,7 +138,7 @@ func TestSequenceSchedulerFreezesOneSequenceAndReplansTheNext(t *testing.T) {
 	updateSchedulerStatus(t, membership, failedID, func(status *registry.Status) {
 		status.RecentFailureCount = 20
 	})
-	_, afterFailure, err := scheduler.Prepare(
+	afterFailureSequence, afterFailure, err := scheduler.Prepare(
 		context.Background(), request, nil, generation.PlannedSessionConfig{},
 	)
 	if err != nil {
@@ -140,6 +146,9 @@ func TestSequenceSchedulerFreezesOneSequenceAndReplansTheNext(t *testing.T) {
 	}
 	if slices.Contains(planTargetIDs(afterFailure.Construction.SelectedPlan.Plan), failedID) {
 		t.Fatalf("failed worker remained in the next plan: %+v", afterFailure)
+	}
+	if err := afterFailureSequence.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	// Fresh compute evidence can similarly move a later sequence away from a
@@ -166,7 +175,7 @@ func TestSequenceSchedulerFreezesOneSequenceAndReplansTheNext(t *testing.T) {
 			}
 		}
 	}
-	_, afterSlowdown, err := scheduler.Prepare(
+	afterSlowdownSequence, afterSlowdown, err := scheduler.Prepare(
 		context.Background(), request, nil, generation.PlannedSessionConfig{},
 	)
 	if err != nil {
@@ -174,6 +183,9 @@ func TestSequenceSchedulerFreezesOneSequenceAndReplansTheNext(t *testing.T) {
 	}
 	if slices.Contains(planTargetIDs(afterSlowdown.Construction.SelectedPlan.Plan), "worker-d") {
 		t.Fatalf("slowed worker remained in the next plan: %+v", afterSlowdown)
+	}
+	if err := afterSlowdownSequence.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	// A prepared admission is single-use even when the first attempt is
@@ -203,6 +215,74 @@ func TestSequenceSchedulerFreezesOneSequenceAndReplansTheNext(t *testing.T) {
 	}
 }
 
+func TestSequenceSchedulerReservesAndReleasesShardAdmission(t *testing.T) {
+	now := time.Date(2026, time.August, 17, 2, 30, 0, 0, time.UTC)
+	membership := registry.New(time.Minute, registry.WithClock(func() time.Time { return now }))
+	profiles, err := placement.NewProfileStore(placement.ProfileConfig{
+		MaxAge: time.Minute, MaxSeries: 16,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callers := map[string]*schedulerMetadataWorker{}
+	for _, id := range []string{"worker-a", "worker-b"} {
+		registration := schedulerRegistration(id)
+		registration.Capabilities.Admission.MaxOpenSequencesPerShard = 1
+		if _, err := membership.Register(registration); err != nil {
+			t.Fatal(err)
+		}
+		callers[id] = newSchedulerMetadataWorker()
+	}
+	scheduler, err := NewSequenceScheduler(
+		membership,
+		profiles,
+		TargetResolverFunc(func(binding TargetBinding) (workerproc.PersistentCaller, error) {
+			return callers[binding.WorkerID], nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, _, err := scheduler.Prepare(
+		context.Background(), schedulerPlanRequest(), nil, generation.PlannedSessionConfig{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second, _, err := scheduler.Prepare(
+		context.Background(), schedulerPlanRequest(), nil, generation.PlannedSessionConfig{},
+	); second != nil || !errors.Is(err, ErrSequenceCapacityReserved) {
+		t.Fatalf("concurrent admission: sequence=%v err=%v", second, err)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := first.Generate(canceled, generation.Request{
+		Prompt: "hello", MaxTokens: 1,
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled generation error = %v", err)
+	}
+	third, _, err := scheduler.Prepare(
+		context.Background(), schedulerPlanRequest(), nil, generation.PlannedSessionConfig{},
+	)
+	if err != nil {
+		t.Fatalf("reservation was not released after Generate: %v", err)
+	}
+	if err := third.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fourth, _, err := scheduler.Prepare(
+		context.Background(), schedulerPlanRequest(), nil, generation.PlannedSessionConfig{},
+	)
+	if err != nil {
+		t.Fatalf("reservation was not released after Close: %v", err)
+	}
+	if err := fourth.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSequenceSchedulerRetriesProfileSnapshotRace(t *testing.T) {
 	now := time.Date(2026, time.August, 17, 3, 0, 0, 0, time.UTC)
 	inventory := schedulerInventory(now, schedulerRegistration("worker-a"), schedulerRegistration("worker-b"))
@@ -217,9 +297,13 @@ func TestSequenceSchedulerRetriesProfileSnapshotRace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := scheduler.Prepare(
+	sequence, _, err := scheduler.Prepare(
 		context.Background(), schedulerPlanRequest(), nil, generation.PlannedSessionConfig{},
-	); err != nil {
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sequence.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if profiles.calls != 2 {

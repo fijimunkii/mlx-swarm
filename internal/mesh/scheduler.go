@@ -30,6 +30,12 @@ var (
 	// ErrSequenceAlreadyRun prevents a selected plan from being reused for a
 	// later sequence after membership or performance evidence may have changed.
 	ErrSequenceAlreadyRun = errors.New("scheduled sequence has already run")
+	// ErrSequenceCapacityReserved reports that another prepared or running
+	// sequence owns the final locally visible slot for a selected shard.
+	ErrSequenceCapacityReserved = errors.New("selected shard sequence capacity is reserved")
+	// ErrSequenceRunning reports an invalid attempt to cancel a sequence while
+	// its single Generate call is still active.
+	ErrSequenceRunning = errors.New("scheduled sequence is running")
 )
 
 type inventorySource interface {
@@ -79,7 +85,9 @@ type HTTPResolver struct {
 }
 
 func (resolver HTTPResolver) Resolve(binding TargetBinding) (workerproc.PersistentCaller, error) {
-	caller, err := workerproc.NewHTTPPersistentClient(binding.Endpoint, resolver.Client)
+	caller, err := workerproc.NewBoundHTTPPersistentClient(
+		binding.Endpoint, resolver.Client, binding.WorkerID, binding.InstanceID,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("worker %q endpoint: %w", binding.WorkerID, err)
 	}
@@ -90,9 +98,17 @@ func (resolver HTTPResolver) Resolve(binding TargetBinding) (workerproc.Persiste
 // membership and profile snapshots. Preparing another sequence always takes
 // new snapshots and constructs a new plan.
 type SequenceScheduler struct {
-	inventory inventorySource
-	profiles  profileSource
-	resolver  TargetResolver
+	mu           sync.Mutex
+	inventory    inventorySource
+	profiles     profileSource
+	resolver     TargetResolver
+	reservations map[sequenceReservationKey]int
+}
+
+type sequenceReservationKey struct {
+	workerID   string
+	instanceID string
+	shardID    string
 }
 
 func NewSequenceScheduler(
@@ -103,7 +119,10 @@ func NewSequenceScheduler(
 	if inventory == nil || profiles == nil || resolver == nil {
 		return nil, errors.New("mesh scheduler requires inventory, profiles, and target resolution")
 	}
-	return &SequenceScheduler{inventory: inventory, profiles: profiles, resolver: resolver}, nil
+	return &SequenceScheduler{
+		inventory: inventory, profiles: profiles, resolver: resolver,
+		reservations: make(map[sequenceReservationKey]int),
+	}, nil
 }
 
 // Prepare selects and materializes the current plan. A nil session with a
@@ -135,13 +154,19 @@ func (scheduler *SequenceScheduler) Prepare(
 		return nil, selection, err
 	}
 	selection.Targets = bindings
+	release, err := scheduler.reserveSequenceCapacity(inventory, construction.SelectedPlan.Plan)
+	if err != nil {
+		return nil, selection, err
+	}
 	targets := make([]generation.ExecutionTarget, len(bindings))
 	for index, binding := range bindings {
 		caller, resolveErr := scheduler.resolver.Resolve(binding)
 		if resolveErr != nil {
+			release()
 			return nil, selection, fmt.Errorf("resolve selected stage %d: %w", index, resolveErr)
 		}
 		if caller == nil {
+			release()
 			return nil, selection, fmt.Errorf("resolve selected stage %d returned no caller", index)
 		}
 		targets[index] = generation.ExecutionTarget{TargetID: binding.WorkerID, Caller: caller}
@@ -150,9 +175,65 @@ func (scheduler *SequenceScheduler) Prepare(
 		ctx, construction.SelectedPlan.Plan, targets, reference, config,
 	)
 	if err != nil {
+		release()
 		return nil, selection, fmt.Errorf("prepare selected mesh plan: %w", err)
 	}
-	return &ScheduledSequence{session: session}, selection, nil
+	return &ScheduledSequence{session: session, release: release}, selection, nil
+}
+
+func (scheduler *SequenceScheduler) reserveSequenceCapacity(
+	inventory registry.Inventory,
+	plan generation.ExecutionPlan,
+) (func(), error) {
+	workers := make(map[string]registry.Worker, len(inventory.Workers))
+	for _, worker := range inventory.Workers {
+		workers[worker.ID] = worker
+	}
+	keys := make([]sequenceReservationKey, len(plan.Stages))
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+	for index, stage := range plan.Stages {
+		worker, found := workers[stage.TargetID]
+		if !found {
+			return nil, fmt.Errorf("reserve target %q is not in the planning snapshot", stage.TargetID)
+		}
+		key := sequenceReservationKey{
+			workerID: worker.ID, instanceID: worker.InstanceID, shardID: stage.ShardID,
+		}
+		reportedOpen := 0
+		for _, shard := range worker.Status.RetainedShards {
+			if shard.ID == stage.ShardID {
+				reportedOpen = shard.OpenSequenceCount
+				break
+			}
+		}
+		limit := worker.Capabilities.Admission.MaxOpenSequencesPerShard
+		if reportedOpen+scheduler.reservations[key] >= limit {
+			return nil, fmt.Errorf(
+				"%w: worker %q instance %q shard %q has %d reported and %d local opens; limit is %d",
+				ErrSequenceCapacityReserved, worker.ID, worker.InstanceID, stage.ShardID,
+				reportedOpen, scheduler.reservations[key], limit,
+			)
+		}
+		keys[index] = key
+	}
+	for _, key := range keys {
+		scheduler.reservations[key]++
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			scheduler.mu.Lock()
+			defer scheduler.mu.Unlock()
+			for _, key := range keys {
+				if scheduler.reservations[key] <= 1 {
+					delete(scheduler.reservations, key)
+					continue
+				}
+				scheduler.reservations[key]--
+			}
+		})
+	}, nil
 }
 
 func (scheduler *SequenceScheduler) snapshots() (
@@ -217,8 +298,18 @@ func selectedTargetBindings(
 type ScheduledSequence struct {
 	mu      sync.Mutex
 	session *generation.PlannedSession
-	run     bool
+	release func()
+	state   scheduledSequenceState
 }
+
+type scheduledSequenceState uint8
+
+const (
+	sequencePrepared scheduledSequenceState = iota
+	sequenceRunning
+	sequenceFinished
+	sequenceClosed
+)
 
 func (sequence *ScheduledSequence) Info() generation.PlannedSessionInfo {
 	return sequence.session.Info()
@@ -229,11 +320,46 @@ func (sequence *ScheduledSequence) Generate(
 	request generation.Request,
 ) (generation.PlannedResult, error) {
 	sequence.mu.Lock()
-	if sequence.run {
+	if sequence.state != sequencePrepared {
 		sequence.mu.Unlock()
 		return generation.PlannedResult{}, ErrSequenceAlreadyRun
 	}
-	sequence.run = true
+	sequence.state = sequenceRunning
 	sequence.mu.Unlock()
+	defer sequence.finish()
 	return sequence.session.Generate(ctx, request)
+}
+
+// Close releases admission reserved by Prepare when the caller decides not to
+// run the sequence. Generate releases it automatically after success or
+// failure. Close must not race an active Generate call.
+func (sequence *ScheduledSequence) Close() error {
+	sequence.mu.Lock()
+	switch sequence.state {
+	case sequenceRunning:
+		sequence.mu.Unlock()
+		return ErrSequenceRunning
+	case sequencePrepared:
+		sequence.state = sequenceClosed
+		release := sequence.release
+		sequence.release = nil
+		sequence.mu.Unlock()
+		release()
+		return nil
+	case sequenceFinished, sequenceClosed:
+		sequence.mu.Unlock()
+		return nil
+	default:
+		sequence.mu.Unlock()
+		return errors.New("scheduled sequence has invalid state")
+	}
+}
+
+func (sequence *ScheduledSequence) finish() {
+	sequence.mu.Lock()
+	sequence.state = sequenceFinished
+	release := sequence.release
+	sequence.release = nil
+	sequence.mu.Unlock()
+	release()
 }

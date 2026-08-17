@@ -106,6 +106,12 @@ func run() error {
 	// Trusted-network worker API. The daemon owns worker process shutdown;
 	// clients own shard and sequence lifecycle through framed requests.
 	mux.HandleFunc("POST /v1/worker/request", func(w http.ResponseWriter, r *http.Request) {
+		if err := validateExpectedWorkerIdentity(
+			r, membershipEnabled, membershipConfig.WorkerID, membershipConfig.InstanceID,
+		); err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxDebugTensorPayload)
 		var request workerproc.PersistentRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -231,6 +237,32 @@ func run() error {
 	}
 	if serveErr != nil && serveErr != http.ErrServerClosed {
 		return fmt.Errorf("serve: %w", serveErr)
+	}
+	return nil
+}
+
+func validateExpectedWorkerIdentity(
+	request *http.Request,
+	membershipEnabled bool,
+	workerID string,
+	instanceID string,
+) error {
+	expectedWorkerID := request.Header.Get(workerproc.ExpectedWorkerIDHeader)
+	expectedInstanceID := request.Header.Get(workerproc.ExpectedWorkerInstanceHeader)
+	if expectedWorkerID == "" && expectedInstanceID == "" {
+		return nil
+	}
+	if expectedWorkerID == "" || expectedInstanceID == "" {
+		return errors.New("worker identity precondition is incomplete")
+	}
+	if !membershipEnabled {
+		return errors.New("worker is not registered with mesh membership")
+	}
+	if expectedWorkerID != workerID || expectedInstanceID != instanceID {
+		return fmt.Errorf(
+			"worker identity changed: expected %s/%s; serving %s/%s",
+			expectedWorkerID, expectedInstanceID, workerID, instanceID,
+		)
 	}
 	return nil
 }

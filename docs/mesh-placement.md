@@ -220,6 +220,11 @@ plan, and binds every selected stage to the exact worker instance and endpoint
 from that inventory revision. A concurrent profile update causes a bounded
 snapshot retry rather than mixing evidence from different times.
 
+Scheduler-bound HTTP calls carry the selected worker and instance IDs as a
+precondition on every request. A daemon restart or endpoint reassignment is
+rejected before model, shard, or sequence state can be read or mutated. The
+unbound HTTP client remains available only for the explicit diagnostic path.
+
 The returned `ScheduledSequence` freezes that plan and accepts exactly one
 `Generate` attempt. Membership and profile changes do not retarget an admitted
 sequence under the current non-migrating KV model. The next request must call
@@ -227,6 +232,11 @@ sequence under the current non-migrating KV model. The next request must call
 and new topology or compute evidence are applied only between sequences. If no
 complete plan exists, `ErrNoEligiblePlan` is returned with the complete
 construction and rejection evidence instead of a stale or partial plan.
+
+`Prepare` also reserves one locally coordinated open-sequence slot for every
+selected shard before returning. Concurrent preparation cannot over-admit the
+last advertised slot. `Generate` releases the reservation after success or
+failure; callers that abandon a prepared sequence must call `Close`.
 
 `mesh.HTTPResolver` binds the current trusted-network JSON worker endpoint.
 Callers that need a deterministic diagnostic path can continue to construct an

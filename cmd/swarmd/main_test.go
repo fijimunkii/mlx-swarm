@@ -140,6 +140,28 @@ func TestForwardPersistentRequestPreservesGeneratedIDWhenCallerOmitsOne(t *testi
 	}
 }
 
+func TestValidateExpectedWorkerIdentity(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/worker/request", nil)
+	if err := validateExpectedWorkerIdentity(request, false, "", ""); err != nil {
+		t.Fatalf("unbound diagnostic request: %v", err)
+	}
+
+	request.Header.Set(workerproc.ExpectedWorkerIDHeader, "worker-a")
+	if err := validateExpectedWorkerIdentity(request, true, "worker-a", "instance-a"); err == nil {
+		t.Fatal("incomplete identity precondition was accepted")
+	}
+	request.Header.Set(workerproc.ExpectedWorkerInstanceHeader, "instance-a")
+	if err := validateExpectedWorkerIdentity(request, false, "", ""); err == nil {
+		t.Fatal("unregistered daemon accepted a bound request")
+	}
+	if err := validateExpectedWorkerIdentity(request, true, "worker-a", "instance-a"); err != nil {
+		t.Fatalf("matching identity: %v", err)
+	}
+	if err := validateExpectedWorkerIdentity(request, true, "worker-a", "instance-b"); err == nil {
+		t.Fatal("restarted worker instance was accepted")
+	}
+}
+
 func TestShutdownPersistentWorkerKillsAndReapsAfterGracefulFailure(t *testing.T) {
 	worker := &recordingPersistentLifecycle{shutdownErr: errors.New("transport failed")}
 	shutdownPersistentWorker(worker)
