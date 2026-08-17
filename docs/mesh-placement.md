@@ -78,7 +78,8 @@ scoring. Its default five-minute window keeps at most 64 observations per
 series and 4,096 total series; callers may set smaller or larger explicit
 limits. Link and compute updates are concurrency-safe, and a complete N-stage
 sample is admitted atomically so a rejected batch cannot leave a partial
-profile.
+profile. Identity labels are bounded and retained once per series; rolling
+samples contain only timestamps and numeric measurements.
 
 Directional link observations are keyed by source and target process
 identities, protocol, and tensor encoding. Every observation carries an RTT.

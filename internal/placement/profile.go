@@ -121,6 +121,19 @@ type computeKey struct {
 	layerCount, layerStart, layerEnd                                     int
 }
 
+type linkSample struct {
+	observedAt    time.Time
+	rttMicros     uint64
+	payloadBytes  uint64
+	elapsedMicros uint64
+}
+
+type computeSample struct {
+	observedAt      time.Time
+	inputTokenCount uint64
+	computeMicros   uint64
+}
+
 // ProfileStore is a bounded concurrency-safe rolling evidence store.
 type ProfileStore struct {
 	mu                  sync.Mutex
@@ -129,8 +142,8 @@ type ProfileStore struct {
 	maxSeries           int
 	revision            uint64
 	latestAcceptedAt    time.Time
-	links               map[linkKey][]LinkObservation
-	compute             map[computeKey][]ComputeObservation
+	links               map[linkKey][]linkSample
+	compute             map[computeKey][]computeSample
 }
 
 // NewProfileStore applies defaults, validates bounds, and creates an empty
@@ -154,7 +167,7 @@ func NewProfileStore(config ProfileConfig) (*ProfileStore, error) {
 	return &ProfileStore{
 		maxAge: config.MaxAge, maxSamplesPerSeries: config.MaxSamplesPerSeries,
 		maxSeries: config.MaxSeries,
-		links:     make(map[linkKey][]LinkObservation), compute: make(map[computeKey][]ComputeObservation),
+		links:     make(map[linkKey][]linkSample), compute: make(map[computeKey][]computeSample),
 	}, nil
 }
 
@@ -177,7 +190,10 @@ func (store *ProfileStore) ObserveLink(at time.Time, observation LinkObservation
 	if store.revision == math.MaxUint64 {
 		return errors.New("profile revision exhausted")
 	}
-	store.links[key] = append(store.links[key], normalized)
+	store.links[key] = append(store.links[key], linkSample{
+		observedAt: normalized.ObservedAt, rttMicros: normalized.RTTMicros,
+		payloadBytes: normalized.PayloadBytes, elapsedMicros: normalized.ElapsedMicros,
+	})
 	sortLinkObservations(store.links[key])
 	store.links[key] = retainNewest(store.links[key], store.maxSamplesPerSeries)
 	store.revision++
@@ -233,7 +249,10 @@ func (store *ProfileStore) observeComputeBatch(
 	}
 	for index, observation := range normalized {
 		key := keys[index]
-		store.compute[key] = append(store.compute[key], observation)
+		store.compute[key] = append(store.compute[key], computeSample{
+			observedAt: observation.ObservedAt, inputTokenCount: observation.InputTokenCount,
+			computeMicros: observation.ComputeMicros,
+		})
 		sortComputeObservations(store.compute[key])
 		store.compute[key] = retainNewest(store.compute[key], store.maxSamplesPerSeries)
 	}
@@ -429,40 +448,40 @@ func normalizeComputeObservation(observation ComputeObservation) (ComputeObserva
 }
 
 func normalizeProfileLabel(name, value string) (string, error) {
+	if len(value) > maxProfileLabelBytes {
+		return "", fmt.Errorf("profile %s exceeds %d bytes", name, maxProfileLabelBytes)
+	}
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return "", fmt.Errorf("profile %s is required", name)
 	}
-	if len(value) > maxProfileLabelBytes {
-		return "", fmt.Errorf("profile %s exceeds %d bytes", name, maxProfileLabelBytes)
-	}
-	return value, nil
+	return strings.Clone(value), nil
 }
 
-func sortLinkObservations(observations []LinkObservation) {
-	slices.SortFunc(observations, func(left, right LinkObservation) int {
-		if order := left.ObservedAt.Compare(right.ObservedAt); order != 0 {
+func sortLinkObservations(observations []linkSample) {
+	slices.SortFunc(observations, func(left, right linkSample) int {
+		if order := left.observedAt.Compare(right.observedAt); order != 0 {
 			return order
 		}
-		if order := compareUint64(left.RTTMicros, right.RTTMicros); order != 0 {
+		if order := compareUint64(left.rttMicros, right.rttMicros); order != 0 {
 			return order
 		}
-		if order := compareUint64(left.PayloadBytes, right.PayloadBytes); order != 0 {
+		if order := compareUint64(left.payloadBytes, right.payloadBytes); order != 0 {
 			return order
 		}
-		return compareUint64(left.ElapsedMicros, right.ElapsedMicros)
+		return compareUint64(left.elapsedMicros, right.elapsedMicros)
 	})
 }
 
-func sortComputeObservations(observations []ComputeObservation) {
-	slices.SortFunc(observations, func(left, right ComputeObservation) int {
-		if order := left.ObservedAt.Compare(right.ObservedAt); order != 0 {
+func sortComputeObservations(observations []computeSample) {
+	slices.SortFunc(observations, func(left, right computeSample) int {
+		if order := left.observedAt.Compare(right.observedAt); order != 0 {
 			return order
 		}
-		if order := compareUint64(left.InputTokenCount, right.InputTokenCount); order != 0 {
+		if order := compareUint64(left.inputTokenCount, right.inputTokenCount); order != 0 {
 			return order
 		}
-		return compareUint64(left.ComputeMicros, right.ComputeMicros)
+		return compareUint64(left.computeMicros, right.computeMicros)
 	})
 }
 
@@ -474,17 +493,17 @@ func retainNewest[T any](values []T, limit int) []T {
 }
 
 func currentLinkObservations(
-	observations []LinkObservation,
+	observations []linkSample,
 	cutoff, at time.Time,
-) ([]LinkObservation, []LinkObservation) {
-	retained := make([]LinkObservation, 0, len(observations))
-	fresh := make([]LinkObservation, 0, len(observations))
+) ([]linkSample, []linkSample) {
+	retained := make([]linkSample, 0, len(observations))
+	fresh := make([]linkSample, 0, len(observations))
 	for _, observation := range observations {
-		if observation.ObservedAt.Before(cutoff) {
+		if observation.observedAt.Before(cutoff) {
 			continue
 		}
 		retained = append(retained, observation)
-		if !observation.ObservedAt.After(at) {
+		if !observation.observedAt.After(at) {
 			fresh = append(fresh, observation)
 		}
 	}
@@ -492,34 +511,34 @@ func currentLinkObservations(
 }
 
 func currentComputeObservations(
-	observations []ComputeObservation,
+	observations []computeSample,
 	cutoff, at time.Time,
-) ([]ComputeObservation, []ComputeObservation) {
-	retained := make([]ComputeObservation, 0, len(observations))
-	fresh := make([]ComputeObservation, 0, len(observations))
+) ([]computeSample, []computeSample) {
+	retained := make([]computeSample, 0, len(observations))
+	fresh := make([]computeSample, 0, len(observations))
 	for _, observation := range observations {
-		if observation.ObservedAt.Before(cutoff) {
+		if observation.observedAt.Before(cutoff) {
 			continue
 		}
 		retained = append(retained, observation)
-		if !observation.ObservedAt.After(at) {
+		if !observation.observedAt.After(at) {
 			fresh = append(fresh, observation)
 		}
 	}
 	return retained, fresh
 }
 
-func summarizeLink(key linkKey, observations []LinkObservation) LinkProfile {
+func summarizeLink(key linkKey, observations []linkSample) LinkProfile {
 	rtt := make([]uint64, len(observations))
 	throughput := make([]uint64, 0, len(observations))
-	latest := observations[0].ObservedAt
+	latest := observations[0].observedAt
 	for index, observation := range observations {
-		rtt[index] = observation.RTTMicros
-		if observation.PayloadBytes > 0 {
-			throughput = append(throughput, bytesPerSecond(observation.PayloadBytes, observation.ElapsedMicros))
+		rtt[index] = observation.rttMicros
+		if observation.payloadBytes > 0 {
+			throughput = append(throughput, bytesPerSecond(observation.payloadBytes, observation.elapsedMicros))
 		}
-		if observation.ObservedAt.After(latest) {
-			latest = observation.ObservedAt
+		if observation.observedAt.After(latest) {
+			latest = observation.observedAt
 		}
 	}
 	return LinkProfile{
@@ -530,15 +549,15 @@ func summarizeLink(key linkKey, observations []LinkObservation) LinkProfile {
 	}
 }
 
-func summarizeCompute(key computeKey, observations []ComputeObservation) ComputeProfile {
+func summarizeCompute(key computeKey, observations []computeSample) ComputeProfile {
 	tokens := make([]uint64, len(observations))
 	compute := make([]uint64, len(observations))
-	latest := observations[0].ObservedAt
+	latest := observations[0].observedAt
 	for index, observation := range observations {
-		tokens[index] = observation.InputTokenCount
-		compute[index] = observation.ComputeMicros
-		if observation.ObservedAt.After(latest) {
-			latest = observation.ObservedAt
+		tokens[index] = observation.inputTokenCount
+		compute[index] = observation.computeMicros
+		if observation.observedAt.After(latest) {
+			latest = observation.observedAt
 		}
 	}
 	return ComputeProfile{

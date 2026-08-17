@@ -249,6 +249,11 @@ func TestProfileStoreRejectsInvalidInputsAndSeriesOverflow(t *testing.T) {
 			value.Protocol = strings.Repeat("x", maxProfileLabelBytes+1)
 			return value
 		}(),
+		func() LinkObservation {
+			value := validLink
+			value.TargetID = strings.Repeat(" ", maxProfileLabelBytes) + "worker-a"
+			return value
+		}(),
 	}
 	for _, observation := range invalidLinks {
 		if err := store.ObserveLink(now, observation); err == nil {
@@ -291,6 +296,15 @@ func TestProfileStoreRejectsInvalidInputsAndSeriesOverflow(t *testing.T) {
 	}
 	if got := bytesPerSecond(math.MaxUint64, 1); got != math.MaxUint64 {
 		t.Fatalf("overflowing throughput = %d", got)
+	}
+	for _, sampleType := range []reflect.Type{
+		reflect.TypeOf(linkSample{}), reflect.TypeOf(computeSample{}),
+	} {
+		for fieldIndex := range sampleType.NumField() {
+			if sampleType.Field(fieldIndex).Type.Kind() == reflect.String {
+				t.Fatalf("rolling sample %s retains string field %s", sampleType, sampleType.Field(fieldIndex).Name)
+			}
+		}
 	}
 }
 
