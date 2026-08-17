@@ -114,6 +114,15 @@ func TestMembershipAgentRegistersRefreshesAndRejoins(t *testing.T) {
 		len(record.Status.RetainedShards) != 1 {
 		t.Fatalf("incomplete worker record: %+v", record)
 	}
+	boundTransport := false
+	for _, transport := range record.Capabilities.Transports {
+		if transport.Protocol == workerproc.InstanceBoundHTTPProtocol {
+			boundTransport = true
+		}
+	}
+	if !boundTransport {
+		t.Fatalf("worker did not advertise instance-bound transport: %+v", record.Capabilities.Transports)
+	}
 
 	worker.restarts = 2
 	worker.state.LoadedShards[0].OpenSequenceCount = 1

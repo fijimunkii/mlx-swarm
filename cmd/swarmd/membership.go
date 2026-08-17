@@ -146,10 +146,18 @@ func newMembershipAgent(
 				MaxOpenSequencesPerShard: state.MaxOpenSequencesPerShard,
 				RetainedByteBudget:       uint64(state.RetainedByteBudget),
 			},
-			Transports: []registry.Transport{{
-				Protocol: "http-json-v1", TensorEncodings: []string{"base64-json"},
-				MaxRequestBytes: maxDebugTensorPayload, TLS: publicURL.Scheme == "https",
-			}},
+			Transports: []registry.Transport{
+				{
+					Protocol:        "http-json-v1",
+					TensorEncodings: []string{workerproc.Base64JSONTensorEncoding},
+					MaxRequestBytes: maxDebugTensorPayload, TLS: publicURL.Scheme == "https",
+				},
+				{
+					Protocol:        workerproc.InstanceBoundHTTPProtocol,
+					TensorEncodings: []string{workerproc.Base64JSONTensorEncoding},
+					MaxRequestBytes: maxDebugTensorPayload, TLS: publicURL.Scheme == "https",
+				},
+			},
 		},
 		Status: status,
 	}

@@ -223,7 +223,11 @@ snapshot retry rather than mixing evidence from different times.
 Scheduler-bound HTTP calls carry the selected worker and instance IDs as a
 precondition on every request. A daemon restart or endpoint reassignment is
 rejected before model, shard, or sequence state can be read or mutated. The
-unbound HTTP client remains available only for the explicit diagnostic path.
+HTTP scheduler therefore requires the separately advertised
+`http-json-instance-v1` capability; a pre-upgrade daemon that only advertises
+`http-json-v1` is ineligible even if it would ignore unknown identity headers.
+The unbound HTTP client remains available only for the explicit diagnostic
+path.
 
 The returned `ScheduledSequence` freezes that plan and accepts exactly one
 `Generate` attempt. Membership and profile changes do not retarget an admitted
@@ -234,12 +238,16 @@ complete plan exists, `ErrNoEligiblePlan` is returned with the complete
 construction and rejection evidence instead of a stale or partial plan.
 
 `Prepare` also reserves one locally coordinated open-sequence slot for every
-selected shard before returning. Concurrent preparation cannot over-admit the
-last advertised slot. `Generate` releases the reservation after success or
-failure when worker cleanup is confirmed; callers that abandon a prepared
-sequence must call `Close`. An ambiguous close quarantines the slot until a
-newer worker status reports that the shard has no open sequence or that worker
-incarnation leaves membership.
+selected shard, one worker-wide request slot, and the selected stage's
+incremental memory before returning. Concurrent preparation cannot over-admit
+the last advertised slot or independently spend the same available-memory
+snapshot. Model-load memory remains reserved after setup until a newer dynamic
+status reflects the load; confirmed cleanup immediately releases the sequence
+memory reserve. `Generate` releases request and shard reservations after
+success or failure when worker cleanup is confirmed; callers that abandon a
+prepared sequence must call `Close`. Ambiguous cleanup quarantines the shard
+slot and sequence memory until a newer status accounts for the outcome or that
+worker incarnation leaves membership.
 
 Selected-worker metadata checks and shard loads run under a configurable
 preparation timeout (ten minutes by default), so a stalled endpoint cannot hold

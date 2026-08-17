@@ -15,6 +15,24 @@ import (
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
 
+func TestHTTPResolverRequiresInstanceBoundTransport(t *testing.T) {
+	resolver := HTTPResolver{}
+	for _, requirement := range []placement.TransportRequirement{
+		{Protocol: "http-json-v1", TensorEncoding: workerproc.Base64JSONTensorEncoding},
+		{Protocol: workerproc.InstanceBoundHTTPProtocol, TensorEncoding: "other"},
+	} {
+		if err := resolver.ValidateTransport(requirement); err == nil {
+			t.Fatalf("transport %+v was accepted", requirement)
+		}
+	}
+	if err := resolver.ValidateTransport(placement.TransportRequirement{
+		Protocol:       workerproc.InstanceBoundHTTPProtocol,
+		TensorEncoding: workerproc.Base64JSONTensorEncoding,
+	}); err != nil {
+		t.Fatalf("instance-bound transport was rejected: %v", err)
+	}
+}
+
 func TestSequenceSchedulerFreezesOneSequenceAndReplansTheNext(t *testing.T) {
 	now := time.Date(2026, time.August, 17, 2, 0, 0, 0, time.UTC)
 	membership := registry.New(time.Minute, registry.WithClock(func() time.Time { return now }))
@@ -391,6 +409,90 @@ func TestSequenceSchedulerBoundsPreparationAndReleasesReservation(t *testing.T) 
 	}
 }
 
+func TestSequenceSchedulerReservesWorkerRequestCapacity(t *testing.T) {
+	now := time.Date(2026, time.August, 17, 2, 55, 0, 0, time.UTC)
+	registration := schedulerRegistration("worker-a")
+	registration.Capabilities.Admission.MaxConcurrentRequests = 1
+	inventory := schedulerInventory(now, registration)
+	scheduler := reservationTestScheduler(inventory)
+
+	first, err := scheduler.reserveAdmission(
+		inventory, reservationEvaluation("worker-a", "shard-a", 100, 10, false),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second, err := scheduler.reserveAdmission(
+		inventory, reservationEvaluation("worker-a", "shard-b", 100, 10, false),
+	); second != nil || !errors.Is(err, ErrWorkerCapacityReserved) {
+		t.Fatalf("worker-wide admission: reservation=%v err=%v", second, err)
+	}
+	first.finish(reservationOutcome{cleanupConfirmed: true})
+	second, err := scheduler.reserveAdmission(
+		inventory, reservationEvaluation("worker-a", "shard-b", 100, 10, false),
+	)
+	if err != nil {
+		t.Fatalf("released worker request slot remained reserved: %v", err)
+	}
+	second.finish(reservationOutcome{cleanupConfirmed: true})
+}
+
+func TestSequenceSchedulerBridgesStaleMemoryStatus(t *testing.T) {
+	now := time.Date(2026, time.August, 17, 2, 56, 0, 0, time.UTC)
+	registration := schedulerRegistration("worker-a")
+	registration.Capabilities.Admission.MaxConcurrentRequests = 2
+	registration.Capabilities.Admission.RetainedByteBudget = 1_000
+	registration.Status.AvailableMemoryBytes = 1_000
+	inventory := schedulerInventory(now, registration)
+	scheduler := reservationTestScheduler(inventory)
+
+	loaded, err := scheduler.reserveAdmission(
+		inventory, reservationEvaluation("worker-a", "shard-a", 600, 100, false),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.finish(reservationOutcome{mayHaveLoaded: true, cleanupConfirmed: true})
+	if next, err := scheduler.reserveAdmission(
+		inventory, reservationEvaluation("worker-a", "shard-b", 400, 100, false),
+	); next != nil || !errors.Is(err, ErrWorkerMemoryReserved) {
+		t.Fatalf("stale memory admission: reservation=%v err=%v", next, err)
+	}
+
+	fresh := inventory
+	fresh.Workers = append([]registry.Worker(nil), inventory.Workers...)
+	fresh.Workers[0].StatusObservedAt = now.Add(time.Second)
+	next, err := scheduler.reserveAdmission(
+		fresh, reservationEvaluation("worker-a", "shard-b", 400, 100, false),
+	)
+	if err != nil {
+		t.Fatalf("fresh status did not reconcile pending memory: %v", err)
+	}
+	next.finish(reservationOutcome{cleanupConfirmed: true})
+}
+
+func TestSequenceSchedulerReservesRetainedMemoryBudget(t *testing.T) {
+	now := time.Date(2026, time.August, 17, 2, 57, 0, 0, time.UTC)
+	registration := schedulerRegistration("worker-a")
+	registration.Capabilities.Admission.MaxConcurrentRequests = 2
+	registration.Capabilities.Admission.RetainedByteBudget = 150
+	inventory := schedulerInventory(now, registration)
+	scheduler := reservationTestScheduler(inventory)
+
+	first, err := scheduler.reserveAdmission(
+		inventory, reservationEvaluation("worker-a", "shard-a", 0, 100, true),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second, err := scheduler.reserveAdmission(
+		inventory, reservationEvaluation("worker-a", "shard-b", 0, 100, true),
+	); second != nil || !errors.Is(err, ErrWorkerMemoryReserved) {
+		t.Fatalf("retained-budget admission: reservation=%v err=%v", second, err)
+	}
+	first.finish(reservationOutcome{cleanupConfirmed: true})
+}
+
 func TestSequenceSchedulerRetriesProfileSnapshotRace(t *testing.T) {
 	now := time.Date(2026, time.August, 17, 3, 0, 0, 0, time.UTC)
 	inventory := schedulerInventory(now, schedulerRegistration("worker-a"), schedulerRegistration("worker-b"))
@@ -424,6 +526,41 @@ type staticInventorySource struct {
 }
 
 func (source staticInventorySource) Snapshot() registry.Inventory { return source.inventory }
+
+func reservationTestScheduler(inventory registry.Inventory) *SequenceScheduler {
+	return &SequenceScheduler{
+		inventory:    staticInventorySource{inventory: inventory},
+		reservations: make(map[sequenceReservationKey]sequenceReservationState),
+		workers:      make(map[workerReservationKey]workerReservationState),
+	}
+}
+
+func reservationEvaluation(
+	workerID string,
+	shardID string,
+	loadMemoryBytes uint64,
+	sequenceMemoryBytes uint64,
+	reusesRetainedShard bool,
+) placement.PlanEvaluation {
+	required := sequenceMemoryBytes
+	if !reusesRetainedShard {
+		required += loadMemoryBytes
+	}
+	return placement.PlanEvaluation{
+		Plan: generation.ExecutionPlan{Stages: []generation.ExecutionStage{{
+			TargetID: workerID, ShardID: shardID,
+		}}},
+		Request: placement.PlanScoringRequest{Stages: []placement.StageCostEstimate{{
+			LoadMemoryBytes: loadMemoryBytes, SequenceMemoryBytes: sequenceMemoryBytes,
+		}}},
+		Stages: []placement.StagePlanEvaluation{{
+			SelectedCandidate: placement.Candidate{
+				WorkerID: workerID, ReusesRetainedShard: reusesRetainedShard,
+				RequiredAdditionalMemoryBytes: required,
+			},
+		}},
+	}
+}
 
 type racingProfileSource struct {
 	now   time.Time
@@ -463,7 +600,7 @@ func schedulerPlanRequest() placement.PlanConstructionRequest {
 		Ranges: []placement.RangeCostEstimate{
 			schedulerRange(0, 2, 600, 100),
 			schedulerRange(2, 4, 600, 100),
-			schedulerRange(0, 4, 1_400, 200),
+			schedulerRange(0, 4, 12_000, 200),
 		},
 	}
 }
@@ -517,7 +654,7 @@ func schedulerRegistration(id string) registry.Registration {
 		ID:            id, InstanceID: id + "-instance", Endpoint: "http://" + id + ".example:8080",
 		Capabilities: registry.Capabilities{
 			Backend: "test", Runtime: "fixture", OS: "darwin", Architecture: "arm64",
-			Device: "test-device", PhysicalMemoryBytes: 2_000,
+			Device: "test-device", PhysicalMemoryBytes: 20_000,
 			Adapters: []string{"test-adapter"},
 			Operations: []string{
 				"closeSequence", "decode", "detokenize", "loadShard", "modelInfo",
@@ -525,8 +662,8 @@ func schedulerRegistration(id string) registry.Registration {
 			},
 			CheckpointFingerprints: []string{"test-checkpoint"},
 			Admission: registry.AdmissionLimits{
-				MaxConcurrentRequests: 1, MaxOpenSequencesPerShard: 2,
-				RetainedByteBudget: 2_000,
+				MaxConcurrentRequests: 4, MaxOpenSequencesPerShard: 2,
+				RetainedByteBudget: 10_000,
 			},
 			Transports: []registry.Transport{{
 				Protocol: "http-json-v1", TensorEncodings: []string{"base64-json"},
@@ -534,7 +671,7 @@ func schedulerRegistration(id string) registry.Registration {
 			}},
 		},
 		Status: registry.Status{
-			Health: registry.HealthHealthy, AvailableMemoryBytes: 1_200,
+			Health: registry.HealthHealthy, AvailableMemoryBytes: 10_000,
 		},
 	}
 }

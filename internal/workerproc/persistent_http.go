@@ -13,6 +13,10 @@ import (
 )
 
 const (
+	// InstanceBoundHTTPProtocol is advertised only by daemons that enforce the
+	// worker and process-incarnation preconditions sent by bound clients.
+	InstanceBoundHTTPProtocol    = "http-json-instance-v1"
+	Base64JSONTensorEncoding     = "base64-json"
 	ExpectedWorkerIDHeader       = "X-MLX-Swarm-Expected-Worker-ID"
 	ExpectedWorkerInstanceHeader = "X-MLX-Swarm-Expected-Worker-Instance-ID"
 )

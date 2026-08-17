@@ -34,6 +34,12 @@ var (
 	// ErrSequenceCapacityReserved reports that another prepared or running
 	// sequence owns the final locally visible slot for a selected shard.
 	ErrSequenceCapacityReserved = errors.New("selected shard sequence capacity is reserved")
+	// ErrWorkerCapacityReserved reports that another prepared or running
+	// sequence owns the final worker-wide request slot for a selected target.
+	ErrWorkerCapacityReserved = errors.New("selected worker request capacity is reserved")
+	// ErrWorkerMemoryReserved reports that in-flight work or a recently loaded
+	// shard consumes memory not yet reflected in the membership snapshot.
+	ErrWorkerMemoryReserved = errors.New("selected worker memory is reserved")
 	// ErrSequenceRunning reports an invalid attempt to cancel a sequence while
 	// its single Generate call is still active.
 	ErrSequenceRunning = errors.New("scheduled sequence is running")
@@ -72,6 +78,10 @@ type TargetResolver interface {
 	Resolve(TargetBinding) (workerproc.PersistentCaller, error)
 }
 
+type transportValidatingResolver interface {
+	ValidateTransport(placement.TransportRequirement) error
+}
+
 // TargetResolverFunc adapts a function to TargetResolver.
 type TargetResolverFunc func(TargetBinding) (workerproc.PersistentCaller, error)
 
@@ -83,6 +93,24 @@ func (resolve TargetResolverFunc) Resolve(binding TargetBinding) (workerproc.Per
 // JSON compatibility transport.
 type HTTPResolver struct {
 	Client *http.Client
+}
+
+// ValidateTransport prevents a scheduler from using the legacy unbound
+// protocol, which an older daemon can accept while ignoring identity headers.
+func (HTTPResolver) ValidateTransport(requirement placement.TransportRequirement) error {
+	if requirement.Protocol != workerproc.InstanceBoundHTTPProtocol {
+		return fmt.Errorf(
+			"HTTP mesh scheduler requires transport %q, got %q",
+			workerproc.InstanceBoundHTTPProtocol, requirement.Protocol,
+		)
+	}
+	if requirement.TensorEncoding != workerproc.Base64JSONTensorEncoding {
+		return fmt.Errorf(
+			"HTTP mesh scheduler requires tensor encoding %q, got %q",
+			workerproc.Base64JSONTensorEncoding, requirement.TensorEncoding,
+		)
+	}
+	return nil
 }
 
 func (resolver HTTPResolver) Resolve(binding TargetBinding) (workerproc.PersistentCaller, error) {
@@ -105,6 +133,7 @@ type SequenceScheduler struct {
 	resolver       TargetResolver
 	prepareTimeout time.Duration
 	reservations   map[sequenceReservationKey]sequenceReservationState
+	workers        map[workerReservationKey]workerReservationState
 }
 
 type sequenceReservationKey struct {
@@ -116,6 +145,36 @@ type sequenceReservationKey struct {
 type sequenceReservationState struct {
 	active        int
 	poisonedAfter []time.Time
+}
+
+type workerReservationKey struct {
+	workerID   string
+	instanceID string
+}
+
+type pendingMemoryReservation struct {
+	availableBytes uint64
+	retainedBytes  uint64
+	after          time.Time
+}
+
+type workerReservationState struct {
+	activeRequests       int
+	activeAvailableBytes uint64
+	activeRetainedBytes  uint64
+	pendingMemory        []pendingMemoryReservation
+}
+
+type stageReservation struct {
+	sequenceKey         sequenceReservationKey
+	workerKey           workerReservationKey
+	loadMemoryBytes     uint64
+	sequenceMemoryBytes uint64
+}
+
+type reservationOutcome struct {
+	mayHaveLoaded    bool
+	cleanupConfirmed bool
 }
 
 // SchedulerOption configures bounded runtime behavior.
@@ -146,6 +205,7 @@ func NewSequenceScheduler(
 		inventory: inventory, profiles: profiles, resolver: resolver,
 		prepareTimeout: DefaultPrepareTimeout,
 		reservations:   make(map[sequenceReservationKey]sequenceReservationState),
+		workers:        make(map[workerReservationKey]workerReservationState),
 	}
 	for _, option := range options {
 		if option == nil {
@@ -169,6 +229,11 @@ func (scheduler *SequenceScheduler) Prepare(
 	if err := ctx.Err(); err != nil {
 		return nil, SequenceSelection{}, err
 	}
+	if validator, ok := scheduler.resolver.(transportValidatingResolver); ok {
+		if err := validator.ValidateTransport(request.Scoring.Transport); err != nil {
+			return nil, SequenceSelection{}, fmt.Errorf("validate scheduler transport: %w", err)
+		}
+	}
 	inventory, profile, err := scheduler.snapshots()
 	if err != nil {
 		return nil, SequenceSelection{}, err
@@ -187,7 +252,7 @@ func (scheduler *SequenceScheduler) Prepare(
 		return nil, selection, err
 	}
 	selection.Targets = bindings
-	reservation, err := scheduler.reserveSequenceCapacity(inventory, construction.SelectedPlan.Plan)
+	reservation, err := scheduler.reserveAdmission(inventory, *construction.SelectedPlan)
 	if err != nil {
 		return nil, selection, err
 	}
@@ -195,11 +260,11 @@ func (scheduler *SequenceScheduler) Prepare(
 	for index, binding := range bindings {
 		caller, resolveErr := scheduler.resolver.Resolve(binding)
 		if resolveErr != nil {
-			reservation.finish(true)
+			reservation.finish(reservationOutcome{cleanupConfirmed: true})
 			return nil, selection, fmt.Errorf("resolve selected stage %d: %w", index, resolveErr)
 		}
 		if caller == nil {
-			reservation.finish(true)
+			reservation.finish(reservationOutcome{cleanupConfirmed: true})
 			return nil, selection, fmt.Errorf("resolve selected stage %d returned no caller", index)
 		}
 		targets[index] = generation.ExecutionTarget{TargetID: binding.WorkerID, Caller: caller}
@@ -210,32 +275,37 @@ func (scheduler *SequenceScheduler) Prepare(
 		prepareContext, construction.SelectedPlan.Plan, targets, reference, config,
 	)
 	if err != nil {
-		reservation.finish(true)
+		reservation.finish(reservationOutcome{mayHaveLoaded: true, cleanupConfirmed: true})
 		return nil, selection, fmt.Errorf("prepare selected mesh plan: %w", err)
 	}
 	return &ScheduledSequence{session: session, reservation: reservation}, selection, nil
 }
 
-func (scheduler *SequenceScheduler) reserveSequenceCapacity(
+func (scheduler *SequenceScheduler) reserveAdmission(
 	inventory registry.Inventory,
-	plan generation.ExecutionPlan,
+	evaluation placement.PlanEvaluation,
 ) (*sequenceReservation, error) {
 	workers := make(map[string]registry.Worker, len(inventory.Workers))
 	for _, worker := range inventory.Workers {
 		workers[worker.ID] = worker
 	}
-	keys := make([]sequenceReservationKey, len(plan.Stages))
+	if len(evaluation.Plan.Stages) != len(evaluation.Stages) ||
+		len(evaluation.Plan.Stages) != len(evaluation.Request.Stages) {
+		return nil, errors.New("selected plan reservation evidence is incomplete")
+	}
+	stages := make([]stageReservation, len(evaluation.Plan.Stages))
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
-	scheduler.reconcilePoisonedLocked(workers)
-	for index, stage := range plan.Stages {
+	scheduler.reconcileReservationsLocked(workers)
+	for index, stage := range evaluation.Plan.Stages {
 		worker, found := workers[stage.TargetID]
 		if !found {
 			return nil, fmt.Errorf("reserve target %q is not in the planning snapshot", stage.TargetID)
 		}
-		key := sequenceReservationKey{
+		sequenceKey := sequenceReservationKey{
 			workerID: worker.ID, instanceID: worker.InstanceID, shardID: stage.ShardID,
 		}
+		workerKey := workerReservationKey{workerID: worker.ID, instanceID: worker.InstanceID}
 		reportedOpen := 0
 		for _, shard := range worker.Status.RetainedShards {
 			if shard.ID == stage.ShardID {
@@ -244,8 +314,8 @@ func (scheduler *SequenceScheduler) reserveSequenceCapacity(
 			}
 		}
 		limit := worker.Capabilities.Admission.MaxOpenSequencesPerShard
-		state := scheduler.reservations[key]
-		localOpen := state.active + len(state.poisonedAfter)
+		sequenceState := scheduler.reservations[sequenceKey]
+		localOpen := sequenceState.active + len(sequenceState.poisonedAfter)
 		if reportedOpen+localOpen >= limit {
 			return nil, fmt.Errorf(
 				"%w: worker %q instance %q shard %q has %d reported and %d local opens; limit is %d",
@@ -253,17 +323,76 @@ func (scheduler *SequenceScheduler) reserveSequenceCapacity(
 				reportedOpen, localOpen, limit,
 			)
 		}
-		keys[index] = key
+
+		workerState := scheduler.workers[workerKey]
+		requestLimit := worker.Capabilities.Admission.MaxConcurrentRequests
+		if workerState.activeRequests >= requestLimit {
+			return nil, fmt.Errorf(
+				"%w: worker %q instance %q has %d local requests; limit is %d",
+				ErrWorkerCapacityReserved, worker.ID, worker.InstanceID,
+				workerState.activeRequests, requestLimit,
+			)
+		}
+		candidate := evaluation.Stages[index].SelectedCandidate
+		if candidate.WorkerID != worker.ID {
+			return nil, fmt.Errorf(
+				"selected stage %d memory evidence is for worker %q, want %q",
+				index, candidate.WorkerID, worker.ID,
+			)
+		}
+		cost := evaluation.Request.Stages[index]
+		loadBytes := uint64(0)
+		if !candidate.ReusesRetainedShard {
+			loadBytes = cost.LoadMemoryBytes
+		}
+		requiredBytes, overflow := addReservationBytes(loadBytes, cost.SequenceMemoryBytes)
+		if overflow || requiredBytes != candidate.RequiredAdditionalMemoryBytes {
+			return nil, fmt.Errorf("selected stage %d has inconsistent memory evidence", index)
+		}
+		reservedAvailable, reservedRetained, overflow := reservedWorkerMemory(workerState)
+		if overflow || reservedAvailable > worker.Status.AvailableMemoryBytes ||
+			requiredBytes > subtractAvailable(worker.Status.AvailableMemoryBytes, reservedAvailable) {
+			return nil, fmt.Errorf(
+				"%w: worker %q instance %q requires %d bytes with %d locally reserved; %d reported available",
+				ErrWorkerMemoryReserved, worker.ID, worker.InstanceID, requiredBytes,
+				reservedAvailable, worker.Status.AvailableMemoryBytes,
+			)
+		}
+		projectedRetained, overflow := addReservationBytes(worker.Status.RetainedBytes, reservedRetained)
+		if !overflow {
+			projectedRetained, overflow = addReservationBytes(projectedRetained, cost.SequenceMemoryBytes)
+		}
+		if overflow || projectedRetained > worker.Capabilities.Admission.RetainedByteBudget {
+			return nil, fmt.Errorf(
+				"%w: worker %q instance %q projects %d retained bytes; budget is %d",
+				ErrWorkerMemoryReserved, worker.ID, worker.InstanceID, projectedRetained,
+				worker.Capabilities.Admission.RetainedByteBudget,
+			)
+		}
+		stages[index] = stageReservation{
+			sequenceKey: sequenceKey, workerKey: workerKey,
+			loadMemoryBytes: loadBytes, sequenceMemoryBytes: cost.SequenceMemoryBytes,
+		}
 	}
-	for _, key := range keys {
-		state := scheduler.reservations[key]
-		state.active++
-		scheduler.reservations[key] = state
+	for _, stage := range stages {
+		sequenceState := scheduler.reservations[stage.sequenceKey]
+		sequenceState.active++
+		scheduler.reservations[stage.sequenceKey] = sequenceState
+		workerState := scheduler.workers[stage.workerKey]
+		workerState.activeRequests++
+		workerState.activeAvailableBytes, _ = addReservationBytes(
+			workerState.activeAvailableBytes,
+			stage.loadMemoryBytes+stage.sequenceMemoryBytes,
+		)
+		workerState.activeRetainedBytes, _ = addReservationBytes(
+			workerState.activeRetainedBytes, stage.sequenceMemoryBytes,
+		)
+		scheduler.workers[stage.workerKey] = workerState
 	}
-	return &sequenceReservation{scheduler: scheduler, keys: keys}, nil
+	return &sequenceReservation{scheduler: scheduler, stages: stages}, nil
 }
 
-func (scheduler *SequenceScheduler) reconcilePoisonedLocked(
+func (scheduler *SequenceScheduler) reconcileReservationsLocked(
 	workers map[string]registry.Worker,
 ) {
 	for key, state := range scheduler.reservations {
@@ -297,63 +426,138 @@ func (scheduler *SequenceScheduler) reconcilePoisonedLocked(
 		}
 		scheduler.reservations[key] = state
 	}
+	for key, state := range scheduler.workers {
+		worker, found := workers[key.workerID]
+		if !found || worker.InstanceID != key.instanceID {
+			state.pendingMemory = nil
+		} else if len(state.pendingMemory) > 0 {
+			retained := state.pendingMemory[:0]
+			for _, pending := range state.pendingMemory {
+				if !worker.StatusObservedAt.After(pending.after) {
+					retained = append(retained, pending)
+				}
+			}
+			state.pendingMemory = retained
+		}
+		if state.activeRequests == 0 && state.activeAvailableBytes == 0 &&
+			state.activeRetainedBytes == 0 && len(state.pendingMemory) == 0 {
+			delete(scheduler.workers, key)
+			continue
+		}
+		scheduler.workers[key] = state
+	}
 }
 
 type sequenceReservation struct {
 	scheduler *SequenceScheduler
-	keys      []sequenceReservationKey
+	stages    []stageReservation
 	once      sync.Once
 }
 
-func (reservation *sequenceReservation) finish(cleanupConfirmed bool) {
+func (reservation *sequenceReservation) finish(outcome reservationOutcome) {
 	reservation.once.Do(func() {
-		if cleanupConfirmed {
-			reservation.scheduler.releaseReservation(reservation.keys)
-			return
-		}
-		reservation.scheduler.poisonReservation(reservation.keys)
+		reservation.scheduler.finishReservation(reservation.stages, outcome)
 	})
 }
 
-func (scheduler *SequenceScheduler) releaseReservation(keys []sequenceReservationKey) {
-	scheduler.mu.Lock()
-	defer scheduler.mu.Unlock()
-	for _, key := range keys {
-		state := scheduler.reservations[key]
-		if state.active > 0 {
-			state.active--
-		}
-		if state.active == 0 && len(state.poisonedAfter) == 0 {
-			delete(scheduler.reservations, key)
-			continue
-		}
-		scheduler.reservations[key] = state
+func (scheduler *SequenceScheduler) finishReservation(
+	stages []stageReservation,
+	outcome reservationOutcome,
+) {
+	inventory := registry.Inventory{}
+	if outcome.mayHaveLoaded || !outcome.cleanupConfirmed {
+		inventory = scheduler.inventory.Snapshot()
 	}
-}
-
-func (scheduler *SequenceScheduler) poisonReservation(keys []sequenceReservationKey) {
-	inventory := scheduler.inventory.Snapshot()
 	workers := make(map[string]registry.Worker, len(inventory.Workers))
 	for _, worker := range inventory.Workers {
 		workers[worker.ID] = worker
 	}
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
-	for _, key := range keys {
-		state := scheduler.reservations[key]
-		if state.active > 0 {
-			state.active--
+	for _, stage := range stages {
+		sequenceState := scheduler.reservations[stage.sequenceKey]
+		if sequenceState.active > 0 {
+			sequenceState.active--
 		}
-		worker, found := workers[key.workerID]
-		if found && worker.InstanceID == key.instanceID {
-			state.poisonedAfter = append(state.poisonedAfter, worker.StatusObservedAt)
+		worker, found := workers[stage.workerKey.workerID]
+		if !outcome.cleanupConfirmed && found && worker.InstanceID == stage.workerKey.instanceID {
+			sequenceState.poisonedAfter = append(
+				sequenceState.poisonedAfter, worker.StatusObservedAt,
+			)
 		}
-		if state.active == 0 && len(state.poisonedAfter) == 0 {
-			delete(scheduler.reservations, key)
-			continue
+		if sequenceState.active == 0 && len(sequenceState.poisonedAfter) == 0 {
+			delete(scheduler.reservations, stage.sequenceKey)
+		} else {
+			scheduler.reservations[stage.sequenceKey] = sequenceState
 		}
-		scheduler.reservations[key] = state
+
+		workerState := scheduler.workers[stage.workerKey]
+		if workerState.activeRequests > 0 {
+			workerState.activeRequests--
+		}
+		activeBytes := stage.loadMemoryBytes + stage.sequenceMemoryBytes
+		workerState.activeAvailableBytes = subtractAvailable(
+			workerState.activeAvailableBytes, activeBytes,
+		)
+		workerState.activeRetainedBytes = subtractAvailable(
+			workerState.activeRetainedBytes, stage.sequenceMemoryBytes,
+		)
+		pendingAvailable := uint64(0)
+		pendingRetained := uint64(0)
+		if outcome.mayHaveLoaded {
+			pendingAvailable = stage.loadMemoryBytes
+		}
+		if !outcome.cleanupConfirmed {
+			pendingAvailable, _ = addReservationBytes(
+				pendingAvailable, stage.sequenceMemoryBytes,
+			)
+			pendingRetained = stage.sequenceMemoryBytes
+		}
+		if pendingAvailable > 0 && found && worker.InstanceID == stage.workerKey.instanceID {
+			workerState.pendingMemory = append(workerState.pendingMemory, pendingMemoryReservation{
+				availableBytes: pendingAvailable,
+				retainedBytes:  pendingRetained,
+				after:          worker.StatusObservedAt,
+			})
+		}
+		if workerState.activeRequests == 0 && workerState.activeAvailableBytes == 0 &&
+			workerState.activeRetainedBytes == 0 && len(workerState.pendingMemory) == 0 {
+			delete(scheduler.workers, stage.workerKey)
+		} else {
+			scheduler.workers[stage.workerKey] = workerState
+		}
 	}
+}
+
+func reservedWorkerMemory(state workerReservationState) (uint64, uint64, bool) {
+	available := state.activeAvailableBytes
+	retained := state.activeRetainedBytes
+	for _, pending := range state.pendingMemory {
+		var overflow bool
+		available, overflow = addReservationBytes(available, pending.availableBytes)
+		if overflow {
+			return 0, 0, true
+		}
+		retained, overflow = addReservationBytes(retained, pending.retainedBytes)
+		if overflow {
+			return 0, 0, true
+		}
+	}
+	return available, retained, false
+}
+
+func addReservationBytes(left, right uint64) (uint64, bool) {
+	if left > ^uint64(0)-right {
+		return ^uint64(0), true
+	}
+	return left + right, false
+}
+
+func subtractAvailable(available, reserved uint64) uint64 {
+	if reserved >= available {
+		return 0
+	}
+	return available - reserved
 }
 
 func (scheduler *SequenceScheduler) snapshots() (
@@ -465,7 +669,7 @@ func (sequence *ScheduledSequence) Close() error {
 		reservation := sequence.reservation
 		sequence.reservation = nil
 		sequence.mu.Unlock()
-		reservation.finish(true)
+		reservation.finish(reservationOutcome{mayHaveLoaded: true, cleanupConfirmed: true})
 		return nil
 	case sequenceFinished, sequenceClosed:
 		sequence.mu.Unlock()
@@ -482,5 +686,7 @@ func (sequence *ScheduledSequence) finish(cleanupConfirmed bool) {
 	reservation := sequence.reservation
 	sequence.reservation = nil
 	sequence.mu.Unlock()
-	reservation.finish(cleanupConfirmed)
+	reservation.finish(reservationOutcome{
+		mayHaveLoaded: true, cleanupConfirmed: cleanupConfirmed,
+	})
 }
