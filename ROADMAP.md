@@ -224,12 +224,12 @@ Once explicit N-stage execution is correct, let the control plane build the plan
   retained-shard state
 - [x] represent plan constraints independently from a fixed worker count or
   backend
-- [ ] place complementary ranges subject to memory, adapter, fingerprint,
+- [x] place complementary ranges subject to memory, adapter, fingerprint,
   topology, input/output ownership, and retained-state constraints
 - [x] score plans by observed compute, transfer cost, health, memory pressure,
   and shard reuse
 - [ ] replan between sequences when workers join, leave, slow down, or fail
-- [ ] emit selected stages plus rejected-node reasons as machine-readable evidence
+- [x] emit selected stages plus rejected-node reasons as machine-readable evidence
 
 The first scheduler should prefer a simple valid contiguous-layer plan over a
 clever opaque one. A worker may be excluded from a request when using it would

@@ -110,6 +110,70 @@ func TestBuildBalancedExecutionPlanSeparatesDifferentTopologies(t *testing.T) {
 	}
 }
 
+func TestExecutionShardIdentitySurvivesInventoryRevisionChanges(t *testing.T) {
+	stages := []ExecutionStage{
+		{Name: "stage-0", TargetID: "worker-0", LayerStart: 0, LayerEnd: 9, OwnsInput: true, ResponseMode: StageResponseTensor},
+		{Name: "stage-1", TargetID: "worker-1", LayerStart: 9, LayerEnd: 18, OwnsOutput: true, ResponseMode: StageResponseSampledToken},
+	}
+	first, err := BuildExecutionPlan(testExecutionModel(18), "7", stages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := BuildExecutionPlan(testExecutionModel(18), "8", stages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Revision == second.Revision {
+		t.Fatal("inventory revision did not change plan identity")
+	}
+	for index := range first.Stages {
+		if first.Stages[index].ShardID != second.Stages[index].ShardID {
+			t.Fatalf(
+				"stage %d shard identity changed across inventory revisions: %q != %q",
+				index, first.Stages[index].ShardID, second.Stages[index].ShardID,
+			)
+		}
+	}
+}
+
+func TestDeriveExecutionShardIDValidatesLoadShape(t *testing.T) {
+	model := testExecutionModel(18)
+	derived, err := DeriveExecutionShardID(model, 0, 9, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := BuildExecutionPlan(model, "7", []ExecutionStage{
+		{Name: "stage-0", TargetID: "worker-0", LayerStart: 0, LayerEnd: 9, OwnsInput: true, ResponseMode: StageResponseTensor},
+		{Name: "stage-1", TargetID: "worker-1", LayerStart: 9, LayerEnd: 18, OwnsOutput: true, ResponseMode: StageResponseTensor},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if derived != plan.Stages[0].ShardID {
+		t.Fatalf("derived shard ID = %q, plan has %q", derived, plan.Stages[0].ShardID)
+	}
+	for _, test := range []struct {
+		name       string
+		model      ExecutionModel
+		start, end int
+		input      bool
+		output     bool
+	}{
+		{name: "model", model: ExecutionModel{}, start: 0, end: 1, input: true},
+		{name: "range", model: model, start: 9, end: 9},
+		{name: "input ownership", model: model, start: 0, end: 9},
+		{name: "output ownership", model: model, start: 9, end: 18},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := DeriveExecutionShardID(
+				test.model, test.start, test.end, test.input, test.output,
+			); err == nil {
+				t.Fatal("invalid execution shard shape was accepted")
+			}
+		})
+	}
+}
+
 func TestExecutionPlanSerializationPinsIdentityAndResponseMode(t *testing.T) {
 	plan, err := BuildBalancedExecutionPlan(
 		testExecutionModel(18), testExecutionTargetIDs(5), StageResponseSampledToken,

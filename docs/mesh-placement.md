@@ -162,17 +162,61 @@ stable order:
 5. total additional memory required;
 6. worker restart count;
 7. stage count; and
-8. immutable plan revision as the final lexical tie-breaker.
+8. immutable semantic plan identity as the final lexical tie-breaker.
 
 Exact retained runtime shard identity reduces both new-load and additional
 memory cost without relaxing sequence-capacity or retained-budget constraints.
 The evidence also reports stage and operation counts backed by profiles, making
 fallback-heavy scores distinguishable from well-measured ones.
 
+## Automatic plan construction
+
+`placement.ConstructPlan` searches caller-supplied contiguous range estimates
+and returns the lowest-scoring valid complete plan. A range estimate supplies
+the full `StageCostEstimate` for one allowed `[layerStart, layerEnd)` edge.
+Model adapters can publish every supported range or a smaller set of meaningful
+split points without embedding a worker count or fixed layout in the scheduler.
+
+The request also supplies the model/checkpoint identity, terminal response
+mode, complete scoring context, maximum stage count, and a work budget. The
+scoring context has no stage estimates: the constructor aligns range estimates
+with each candidate plan before calling `ScorePlan`.
+
+For each range, the constructor evaluates every inventory worker once using the
+same hard constraints as explicit plan scoring. The result preserves this full
+range/worker eligibility matrix, including stable rejection codes for ranges
+that are not selected. Eligible range/worker pairs receive their exact compute,
+transfer, health, memory, and retained-state cost before search begins.
+
+The search advances from layer zero through the range graph. Workers are used
+at most once, stages remain contiguous, and only complete coverage can produce
+a plan. Dynamic programming retains the best partial plan for each layer
+boundary and selected-worker set; a discarded partial has the same possible
+suffixes and a strictly worse stable score. Complete candidates are rebuilt as
+immutable inventory-pinned execution plans and rescored through `ScorePlan` as
+an invariant check before selection.
+
+Search work is bounded by `maxSearchOperations`, which counts the initial
+range-by-worker matrix and every partial-plan transition. The default is
+100,000 operations and the default stage ceiling is five. If the budget is too
+small, construction returns `ErrPlanSearchLimit`, marks the result as limited,
+and does not expose a partially searched plan as selected. A fully searched
+mesh with no valid coverage returns a successful result with `selectedPlan`
+absent and all rejection evidence intact.
+
+Runtime shard IDs are derived from model/checkpoint identity, layer range, and
+input/output ownership rather than from the inventory or complete plan
+revision. Thus an unchanged compatible resident shard can be reused after a
+membership/status revision. The complete plan revision still pins the exact
+inventory and topology, so stale plans remain invalid for a later scheduling
+decision.
+
 ## Current boundary
 
-This package evaluates proposed stages and scores complete proposed plans. It
-does not yet enumerate stage counts, layer boundaries, or worker assignments,
-choose the best plan, or schedule active probes. That search layer consumes
-these contracts next, while the existing explicit-plan path remains the
-diagnostic fallback.
+This package now evaluates proposed stages, scores complete plans, and chooses a
+bounded deterministic plan from supplied model range estimates. It does not yet
+derive those estimates from a real checkpoint adapter, expose construction
+through the control-plane API, bind the selected endpoints into a generation
+session, or schedule active probes. Live between-sequence replanning and the
+five-Mac scheduler-selected correctness run consume these contracts next, while
+the existing explicit-plan path remains the diagnostic fallback.
