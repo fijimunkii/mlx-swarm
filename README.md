@@ -156,9 +156,12 @@ The placement foundation evaluates every worker against one proposed stage
 using deterministic, backend-neutral hard constraints. It rejects stale or
 incompatible candidates with stable machine-readable reasons and accounts for
 compatible retained-shard reuse. A bounded rolling profile supplies fresh,
-directional RTT/throughput evidence and per-worker compute observations for the
-later plan scorer. See the
-[placement eligibility contract](docs/mesh-placement.md).
+directional RTT/throughput evidence and per-worker compute observations. A
+complete-plan scorer combines those snapshots with explicit conservative
+fallbacks, preserves every candidate rejection, and ranks valid plans by
+latency, failure history, memory pressure, and retained reuse. Plan enumeration
+and selection remain the next scheduler layer. See the
+[placement and scoring contract](docs/mesh-placement.md).
 
 ### Failure characterization
 
