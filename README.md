@@ -162,7 +162,14 @@ fallbacks, preserves every candidate rejection, and ranks valid plans by
 latency, failure history, memory pressure, and retained reuse. A bounded dynamic
 planner searches model-supplied contiguous ranges, may omit eligible workers
 that worsen the result, and emits the selected plan plus every range/worker
-rejection. Live control-plane and generation-session integration remain next.
+rejection. The mesh sequence scheduler snapshots live membership and profiles
+at each admission boundary, binds the selected worker instances and endpoints,
+requires the instance-bound HTTP capability, reserves worker, shard, and memory
+admission locally, and freezes that plan for one generation attempt. A later
+sequence always replans, so joins, removals, expiry, fresh failure state, and
+changed performance evidence cannot mutate an active sequence or reuse a stale
+plan. Control-plane API exposure and the scheduler-selected five-Mac run remain
+next.
 See the
 [placement and scoring contract](docs/mesh-placement.md).
 

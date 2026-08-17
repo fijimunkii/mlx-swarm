@@ -211,12 +211,64 @@ membership/status revision. The complete plan revision still pins the exact
 inventory and topology, so stale plans remain invalid for a later scheduling
 decision.
 
+## Between-sequence scheduling
+
+`mesh.SequenceScheduler` is the runtime boundary between live placement and the
+existing planned generation session. `Prepare` takes a fresh membership
+inventory, aligns a profile snapshot to the same server time, constructs the
+plan, and binds every selected stage to the exact worker instance and endpoint
+from that inventory revision. A concurrent profile update causes a bounded
+snapshot retry rather than mixing evidence from different times.
+
+Scheduler-bound HTTP calls carry the selected worker and instance IDs as a
+precondition on every request. A daemon restart or endpoint reassignment is
+rejected before model, shard, or sequence state can be read or mutated. The
+HTTP scheduler therefore requires the separately advertised
+`http-json-instance-v1` capability; a pre-upgrade daemon that only advertises
+`http-json-v1` is ineligible even if it would ignore unknown identity headers.
+The unbound HTTP client remains available only for the explicit diagnostic
+path.
+
+The returned `ScheduledSequence` freezes that plan and accepts exactly one
+`Generate` attempt. Membership and profile changes do not retarget an admitted
+sequence under the current non-migrating KV model. The next request must call
+`Prepare` again, which means worker joins, removal or expiry, status changes,
+and new topology or compute evidence are applied only between sequences. If no
+complete plan exists, `ErrNoEligiblePlan` is returned with the complete
+construction and rejection evidence instead of a stale or partial plan.
+
+`Prepare` also reserves one locally coordinated open-sequence slot for every
+selected shard, one worker-wide request slot, and the selected stage's
+incremental memory before returning. Concurrent preparation cannot over-admit
+the last advertised slot or independently spend the same available-memory
+snapshot. Model-load memory remains reserved after setup until a newer dynamic
+status sampled on that worker after the load reflects it; controller delivery
+time alone is not sufficient. Confirmed cleanup immediately releases the
+sequence memory reserve. `Generate` releases request and shard reservations after
+success or failure when worker cleanup is confirmed; callers that abandon a
+prepared sequence must call `Close`. Ambiguous cleanup quarantines the shard
+slot and sequence memory. The scheduler takes a bounded post-cleanup state
+observation; a later heartbeat can reconcile the quarantine only when its
+worker-daemon observation sequence is ordered after that observation and reports no open
+sequence, or when that worker incarnation leaves membership.
+
+Selected-worker metadata checks and shard loads run under a configurable
+preparation timeout (ten minutes by default), so a stalled endpoint cannot hold
+an admission reservation forever during setup. A shorter parent deadline still
+wins.
+
+`mesh.HTTPResolver` binds the current trusted-network JSON worker endpoint.
+Callers that need a deterministic diagnostic path can continue to construct an
+explicit `generation.PlannedSession`; the scheduler does not replace or alter
+that path.
+
 ## Current boundary
 
 This package now evaluates proposed stages, scores complete plans, and chooses a
-bounded deterministic plan from supplied model range estimates. It does not yet
-derive those estimates from a real checkpoint adapter, expose construction
-through the control-plane API, bind the selected endpoints into a generation
-session, or schedule active probes. Live between-sequence replanning and the
-five-Mac scheduler-selected correctness run consume these contracts next, while
-the existing explicit-plan path remains the diagnostic fallback.
+bounded deterministic plan from supplied model range estimates. The mesh
+runtime binds selected endpoints to a single-use generation session and
+replans from fresh snapshots at the next sequence boundary. It does not yet
+derive range estimates from a real checkpoint adapter, expose construction
+through the control-plane API, or schedule active probes. The five-Mac
+scheduler-selected correctness run consumes these contracts next, while the
+existing explicit-plan path remains the diagnostic fallback.

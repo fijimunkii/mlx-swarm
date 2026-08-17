@@ -99,10 +99,11 @@ type WireTensor struct {
 }
 
 type PersistentResponse struct {
-	RequestID string                  `json:"requestID"`
-	OK        bool                    `json:"ok"`
-	Error     string                  `json:"error,omitempty"`
-	Result    *PersistentWorkerResult `json:"result,omitempty"`
+	RequestID                 string                  `json:"requestID"`
+	OK                        bool                    `json:"ok"`
+	Error                     string                  `json:"error,omitempty"`
+	WorkerObservationSequence uint64                  `json:"workerObservationSequence,omitempty"`
+	Result                    *PersistentWorkerResult `json:"result,omitempty"`
 }
 
 type PersistentWorkerResult struct {

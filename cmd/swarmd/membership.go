@@ -121,17 +121,21 @@ func newMembershipAgent(
 	if err := json.Unmarshal(result.Output, &capabilities); err != nil {
 		return nil, fmt.Errorf("decode worker capabilities: %w", err)
 	}
-	state, err := workerproc.State(ctx, worker)
+	observation, err := workerproc.ObserveState(ctx, worker)
 	if err != nil {
 		return nil, fmt.Errorf("worker membership state: %w", err)
 	}
+	state := observation.State
 	if capabilities.PhysicalMemoryBytes == 0 {
 		capabilities.PhysicalMemoryBytes = state.PhysicalMemoryBytes
 	}
 	if state.RetainedByteBudget <= 0 || state.MaxOpenSequencesPerShard <= 0 {
 		return nil, errors.New("worker state has incomplete admission limits")
 	}
-	status := membershipStatus(state, worker.RestartCount(), capabilities.PhysicalMemoryBytes)
+	status := membershipStatus(
+		state, worker.RestartCount(), capabilities.PhysicalMemoryBytes,
+		observation.ObservationSequence,
+	)
 	registration := registry.Registration{
 		SchemaVersion: registry.SchemaVersion,
 		ID:            config.WorkerID, InstanceID: config.InstanceID, Endpoint: publicURL.String(),
@@ -146,10 +150,18 @@ func newMembershipAgent(
 				MaxOpenSequencesPerShard: state.MaxOpenSequencesPerShard,
 				RetainedByteBudget:       uint64(state.RetainedByteBudget),
 			},
-			Transports: []registry.Transport{{
-				Protocol: "http-json-v1", TensorEncodings: []string{"base64-json"},
-				MaxRequestBytes: maxDebugTensorPayload, TLS: publicURL.Scheme == "https",
-			}},
+			Transports: []registry.Transport{
+				{
+					Protocol:        "http-json-v1",
+					TensorEncodings: []string{workerproc.Base64JSONTensorEncoding},
+					MaxRequestBytes: maxDebugTensorPayload, TLS: publicURL.Scheme == "https",
+				},
+				{
+					Protocol:        workerproc.InstanceBoundHTTPProtocol,
+					TensorEncodings: []string{workerproc.Base64JSONTensorEncoding},
+					MaxRequestBytes: maxDebugTensorPayload, TLS: publicURL.Scheme == "https",
+				},
+			},
 		},
 		Status: status,
 	}
@@ -226,7 +238,7 @@ func (agent *membershipAgent) freshStatusPending(now time.Time) bool {
 }
 
 func (agent *membershipAgent) probeStatus(ctx context.Context, previous registry.Status) registry.Status {
-	state, stateErr := workerproc.State(ctx, agent.worker)
+	observation, stateErr := workerproc.ObserveState(ctx, agent.worker)
 	if stateErr != nil {
 		previous.Health = registry.HealthDegraded
 		previous.AvailableMemoryBytes = 0
@@ -235,7 +247,9 @@ func (agent *membershipAgent) probeStatus(ctx context.Context, previous registry
 		return previous
 	}
 	status := membershipStatus(
-		state, agent.worker.RestartCount(), agent.registration.Capabilities.PhysicalMemoryBytes,
+		observation.State, agent.worker.RestartCount(),
+		agent.registration.Capabilities.PhysicalMemoryBytes,
+		observation.ObservationSequence,
 	)
 	status.RecentFailureCount = previous.RecentFailureCount
 	return status
@@ -294,6 +308,7 @@ func membershipStatus(
 	state *workerproc.PersistentWorkerState,
 	restartCount int,
 	physicalMemoryBytes uint64,
+	workerObservationSequence uint64,
 ) registry.Status {
 	allocatable := physicalMemoryBytes
 	if state.MLXMemoryLimitBytes > 0 && uint64(state.MLXMemoryLimitBytes) < allocatable {
@@ -325,7 +340,8 @@ func membershipStatus(
 		Health:               registry.HealthHealthy,
 		AvailableMemoryBytes: available, MemoryPressureBytes: pressure,
 		OpenSequenceCount: openSequences, RetainedBytes: uint64(max(0, state.RetainedBytes)),
-		RestartCount: restartCount, RetainedShards: shards,
+		RestartCount: restartCount, WorkerObservationSequence: workerObservationSequence,
+		RetainedShards: shards,
 	}
 }
 

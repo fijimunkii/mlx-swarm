@@ -48,7 +48,7 @@ Every worker record uses membership schema version 1 and contains:
 - concurrency, open-sequence, and retained-byte admission limits;
 - health, schedulable memory available under the backend's configured runtime
   limit, process pressure, restart/failure counters, server-stamped
-  `statusObservedAt`, and
+  `statusObservedAt`, worker-daemon `workerObservationSequence`, and
   open sequence state; and
 - retained shard ranges, ownership, checkpoint identities, memory, and open
   sequence counts.
@@ -66,6 +66,13 @@ The default `WorkerStatusFresh` guard uses the inventory lease TTL as the
 maximum observation age; placement may supply a stricter positive window with
 `Worker.StatusFresh`. Zero, future, and over-age observations fail
 conservatively.
+
+`workerObservationSequence` is advanced by `swarmd` as calls complete through
+its serialized persistent-worker gate. It is not used for cross-worker age
+calculations; `statusObservedAt` remains the controller clock for those. The
+scheduler compares the sequence only with post-operation observations from
+that same worker instance, so a probe completed before a mutation but delivered
+by a later heartbeat cannot masquerade as post-mutation state.
 
 ## HTTP API
 

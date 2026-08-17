@@ -20,6 +20,11 @@ const (
 	maxProfileLabelBytes              = 1024
 )
 
+// ErrProfileSnapshotRewind reports that a caller tried to take a snapshot at
+// a time before the newest accepted observation. Live planning may retry from
+// a newer inventory snapshot when an observation races its first snapshot.
+var ErrProfileSnapshotRewind = errors.New("profile snapshot time precedes the latest accepted update")
+
 // ProfileConfig bounds rolling topology and compute evidence. Zero values use
 // conservative defaults so callers cannot accidentally create unbounded stores.
 type ProfileConfig struct {
@@ -274,7 +279,7 @@ func (store *ProfileStore) Snapshot(at time.Time) (ProfileSnapshot, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if at.Before(store.latestAcceptedAt) {
-		return ProfileSnapshot{}, errors.New("profile snapshot time precedes the latest accepted update")
+		return ProfileSnapshot{}, ErrProfileSnapshotRewind
 	}
 	snapshot := ProfileSnapshot{
 		SchemaVersion: SchemaVersion, Revision: store.revision, GeneratedAt: at,
