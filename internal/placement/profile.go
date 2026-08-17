@@ -166,9 +166,11 @@ func (store *ProfileStore) ObserveLink(at time.Time, observation LinkObservation
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if err := store.validateObservationTimeLocked(at, normalized.ObservedAt); err != nil {
+	referenceAt, err := store.validateObservationTimeLocked(at, normalized.ObservedAt)
+	if err != nil {
 		return err
 	}
+	store.pruneExpiredLocked(referenceAt)
 	if _, exists := store.links[key]; !exists && store.seriesCountLocked() >= store.maxSeries {
 		return errors.New("profile series limit reached")
 	}
@@ -208,11 +210,15 @@ func (store *ProfileStore) observeComputeBatch(
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	referenceAt := at.UTC()
 	for index, observation := range normalized {
-		if err := store.validateObservationTimeLocked(at, observation.ObservedAt); err != nil {
+		validatedAt, err := store.validateObservationTimeLocked(at, observation.ObservedAt)
+		if err != nil {
 			return fmt.Errorf("compute observation %d: %w", index, err)
 		}
+		referenceAt = validatedAt
 	}
+	store.pruneExpiredLocked(referenceAt)
 	newKeys := make(map[computeKey]struct{})
 	for _, key := range keys {
 		if _, exists := store.compute[key]; !exists {
@@ -288,24 +294,50 @@ func (store *ProfileStore) seriesCountLocked() int {
 	return len(store.links) + len(store.compute)
 }
 
-func (store *ProfileStore) validateObservationTimeLocked(at, observedAt time.Time) error {
+func (store *ProfileStore) validateObservationTimeLocked(
+	at, observedAt time.Time,
+) (time.Time, error) {
 	if at.IsZero() {
-		return errors.New("profile acceptance time is required")
+		return time.Time{}, errors.New("profile acceptance time is required")
 	}
 	at = at.UTC()
 	if observedAt.After(at) {
-		return errors.New("profile observation time is after its acceptance time")
+		return time.Time{}, errors.New("profile observation time is after its acceptance time")
 	}
-	if observedAt.Before(at.Add(-store.maxAge)) {
-		return errors.New("profile observation is already stale at acceptance")
+	referenceAt := at
+	if store.latestAcceptedAt.After(referenceAt) {
+		referenceAt = store.latestAcceptedAt
 	}
-	return nil
+	if observedAt.Before(referenceAt.Add(-store.maxAge)) {
+		return time.Time{}, errors.New("profile observation is already stale at acceptance")
+	}
+	return referenceAt, nil
 }
 
 func (store *ProfileStore) acceptTimeLocked(at time.Time) {
 	at = at.UTC()
 	if at.After(store.latestAcceptedAt) {
 		store.latestAcceptedAt = at
+	}
+}
+
+func (store *ProfileStore) pruneExpiredLocked(at time.Time) {
+	cutoff := at.Add(-store.maxAge)
+	for key, observations := range store.links {
+		retained, _ := currentLinkObservations(observations, cutoff, at)
+		if len(retained) == 0 {
+			delete(store.links, key)
+		} else {
+			store.links[key] = retained
+		}
+	}
+	for key, observations := range store.compute {
+		retained, _ := currentComputeObservations(observations, cutoff, at)
+		if len(retained) == 0 {
+			delete(store.compute, key)
+		} else {
+			store.compute[key] = retained
+		}
 	}
 }
 

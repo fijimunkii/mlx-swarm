@@ -103,10 +103,11 @@ normal inference call.
 Every update supplies a server-controlled acceptance time. Observations that
 are already stale or dated after acceptance are rejected before they can
 consume or evict rolling evidence. Snapshots cannot rewind before the latest
-accepted update. They record their revision, generation time, freshness and
-storage bounds, remove expired observations, and sort every profile by its
-stable identity. The same accepted observation history and snapshot time
-therefore produce identical machine-readable evidence.
+accepted update. Fresh updates reclaim expired series before enforcing the
+global series limit. Snapshots record their revision, generation time,
+freshness and storage bounds, remove expired observations, and sort every
+profile by its stable identity. The same accepted observation history and
+snapshot time therefore produce identical machine-readable evidence.
 
 Current memory pressure, health, failures, restart counts, and retained-shard
 state remain in the server-stamped membership inventory rather than being

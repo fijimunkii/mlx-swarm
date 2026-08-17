@@ -197,6 +197,33 @@ func TestProfileStoreIsConcurrencySafeAndKeepsNewestSamples(t *testing.T) {
 	}
 }
 
+func TestProfileStoreReclaimsExpiredSeriesDuringIngestion(t *testing.T) {
+	now := time.Date(2026, time.August, 17, 0, 0, 0, 0, time.UTC)
+	store := mustProfileStore(t, ProfileConfig{
+		MaxAge: 5 * time.Second, MaxSamplesPerSeries: 2, MaxSeries: 1,
+	})
+	if err := store.ObserveLink(now, testLinkObservation("worker-a", now, 10, 0)); err != nil {
+		t.Fatal(err)
+	}
+	computeTime := now.Add(6 * time.Second)
+	if err := store.ObserveCompute(computeTime, ComputeObservation{
+		WorkerID: "worker-b", WorkerInstanceID: "worker-b-instance",
+		Backend: "cuda", Model: testProfileModel(), Operation: "decode",
+		LayerStart: 6, LayerEnd: 12, InputTokenCount: 1,
+		ComputeMicros: 20, ObservedAt: computeTime,
+	}); err != nil {
+		t.Fatalf("fresh series was rejected behind expired capacity: %v", err)
+	}
+	snapshot := mustProfileSnapshot(t, store, computeTime)
+	if snapshot.Revision != 2 || len(snapshot.Links) != 0 || len(snapshot.Compute) != 1 ||
+		snapshot.Compute[0].WorkerID != "worker-b" {
+		t.Fatalf("expired series was not reclaimed: %+v", snapshot)
+	}
+	if err := store.ObserveLink(now, testLinkObservation("worker-c", now, 30, 0)); err == nil {
+		t.Fatal("out-of-order acceptance revived evidence stale at the newest store time")
+	}
+}
+
 func TestProfileStoreRejectsInvalidInputsAndSeriesOverflow(t *testing.T) {
 	now := time.Date(2026, time.August, 17, 0, 0, 0, 0, time.UTC)
 	for _, config := range []ProfileConfig{
