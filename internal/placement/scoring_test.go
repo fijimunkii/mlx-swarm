@@ -185,7 +185,9 @@ func TestScorePlanReturnsCompleteEvidenceForIneligiblePlan(t *testing.T) {
 
 func TestComparePlanEvaluationsUsesStablePriorityOrder(t *testing.T) {
 	base := PlanEvaluation{
-		Eligible: true, Plan: generation.ExecutionPlan{Revision: "plan-b"},
+		Eligible: true, Plan: generation.ExecutionPlan{
+			Revision: "plan-b", Stages: []generation.ExecutionStage{{TargetID: "worker-b"}},
+		},
 		Score: PlanScore{StageCount: 2, EstimatedMicros: 100},
 	}
 	tests := []struct {
@@ -217,8 +219,8 @@ func TestComparePlanEvaluationsUsesStablePriorityOrder(t *testing.T) {
 		{name: "stage count", left: base, right: mutateEvaluation(base, func(value *PlanEvaluation) {
 			value.Score.StageCount++
 		})},
-		{name: "plan revision", left: mutateEvaluation(base, func(value *PlanEvaluation) {
-			value.Plan.Revision = "plan-a"
+		{name: "plan topology", left: mutateEvaluation(base, func(value *PlanEvaluation) {
+			value.Plan.Stages[0].TargetID = "worker-a"
 		}), right: base},
 	}
 	for _, test := range tests {
@@ -366,6 +368,9 @@ func mutateEvaluation(
 	input PlanEvaluation,
 	mutate func(*PlanEvaluation),
 ) PlanEvaluation {
+	input.Plan.Stages = append([]generation.ExecutionStage(nil), input.Plan.Stages...)
+	input.Request.Stages = append([]StageCostEstimate(nil), input.Request.Stages...)
+	input.Stages = append([]StagePlanEvaluation(nil), input.Stages...)
 	mutate(&input)
 	return input
 }

@@ -8,7 +8,7 @@ import (
 	"fmt"
 )
 
-const executionPlanSchemaVersion = "1"
+const executionPlanSchemaVersion = "2"
 
 type StageResponseMode string
 
@@ -41,8 +41,9 @@ type ExecutionStage struct {
 
 // ExecutionPlan is the self-describing, architecture-neutral ordered pipeline
 // used by distributed generation. Revision is a deterministic digest of the
-// model, inventory revision, and semantic stage fields; shard identities are
-// derived from it so differently shaped plans cannot collide on a worker.
+// model, inventory revision, and semantic stage fields. Shard identities are
+// derived separately from load-compatible model/range fields so a new plan can
+// safely reuse resident weights across inventory revisions.
 type ExecutionPlan struct {
 	SchemaVersion     string           `json:"schemaVersion"`
 	Revision          string           `json:"revision"`
@@ -235,7 +236,7 @@ func ValidateExecutionPlan(plan ExecutionPlan) error {
 		)
 	}
 	for index, stage := range plan.Stages {
-		expectedShardID := executionShardID(index, stage, plan.Revision)
+		expectedShardID := executionShardID(plan.Model, stage)
 		if stage.ShardID != expectedShardID {
 			return fmt.Errorf(
 				"stage %d shard ID %q does not match plan %q",
@@ -249,7 +250,7 @@ func ValidateExecutionPlan(plan ExecutionPlan) error {
 func finalizeExecutionPlan(plan *ExecutionPlan) {
 	plan.Revision = executionPlanRevision(*plan)
 	for index := range plan.Stages {
-		plan.Stages[index].ShardID = executionShardID(index, plan.Stages[index], plan.Revision)
+		plan.Stages[index].ShardID = executionShardID(plan.Model, plan.Stages[index])
 	}
 }
 
@@ -287,14 +288,51 @@ func executionPlanRevision(plan ExecutionPlan) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func executionShardID(index int, stage ExecutionStage, revision string) string {
-	suffix := revision
-	if len(suffix) > 12 {
-		suffix = suffix[:12]
+// DeriveExecutionShardID returns the stable runtime identity for one
+// load-compatible model range. It excludes plan and inventory revisions,
+// target identity, and response mode because none changes the loaded weights.
+func DeriveExecutionShardID(
+	model ExecutionModel,
+	layerStart, layerEnd int,
+	ownsInput, ownsOutput bool,
+) (string, error) {
+	if model.ID == "" || model.CheckpointFingerprint == "" || model.LayerCount <= 0 {
+		return "", errors.New("execution shard model identity is incomplete")
 	}
+	if layerStart < 0 || layerEnd <= layerStart || layerEnd > model.LayerCount {
+		return "", fmt.Errorf(
+			"execution shard range [%d,%d) is invalid for %d layers",
+			layerStart, layerEnd, model.LayerCount,
+		)
+	}
+	if ownsInput != (layerStart == 0) || ownsOutput != (layerEnd == model.LayerCount) {
+		return "", errors.New("execution shard ownership does not match its range")
+	}
+	stage := ExecutionStage{
+		LayerStart: layerStart, LayerEnd: layerEnd,
+		OwnsInput: ownsInput, OwnsOutput: ownsOutput,
+	}
+	return executionShardID(model, stage), nil
+}
+
+func executionShardID(model ExecutionModel, stage ExecutionStage) string {
+	payload := struct {
+		SchemaVersion string         `json:"schemaVersion"`
+		Model         ExecutionModel `json:"model"`
+		LayerStart    int            `json:"layerStart"`
+		LayerEnd      int            `json:"layerEnd"`
+		OwnsInput     bool           `json:"ownsInput"`
+		OwnsOutput    bool           `json:"ownsOutput"`
+	}{
+		SchemaVersion: executionPlanSchemaVersion, Model: model,
+		LayerStart: stage.LayerStart, LayerEnd: stage.LayerEnd,
+		OwnsInput: stage.OwnsInput, OwnsOutput: stage.OwnsOutput,
+	}
+	encoded, _ := json.Marshal(payload)
+	digest := sha256.Sum256(encoded)
 	return fmt.Sprintf(
-		"generate-stage-%02d-%d-%d-%s",
-		index, stage.LayerStart, stage.LayerEnd, suffix,
+		"generate-shard-%d-%d-%s",
+		stage.LayerStart, stage.LayerEnd, hex.EncodeToString(digest[:6]),
 	)
 }
 

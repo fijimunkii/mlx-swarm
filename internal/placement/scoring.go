@@ -1,6 +1,7 @@
 package placement
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
@@ -119,11 +120,7 @@ func ScorePlan(
 	plan generation.ExecutionPlan,
 	request PlanScoringRequest,
 ) (PlanEvaluation, error) {
-	request.Adapter = strings.TrimSpace(request.Adapter)
-	request.Transport.Protocol = strings.TrimSpace(request.Transport.Protocol)
-	request.Transport.TensorEncoding = strings.TrimSpace(request.Transport.TensorEncoding)
-	request.CoordinatorID = strings.TrimSpace(request.CoordinatorID)
-	request.CoordinatorInstanceID = strings.TrimSpace(request.CoordinatorInstanceID)
+	request = normalizeScoringRequest(request)
 	if err := validateScoringInputs(inventory, profile, plan, request); err != nil {
 		return PlanEvaluation{}, err
 	}
@@ -208,25 +205,90 @@ func ComparePlanEvaluations(left, right PlanEvaluation) int {
 		}
 		return 1
 	}
+	if order := comparePlanScores(left.Score, right.Score); order != 0 {
+		return order
+	}
+	return comparePlanIdentity(left.Plan, right.Plan)
+}
+
+func comparePlanScores(left, right PlanScore) int {
 	for _, pair := range [][2]uint64{
-		{left.Score.EstimatedMicros, right.Score.EstimatedMicros},
-		{left.Score.RecentFailureCount, right.Score.RecentFailureCount},
-		{left.Score.MemoryPressureBytes, right.Score.MemoryPressureBytes},
-		{left.Score.NewLoadMemoryBytes, right.Score.NewLoadMemoryBytes},
-		{left.Score.RequiredAdditionalMemoryBytes, right.Score.RequiredAdditionalMemoryBytes},
-		{left.Score.RestartCount, right.Score.RestartCount},
+		{left.EstimatedMicros, right.EstimatedMicros},
+		{left.RecentFailureCount, right.RecentFailureCount},
+		{left.MemoryPressureBytes, right.MemoryPressureBytes},
+		{left.NewLoadMemoryBytes, right.NewLoadMemoryBytes},
+		{left.RequiredAdditionalMemoryBytes, right.RequiredAdditionalMemoryBytes},
+		{left.RestartCount, right.RestartCount},
 	} {
 		if order := compareUint64(pair[0], pair[1]); order != 0 {
 			return order
 		}
 	}
-	if left.Score.StageCount != right.Score.StageCount {
-		if left.Score.StageCount < right.Score.StageCount {
+	if left.StageCount != right.StageCount {
+		if left.StageCount < right.StageCount {
 			return -1
 		}
 		return 1
 	}
-	return strings.Compare(left.Plan.Revision, right.Plan.Revision)
+	return 0
+}
+
+func comparePlanIdentity(left, right generation.ExecutionPlan) int {
+	for _, pair := range [][2]string{
+		{left.SchemaVersion, right.SchemaVersion},
+		{left.InventoryRevision, right.InventoryRevision},
+		{left.Model.ID, right.Model.ID},
+		{left.Model.CheckpointFingerprint, right.Model.CheckpointFingerprint},
+	} {
+		if order := strings.Compare(pair[0], pair[1]); order != 0 {
+			return order
+		}
+	}
+	if order := cmp.Compare(left.Model.LayerCount, right.Model.LayerCount); order != 0 {
+		return order
+	}
+	if order := cmp.Compare(len(left.Stages), len(right.Stages)); order != 0 {
+		return order
+	}
+	for index := range left.Stages {
+		leftStage := left.Stages[index]
+		rightStage := right.Stages[index]
+		for _, pair := range [][2]string{
+			{leftStage.Name, rightStage.Name},
+			{leftStage.TargetID, rightStage.TargetID},
+			{string(leftStage.ResponseMode), string(rightStage.ResponseMode)},
+		} {
+			if order := strings.Compare(pair[0], pair[1]); order != 0 {
+				return order
+			}
+		}
+		if order := cmp.Compare(leftStage.LayerStart, rightStage.LayerStart); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(leftStage.LayerEnd, rightStage.LayerEnd); order != 0 {
+			return order
+		}
+		if order := compareBool(leftStage.OwnsInput, rightStage.OwnsInput); order != 0 {
+			return order
+		}
+		if order := compareBool(leftStage.OwnsOutput, rightStage.OwnsOutput); order != 0 {
+			return order
+		}
+		if order := strings.Compare(leftStage.ShardID, rightStage.ShardID); order != 0 {
+			return order
+		}
+	}
+	return strings.Compare(left.Revision, right.Revision)
+}
+
+func compareBool(left, right bool) int {
+	if left == right {
+		return 0
+	}
+	if !left {
+		return -1
+	}
+	return 1
 }
 
 func validateScoringInputs(
@@ -245,6 +307,42 @@ func validateScoringInputs(
 			plan.InventoryRevision, inventory.Revision,
 		)
 	}
+	if err := validateScoringSnapshots(inventory, profile); err != nil {
+		return err
+	}
+	if err := validateScoringContext(request); err != nil {
+		return err
+	}
+	if len(request.Stages) != len(plan.Stages) {
+		return fmt.Errorf("score has %d stage estimates; plan has %d stages", len(request.Stages), len(plan.Stages))
+	}
+	for index, estimate := range request.Stages {
+		if err := validateStageCostEstimate(estimate, request.DecodeSteps); err != nil {
+			return fmt.Errorf("score stage estimate %d: %w", index, err)
+		}
+	}
+	return nil
+}
+
+func normalizeScoringRequest(request PlanScoringRequest) PlanScoringRequest {
+	request.Adapter = strings.TrimSpace(request.Adapter)
+	request.Transport.Protocol = strings.TrimSpace(request.Transport.Protocol)
+	request.Transport.TensorEncoding = strings.TrimSpace(request.Transport.TensorEncoding)
+	request.CoordinatorID = strings.TrimSpace(request.CoordinatorID)
+	request.CoordinatorInstanceID = strings.TrimSpace(request.CoordinatorInstanceID)
+	return request
+}
+
+func validateScoringSnapshots(inventory registry.Inventory, profile ProfileSnapshot) error {
+	if inventory.SchemaVersion != registry.SchemaVersion {
+		return fmt.Errorf(
+			"inventory schema version is %d, want %d",
+			inventory.SchemaVersion, registry.SchemaVersion,
+		)
+	}
+	if inventory.GeneratedAt.IsZero() || inventory.LeaseTTLMillis <= 0 {
+		return errors.New("inventory generation time and lease TTL are required")
+	}
 	workerIDs := make(map[string]struct{}, len(inventory.Workers))
 	for index, worker := range inventory.Workers {
 		if _, duplicate := workerIDs[worker.ID]; duplicate {
@@ -261,6 +359,10 @@ func validateScoringInputs(
 	if err := validateProfileSnapshot(profile); err != nil {
 		return err
 	}
+	return nil
+}
+
+func validateScoringContext(request PlanScoringRequest) error {
 	if request.Adapter == "" || request.CoordinatorID == "" || request.CoordinatorInstanceID == "" {
 		return errors.New("score adapter and coordinator identity are required")
 	}
@@ -276,27 +378,26 @@ func validateScoringInputs(
 	if request.FallbackRTTMicros == 0 || request.FallbackBytesPerSecond == 0 {
 		return errors.New("score fallback RTT and bandwidth must be positive")
 	}
-	if len(request.Stages) != len(plan.Stages) {
-		return fmt.Errorf("score has %d stage estimates; plan has %d stages", len(request.Stages), len(plan.Stages))
+	return nil
+}
+
+func validateStageCostEstimate(estimate StageCostEstimate, decodeSteps uint64) error {
+	if estimate.LoadMemoryBytes == 0 || estimate.SequenceMemoryBytes == 0 ||
+		estimate.PrefillWireBytes == 0 || estimate.DecodeWireBytesPerStep == 0 ||
+		estimate.FallbackPrefillComputeMicros == 0 ||
+		estimate.FallbackDecodeComputeMicrosPerStep == 0 {
+		return errors.New("estimate is incomplete")
 	}
-	for index, estimate := range request.Stages {
-		if estimate.LoadMemoryBytes == 0 || estimate.SequenceMemoryBytes == 0 ||
-			estimate.PrefillWireBytes == 0 || estimate.DecodeWireBytesPerStep == 0 ||
-			estimate.FallbackPrefillComputeMicros == 0 ||
-			estimate.FallbackDecodeComputeMicrosPerStep == 0 {
-			return fmt.Errorf("score stage estimate %d is incomplete", index)
-		}
-		if _, overflow := addUint64(estimate.LoadMemoryBytes, estimate.SequenceMemoryBytes); overflow {
-			return fmt.Errorf("score stage estimate %d memory overflows uint64", index)
-		}
-		if _, overflow := multiplyUint64(estimate.DecodeWireBytesPerStep, request.DecodeSteps); overflow {
-			return fmt.Errorf("score stage estimate %d decode bytes overflow uint64", index)
-		}
-		if _, overflow := multiplyUint64(
-			estimate.FallbackDecodeComputeMicrosPerStep, request.DecodeSteps,
-		); overflow {
-			return fmt.Errorf("score stage estimate %d fallback compute overflows uint64", index)
-		}
+	if _, overflow := addUint64(estimate.LoadMemoryBytes, estimate.SequenceMemoryBytes); overflow {
+		return errors.New("memory overflows uint64")
+	}
+	if _, overflow := multiplyUint64(estimate.DecodeWireBytesPerStep, decodeSteps); overflow {
+		return errors.New("decode bytes overflow uint64")
+	}
+	if _, overflow := multiplyUint64(
+		estimate.FallbackDecodeComputeMicrosPerStep, decodeSteps,
+	); overflow {
+		return errors.New("fallback compute overflows uint64")
 	}
 	return nil
 }
