@@ -106,11 +106,12 @@ hosted Mac runners remaining alive simultaneously; a provider eviction can
 cancel an otherwise healthy worker, so that infrastructure-sensitive result is
 kept out of required pull-request status.
 
-Every model request has a deadline, the coordinator proof has a 45-minute
-limit, every macOS daemon has a 50-minute watchdog, and all six jobs have a
-60-minute job timeout. The coordinator posts the workflow-only completion
-signal to every discovered worker on both success and failure. Proof-owned
-shards are unloaded between gates and again in a bounded final cleanup.
+Every model request has a deadline, worker/coordinator rendezvous is bounded at
+15 minutes, and the coordinator proof has a 45-minute limit. Every macOS daemon
+has a 70-minute watchdog, while each serving and coordinator job has an
+80-minute timeout. The coordinator posts the workflow-only completion signal to
+every discovered worker on both success and failure. Proof-owned shards are
+unloaded between gates and again in a bounded final cleanup.
 
 The existing local N-stage, two-Mac correctness, failure, and pooled-memory
 workflows remain independent regression paths. This proof adds real five-host
