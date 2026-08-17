@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	hybridInventoryTimeout  = registry.DefaultLeaseTTL + 5*time.Second
-	hybridControlRPCTimeout = 5 * time.Second
+	hybridLeaseDrainAllowance = 5 * time.Second
+	hybridControlRPCTimeout   = 5 * time.Second
 )
 
 func runHybrid(
@@ -46,9 +46,7 @@ func runHybrid(
 	if err := registerSyntheticPeers(ctx, client, specs, &registered); err != nil {
 		return result, err
 	}
-	inventoryContext, cancelInventory := context.WithTimeout(ctx, hybridControlRPCTimeout)
-	inventory, err = client.Inventory(inventoryContext)
-	cancelInventory()
+	inventory, err = snapshotHybridInventory(ctx, client)
 	if err != nil {
 		return result, fmt.Errorf("snapshot hybrid inventory: %w", err)
 	}
@@ -136,23 +134,26 @@ func waitForRealInventory(
 	nodes []Node,
 	proofOwnedWorkerIDs []string,
 ) (registry.Inventory, error) {
-	waitContext, cancel := context.WithTimeout(ctx, hybridInventoryTimeout)
+	inventory, err := snapshotHybridInventory(ctx, client)
+	if err != nil {
+		return registry.Inventory{}, fmt.Errorf("sample hybrid membership: %w", err)
+	}
+	waitTimeout, err := hybridLeaseDrainTimeout(inventory.LeaseTTLMillis)
+	if err != nil {
+		return registry.Inventory{}, err
+	}
+	waitContext, cancel := context.WithTimeout(ctx, waitTimeout)
 	defer cancel()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
-	lastReason := "membership was not sampled"
+	lastReason := "membership is not ready"
 	for {
-		inventory, err := client.Inventory(waitContext)
-		if err == nil {
-			if ready, reason := realInventoryReady(
-				inventory, nodes, proofOwnedWorkerIDs,
-			); ready {
-				return inventory, nil
-			} else {
-				lastReason = reason
-			}
+		if ready, reason := realInventoryReady(
+			inventory, nodes, proofOwnedWorkerIDs,
+		); ready {
+			return inventory, nil
 		} else {
-			lastReason = err.Error()
+			lastReason = reason
 		}
 		select {
 		case <-waitContext.Done():
@@ -162,7 +163,33 @@ func waitForRealInventory(
 			)
 		case <-ticker.C:
 		}
+		inventory, err = snapshotHybridInventory(waitContext, client)
+		if err != nil {
+			lastReason = err.Error()
+		}
 	}
+}
+
+func snapshotHybridInventory(
+	ctx context.Context,
+	client *registry.Client,
+) (registry.Inventory, error) {
+	rpcContext, cancel := context.WithTimeout(ctx, hybridControlRPCTimeout)
+	defer cancel()
+	return client.Inventory(rpcContext)
+}
+
+func hybridLeaseDrainTimeout(leaseTTLMillis int64) (time.Duration, error) {
+	if leaseTTLMillis <= 0 {
+		return 0, errors.New("hybrid inventory lease TTL must be positive")
+	}
+	const maxInt64 = int64(^uint64(0) >> 1)
+	maxLeaseMillis := (maxInt64 - int64(hybridLeaseDrainAllowance)) /
+		int64(time.Millisecond)
+	if leaseTTLMillis > maxLeaseMillis {
+		return 0, errors.New("hybrid inventory lease TTL is too large")
+	}
+	return time.Duration(leaseTTLMillis)*time.Millisecond + hybridLeaseDrainAllowance, nil
 }
 
 func realInventoryReady(

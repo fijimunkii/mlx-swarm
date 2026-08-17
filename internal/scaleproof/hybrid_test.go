@@ -71,6 +71,22 @@ func TestRealInventoryReadinessWaitsForProofOwnedLeases(t *testing.T) {
 	}
 }
 
+func TestHybridLeaseDrainTimeoutUsesAdvertisedTTL(t *testing.T) {
+	timeout, err := hybridLeaseDrainTimeout(60_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if timeout != 60*time.Second+hybridLeaseDrainAllowance {
+		t.Fatalf("timeout = %s", timeout)
+	}
+	if _, err := hybridLeaseDrainTimeout(0); err == nil {
+		t.Fatal("non-positive lease TTL was accepted")
+	}
+	if _, err := hybridLeaseDrainTimeout(int64(^uint64(0) >> 1)); err == nil {
+		t.Fatal("overflowing lease TTL was accepted")
+	}
+}
+
 func TestFailedSyntheticRegistrationRemainsEligibleForCleanup(t *testing.T) {
 	removed := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

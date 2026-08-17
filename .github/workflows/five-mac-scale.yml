@@ -27,7 +27,7 @@ jobs:
       matrix:
         index: [0, 1, 2, 3, 4]
     runs-on: macos-15
-    timeout-minutes: 75
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -110,7 +110,7 @@ jobs:
             "$daemon" &
           daemon_pid=$!
           (
-            for _ in {1..100}; do
+            for _ in {1..140}; do
               sleep 30
               if ! kill -0 "$daemon_pid" 2>/dev/null; then
                 exit 0
@@ -124,7 +124,7 @@ jobs:
                   '${{ matrix.index }}' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >&2
               fi
             done
-            echo "five-Mac worker watchdog expired after 50 minutes" >&2
+            echo "five-Mac worker watchdog expired after 70 minutes" >&2
             kill -TERM "$daemon_pid" 2>/dev/null || true
           ) &
           watchdog_pid=$!
@@ -173,7 +173,7 @@ jobs:
   linux-coordinator:
     needs: build-worker
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

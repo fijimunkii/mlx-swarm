@@ -34,7 +34,8 @@ instance with `swarm-control`, and does not expose either service publicly. The
 artifact records the coordinator ID, five stable node IDs, instance-bound
 endpoints, probe time, device/runtime capabilities, physical memory, and MLX
 memory limits. Independently scheduled workers and the coordinator share a
-bounded 15-minute rendezvous window before the proof fails startup.
+bounded 15-minute rendezvous window before the proof fails startup. Worker
+watchdogs then cover that rendezvous plus the complete 45-minute proof budget.
 
 ## Four gates in one run
 
