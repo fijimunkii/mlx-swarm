@@ -226,7 +226,7 @@ Once explicit N-stage execution is correct, let the control plane build the plan
   backend
 - [ ] place complementary ranges subject to memory, adapter, fingerprint,
   topology, input/output ownership, and retained-state constraints
-- [ ] score plans by observed compute, transfer cost, health, memory pressure,
+- [x] score plans by observed compute, transfer cost, health, memory pressure,
   and shard reuse
 - [ ] replan between sequences when workers join, leave, slow down, or fail
 - [ ] emit selected stages plus rejected-node reasons as machine-readable evidence

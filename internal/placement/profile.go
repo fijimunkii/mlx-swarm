@@ -30,7 +30,8 @@ type ProfileConfig struct {
 
 // LinkObservation is one directional topology measurement. RTTMicros is
 // always required. PayloadBytes and ElapsedMicros are either both zero for an
-// RTT-only probe or both positive for an effective transfer measurement.
+// RTT-only probe or both positive for a payload-transfer measurement whose
+// elapsed interval excludes the separately reported RTT.
 type LinkObservation struct {
 	SourceID         string    `json:"sourceID"`
 	SourceInstanceID string    `json:"sourceInstanceID"`

@@ -1,4 +1,4 @@
-# Mesh placement eligibility
+# Mesh placement and scoring
 
 The first automatic-placement primitive evaluates every current inventory
 worker against the hard constraints for one proposed contiguous model stage.
@@ -83,11 +83,12 @@ samples contain only timestamps and numeric measurements.
 
 Directional link observations are keyed by source and target process
 identities, protocol, and tensor encoding. Every observation carries an RTT.
-Payload probes may also carry bytes and elapsed time, producing an effective
-bytes-per-second distribution. The same shape represents coordinator-to-worker
-links today and direct worker-to-worker links if a future transport makes those
-relevant. Process identities prevent measurements from silently crossing a
-worker restart or coordinator run.
+Payload probes may also carry bytes and the payload-transfer interval excluding
+the separately reported RTT, producing an effective bytes-per-second
+distribution. The same shape represents coordinator-to-worker links today and
+direct worker-to-worker links if a future transport makes those relevant.
+Process identities prevent measurements from silently crossing a worker
+restart or coordinator run.
 
 Compute observations are keyed by worker process, backend, model/checkpoint,
 operation, and exact layer range. Their summaries preserve input-token and
@@ -115,10 +116,63 @@ state remain in the server-stamped membership inventory rather than being
 duplicated into historical profiles. The planner must combine a fresh inventory
 snapshot with a fresh topology profile.
 
+## Complete-plan scoring
+
+`placement.ScorePlan` validates and scores a caller-proposed immutable
+`generation.ExecutionPlan`. The plan must pin the exact decimal inventory
+revision, and the inventory and profile snapshots must share one generation
+time. This prevents a score from silently mixing worker state and measurements
+from different scheduling instants.
+
+The scoring request supplies the adapter, transport, coordinator process
+identity, prefill token count, decode step count, and one resource estimate per
+stage. Every stage estimate includes load and sequence memory, prefill and
+per-decode wire bytes, and conservative prefill and per-decode compute
+fallbacks. RTT and bandwidth fallbacks are also mandatory. A plan can therefore
+still be scored when the mesh has incomplete measurements; the result records
+the normalized request, which components used exact profile evidence, and the
+exact profile summaries selected for those components.
+
+For every stage, the scorer first calls the hard-constraint evaluator against
+the complete inventory. Its result retains every accepted and rejected worker,
+plus the selected target's candidate evidence. An ineligible selected target
+makes the complete plan ineligible and leaves all cost and risk fields at zero.
+Eligibility is never traded for a lower estimated cost.
+
+Fresh compute evidence matches the exact worker process, backend, model and
+checkpoint, operation, and layer range. The scorer scales the median measured
+compute time by the requested token count, using the supplied fallback when no
+exact series exists. A worker restart changes its process identity and therefore
+cannot inherit an earlier process's compute or link evidence.
+
+The current runtime relays every stage through the coordinator, so transfer
+cost uses the exact coordinator-process-to-worker-process link. Prefill cost is
+one RTT plus its payload bytes at the median measured bandwidth. Decode cost is
+the same calculation for each requested decode step. Missing RTT or bandwidth
+components use their explicit fallbacks independently. Direct worker-to-worker
+links can replace this topology model when the runtime transport changes.
+
+The plan score keeps unlike signals visible and compares eligible plans in this
+stable order:
+
+1. estimated sequential compute plus transfer time;
+2. recent worker failures;
+3. current memory pressure;
+4. model bytes that require a new load;
+5. total additional memory required;
+6. worker restart count;
+7. stage count; and
+8. immutable plan revision as the final lexical tie-breaker.
+
+Exact retained runtime shard identity reduces both new-load and additional
+memory cost without relaxing sequence-capacity or retained-budget constraints.
+The evidence also reports stage and operation counts backed by profiles, making
+fallback-heavy scores distinguishable from well-measured ones.
+
 ## Current boundary
 
-This package evaluates a proposed stage; it does not yet choose stage count,
-layer boundaries, workers, or a complete execution plan. The profile accepts
-probe and successful-generation evidence but does not schedule active probes or
-score compute and transfer cost. Those policy layers consume these contracts
-next, while the existing explicit-plan path remains the diagnostic fallback.
+This package evaluates proposed stages and scores complete proposed plans. It
+does not yet enumerate stage counts, layer boundaries, or worker assignments,
+choose the best plan, or schedule active probes. That search layer consumes
+these contracts next, while the existing explicit-plan path remains the
+diagnostic fallback.
