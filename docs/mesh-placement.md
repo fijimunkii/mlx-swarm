@@ -236,7 +236,15 @@ construction and rejection evidence instead of a stale or partial plan.
 `Prepare` also reserves one locally coordinated open-sequence slot for every
 selected shard before returning. Concurrent preparation cannot over-admit the
 last advertised slot. `Generate` releases the reservation after success or
-failure; callers that abandon a prepared sequence must call `Close`.
+failure when worker cleanup is confirmed; callers that abandon a prepared
+sequence must call `Close`. An ambiguous close quarantines the slot until a
+newer worker status reports that the shard has no open sequence or that worker
+incarnation leaves membership.
+
+Selected-worker metadata checks and shard loads run under a configurable
+preparation timeout (ten minutes by default), so a stalled endpoint cannot hold
+an admission reservation forever during setup. A shorter parent deadline still
+wins.
 
 `mesh.HTTPResolver` binds the current trusted-network JSON worker endpoint.
 Callers that need a deterministic diagnostic path can continue to construct an

@@ -61,26 +61,27 @@ type PlannedTiming struct {
 // arbitrary ordered execution plan. Per-stage arrays are aligned with
 // ExecutionPlan.Stages.
 type PlannedResult struct {
-	Model                 string        `json:"model"`
-	ModelType             string        `json:"modelType"`
-	CheckpointFingerprint string        `json:"checkpointFingerprint"`
-	CheckpointBytes       uint64        `json:"checkpointBytes"`
-	ExecutionPlan         ExecutionPlan `json:"executionPlan"`
-	SequenceID            string        `json:"sequenceID"`
-	Prompt                string        `json:"prompt"`
-	PromptTokenIDs        []int32       `json:"promptTokenIDs"`
-	GeneratedTokenIDs     []int32       `json:"generatedTokenIDs"`
-	Text                  string        `json:"text"`
-	MaxTokens             int           `json:"maxTokens"`
-	StopReason            string        `json:"stopReason"`
-	EOSTokenID            *int32        `json:"eosTokenID,omitempty"`
-	RTol                  float64       `json:"rtol"`
-	ATol                  float64       `json:"atol"`
-	ForwardTimeoutMillis  int64         `json:"forwardTimeoutMillis"`
-	StageKVCacheBytes     []int         `json:"stageKVCacheBytes"`
-	Timing                PlannedTiming `json:"timing"`
-	Verification          *Verification `json:"verification,omitempty"`
-	Failure               *Failure      `json:"failure,omitempty"`
+	Model                    string        `json:"model"`
+	ModelType                string        `json:"modelType"`
+	CheckpointFingerprint    string        `json:"checkpointFingerprint"`
+	CheckpointBytes          uint64        `json:"checkpointBytes"`
+	ExecutionPlan            ExecutionPlan `json:"executionPlan"`
+	SequenceID               string        `json:"sequenceID"`
+	Prompt                   string        `json:"prompt"`
+	PromptTokenIDs           []int32       `json:"promptTokenIDs"`
+	GeneratedTokenIDs        []int32       `json:"generatedTokenIDs"`
+	Text                     string        `json:"text"`
+	MaxTokens                int           `json:"maxTokens"`
+	StopReason               string        `json:"stopReason"`
+	EOSTokenID               *int32        `json:"eosTokenID,omitempty"`
+	RTol                     float64       `json:"rtol"`
+	ATol                     float64       `json:"atol"`
+	ForwardTimeoutMillis     int64         `json:"forwardTimeoutMillis"`
+	SequenceCleanupConfirmed bool          `json:"sequenceCleanupConfirmed"`
+	StageKVCacheBytes        []int         `json:"stageKVCacheBytes"`
+	Timing                   PlannedTiming `json:"timing"`
+	Verification             *Verification `json:"verification,omitempty"`
+	Failure                  *Failure      `json:"failure,omitempty"`
 }
 
 // PlannedSession is the canonical generation runtime for an explicit ordered
@@ -250,19 +251,20 @@ func (s *PlannedSession) Generate(
 ) (result PlannedResult, returnErr error) {
 	started := time.Now()
 	defer func() { result.Timing.TotalMicros = time.Since(started).Microseconds() }()
+	result.SequenceCleanupConfirmed = true
 	if err := ctx.Err(); err != nil {
-		return PlannedResult{}, err
+		return result, err
 	}
 	if request.Prompt == "" {
-		return PlannedResult{}, errors.New("prompt is required")
+		return result, errors.New("prompt is required")
 	}
 	if request.MaxTokens <= 0 {
-		return PlannedResult{}, errors.New("max tokens must be positive")
+		return result, errors.New("max tokens must be positive")
 	}
 	if request.SequenceID == "" {
 		sequenceID, err := randomSequenceID()
 		if err != nil {
-			return PlannedResult{}, err
+			return result, err
 		}
 		request.SequenceID = sequenceID
 	}
@@ -273,8 +275,9 @@ func (s *PlannedSession) Generate(
 		CheckpointBytes:       s.model.CheckpointBytes, ExecutionPlan: cloneExecutionPlan(s.plan),
 		SequenceID: request.SequenceID, Prompt: request.Prompt, MaxTokens: request.MaxTokens,
 		RTol: s.config.RTol, ATol: s.config.ATol,
-		ForwardTimeoutMillis: s.config.ForwardTimeout.Milliseconds(),
-		StageKVCacheBytes:    make([]int, len(s.targets)),
+		ForwardTimeoutMillis:     s.config.ForwardTimeout.Milliseconds(),
+		SequenceCleanupConfirmed: true,
+		StageKVCacheBytes:        make([]int, len(s.targets)),
 		Timing: PlannedTiming{
 			SessionSetupMicros: s.setupMicros,
 			StageComputeMicros: make([]uint64, len(s.targets)),
@@ -310,11 +313,13 @@ func (s *PlannedSession) Generate(
 		})
 	}
 	point = failurePoint{phase: "open_sequences"}
+	result.SequenceCleanupConfirmed = false
 	sequences, err := workerproc.OpenSequences(ctx, targets, request.SequenceID)
 	if sequences != nil {
 		defer func() {
 			cleanupErr := sequences.Cleanup()
 			if cleanupErr == nil {
+				result.SequenceCleanupConfirmed = true
 				return
 			}
 			if returnErr == nil {
@@ -326,6 +331,9 @@ func (s *PlannedSession) Generate(
 		}()
 	}
 	if err != nil {
+		if sequences == nil {
+			result.SequenceCleanupConfirmed = true
+		}
 		return result, fmt.Errorf("open generation sequences: %w", err)
 	}
 

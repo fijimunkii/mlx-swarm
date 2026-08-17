@@ -21,6 +21,7 @@ import (
 const (
 	SchemaVersion           = 1
 	defaultSnapshotAttempts = 4
+	DefaultPrepareTimeout   = 10 * time.Minute
 )
 
 var (
@@ -98,11 +99,12 @@ func (resolver HTTPResolver) Resolve(binding TargetBinding) (workerproc.Persiste
 // membership and profile snapshots. Preparing another sequence always takes
 // new snapshots and constructs a new plan.
 type SequenceScheduler struct {
-	mu           sync.Mutex
-	inventory    inventorySource
-	profiles     profileSource
-	resolver     TargetResolver
-	reservations map[sequenceReservationKey]int
+	mu             sync.Mutex
+	inventory      inventorySource
+	profiles       profileSource
+	resolver       TargetResolver
+	prepareTimeout time.Duration
+	reservations   map[sequenceReservationKey]sequenceReservationState
 }
 
 type sequenceReservationKey struct {
@@ -111,18 +113,49 @@ type sequenceReservationKey struct {
 	shardID    string
 }
 
+type sequenceReservationState struct {
+	active        int
+	poisonedAfter []time.Time
+}
+
+// SchedulerOption configures bounded runtime behavior.
+type SchedulerOption func(*SequenceScheduler) error
+
+// WithPrepareTimeout bounds selected-worker metadata checks and shard loads.
+// The parent context may impose a shorter deadline.
+func WithPrepareTimeout(timeout time.Duration) SchedulerOption {
+	return func(scheduler *SequenceScheduler) error {
+		if timeout < time.Millisecond {
+			return errors.New("mesh preparation timeout must be at least 1ms")
+		}
+		scheduler.prepareTimeout = timeout
+		return nil
+	}
+}
+
 func NewSequenceScheduler(
 	inventory inventorySource,
 	profiles profileSource,
 	resolver TargetResolver,
+	options ...SchedulerOption,
 ) (*SequenceScheduler, error) {
 	if inventory == nil || profiles == nil || resolver == nil {
 		return nil, errors.New("mesh scheduler requires inventory, profiles, and target resolution")
 	}
-	return &SequenceScheduler{
+	scheduler := &SequenceScheduler{
 		inventory: inventory, profiles: profiles, resolver: resolver,
-		reservations: make(map[sequenceReservationKey]int),
-	}, nil
+		prepareTimeout: DefaultPrepareTimeout,
+		reservations:   make(map[sequenceReservationKey]sequenceReservationState),
+	}
+	for _, option := range options {
+		if option == nil {
+			continue
+		}
+		if err := option(scheduler); err != nil {
+			return nil, err
+		}
+	}
+	return scheduler, nil
 }
 
 // Prepare selects and materializes the current plan. A nil session with a
@@ -154,7 +187,7 @@ func (scheduler *SequenceScheduler) Prepare(
 		return nil, selection, err
 	}
 	selection.Targets = bindings
-	release, err := scheduler.reserveSequenceCapacity(inventory, construction.SelectedPlan.Plan)
+	reservation, err := scheduler.reserveSequenceCapacity(inventory, construction.SelectedPlan.Plan)
 	if err != nil {
 		return nil, selection, err
 	}
@@ -162,29 +195,31 @@ func (scheduler *SequenceScheduler) Prepare(
 	for index, binding := range bindings {
 		caller, resolveErr := scheduler.resolver.Resolve(binding)
 		if resolveErr != nil {
-			release()
+			reservation.finish(true)
 			return nil, selection, fmt.Errorf("resolve selected stage %d: %w", index, resolveErr)
 		}
 		if caller == nil {
-			release()
+			reservation.finish(true)
 			return nil, selection, fmt.Errorf("resolve selected stage %d returned no caller", index)
 		}
 		targets[index] = generation.ExecutionTarget{TargetID: binding.WorkerID, Caller: caller}
 	}
+	prepareContext, cancelPrepare := context.WithTimeout(ctx, scheduler.prepareTimeout)
+	defer cancelPrepare()
 	session, err := generation.NewPlannedSession(
-		ctx, construction.SelectedPlan.Plan, targets, reference, config,
+		prepareContext, construction.SelectedPlan.Plan, targets, reference, config,
 	)
 	if err != nil {
-		release()
+		reservation.finish(true)
 		return nil, selection, fmt.Errorf("prepare selected mesh plan: %w", err)
 	}
-	return &ScheduledSequence{session: session, release: release}, selection, nil
+	return &ScheduledSequence{session: session, reservation: reservation}, selection, nil
 }
 
 func (scheduler *SequenceScheduler) reserveSequenceCapacity(
 	inventory registry.Inventory,
 	plan generation.ExecutionPlan,
-) (func(), error) {
+) (*sequenceReservation, error) {
 	workers := make(map[string]registry.Worker, len(inventory.Workers))
 	for _, worker := range inventory.Workers {
 		workers[worker.ID] = worker
@@ -192,6 +227,7 @@ func (scheduler *SequenceScheduler) reserveSequenceCapacity(
 	keys := make([]sequenceReservationKey, len(plan.Stages))
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
+	scheduler.reconcilePoisonedLocked(workers)
 	for index, stage := range plan.Stages {
 		worker, found := workers[stage.TargetID]
 		if !found {
@@ -208,32 +244,116 @@ func (scheduler *SequenceScheduler) reserveSequenceCapacity(
 			}
 		}
 		limit := worker.Capabilities.Admission.MaxOpenSequencesPerShard
-		if reportedOpen+scheduler.reservations[key] >= limit {
+		state := scheduler.reservations[key]
+		localOpen := state.active + len(state.poisonedAfter)
+		if reportedOpen+localOpen >= limit {
 			return nil, fmt.Errorf(
 				"%w: worker %q instance %q shard %q has %d reported and %d local opens; limit is %d",
 				ErrSequenceCapacityReserved, worker.ID, worker.InstanceID, stage.ShardID,
-				reportedOpen, scheduler.reservations[key], limit,
+				reportedOpen, localOpen, limit,
 			)
 		}
 		keys[index] = key
 	}
 	for _, key := range keys {
-		scheduler.reservations[key]++
+		state := scheduler.reservations[key]
+		state.active++
+		scheduler.reservations[key] = state
 	}
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			scheduler.mu.Lock()
-			defer scheduler.mu.Unlock()
-			for _, key := range keys {
-				if scheduler.reservations[key] <= 1 {
-					delete(scheduler.reservations, key)
-					continue
+	return &sequenceReservation{scheduler: scheduler, keys: keys}, nil
+}
+
+func (scheduler *SequenceScheduler) reconcilePoisonedLocked(
+	workers map[string]registry.Worker,
+) {
+	for key, state := range scheduler.reservations {
+		if len(state.poisonedAfter) == 0 {
+			continue
+		}
+		worker, found := workers[key.workerID]
+		if !found || worker.InstanceID != key.instanceID {
+			state.poisonedAfter = nil
+		} else {
+			open := 0
+			for _, shard := range worker.Status.RetainedShards {
+				if shard.ID == key.shardID {
+					open = shard.OpenSequenceCount
+					break
 				}
-				scheduler.reservations[key]--
 			}
-		})
-	}, nil
+			if open == 0 {
+				retained := state.poisonedAfter[:0]
+				for _, baseline := range state.poisonedAfter {
+					if !worker.StatusObservedAt.After(baseline) {
+						retained = append(retained, baseline)
+					}
+				}
+				state.poisonedAfter = retained
+			}
+		}
+		if state.active == 0 && len(state.poisonedAfter) == 0 {
+			delete(scheduler.reservations, key)
+			continue
+		}
+		scheduler.reservations[key] = state
+	}
+}
+
+type sequenceReservation struct {
+	scheduler *SequenceScheduler
+	keys      []sequenceReservationKey
+	once      sync.Once
+}
+
+func (reservation *sequenceReservation) finish(cleanupConfirmed bool) {
+	reservation.once.Do(func() {
+		if cleanupConfirmed {
+			reservation.scheduler.releaseReservation(reservation.keys)
+			return
+		}
+		reservation.scheduler.poisonReservation(reservation.keys)
+	})
+}
+
+func (scheduler *SequenceScheduler) releaseReservation(keys []sequenceReservationKey) {
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+	for _, key := range keys {
+		state := scheduler.reservations[key]
+		if state.active > 0 {
+			state.active--
+		}
+		if state.active == 0 && len(state.poisonedAfter) == 0 {
+			delete(scheduler.reservations, key)
+			continue
+		}
+		scheduler.reservations[key] = state
+	}
+}
+
+func (scheduler *SequenceScheduler) poisonReservation(keys []sequenceReservationKey) {
+	inventory := scheduler.inventory.Snapshot()
+	workers := make(map[string]registry.Worker, len(inventory.Workers))
+	for _, worker := range inventory.Workers {
+		workers[worker.ID] = worker
+	}
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+	for _, key := range keys {
+		state := scheduler.reservations[key]
+		if state.active > 0 {
+			state.active--
+		}
+		worker, found := workers[key.workerID]
+		if found && worker.InstanceID == key.instanceID {
+			state.poisonedAfter = append(state.poisonedAfter, worker.StatusObservedAt)
+		}
+		if state.active == 0 && len(state.poisonedAfter) == 0 {
+			delete(scheduler.reservations, key)
+			continue
+		}
+		scheduler.reservations[key] = state
+	}
 }
 
 func (scheduler *SequenceScheduler) snapshots() (
@@ -296,10 +416,10 @@ func selectedTargetBindings(
 // never consulted against newer inventory mid-sequence; a later request must
 // be admitted through SequenceScheduler.Prepare again.
 type ScheduledSequence struct {
-	mu      sync.Mutex
-	session *generation.PlannedSession
-	release func()
-	state   scheduledSequenceState
+	mu          sync.Mutex
+	session     *generation.PlannedSession
+	reservation *sequenceReservation
+	state       scheduledSequenceState
 }
 
 type scheduledSequenceState uint8
@@ -326,8 +446,9 @@ func (sequence *ScheduledSequence) Generate(
 	}
 	sequence.state = sequenceRunning
 	sequence.mu.Unlock()
-	defer sequence.finish()
-	return sequence.session.Generate(ctx, request)
+	result, err := sequence.session.Generate(ctx, request)
+	sequence.finish(result.SequenceCleanupConfirmed)
+	return result, err
 }
 
 // Close releases admission reserved by Prepare when the caller decides not to
@@ -341,10 +462,10 @@ func (sequence *ScheduledSequence) Close() error {
 		return ErrSequenceRunning
 	case sequencePrepared:
 		sequence.state = sequenceClosed
-		release := sequence.release
-		sequence.release = nil
+		reservation := sequence.reservation
+		sequence.reservation = nil
 		sequence.mu.Unlock()
-		release()
+		reservation.finish(true)
 		return nil
 	case sequenceFinished, sequenceClosed:
 		sequence.mu.Unlock()
@@ -355,11 +476,11 @@ func (sequence *ScheduledSequence) Close() error {
 	}
 }
 
-func (sequence *ScheduledSequence) finish() {
+func (sequence *ScheduledSequence) finish(cleanupConfirmed bool) {
 	sequence.mu.Lock()
 	sequence.state = sequenceFinished
-	release := sequence.release
-	sequence.release = nil
+	reservation := sequence.reservation
+	sequence.reservation = nil
 	sequence.mu.Unlock()
-	release()
+	reservation.finish(cleanupConfirmed)
 }

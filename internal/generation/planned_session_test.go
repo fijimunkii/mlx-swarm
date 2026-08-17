@@ -40,6 +40,9 @@ func TestPlannedSessionGeneratesAndVerifiesAcrossFiveStages(t *testing.T) {
 	if result.StopReason != "max_tokens" {
 		t.Fatalf("stop reason = %q", result.StopReason)
 	}
+	if !result.SequenceCleanupConfirmed {
+		t.Fatal("successful generation did not confirm sequence cleanup")
+	}
 	if len(result.ExecutionPlan.Stages) != 5 {
 		t.Fatalf("execution stages = %d", len(result.ExecutionPlan.Stages))
 	}
@@ -259,6 +262,28 @@ func TestPlannedSessionRollsBackPartialStageOpens(t *testing.T) {
 	assertPlannedNoSequences(t, workers...)
 }
 
+func TestPlannedSessionReportsUnconfirmedSequenceCleanup(t *testing.T) {
+	workers, _, plan, targets := plannedFakeSwarm(
+		t, []int32{3}, StageResponseSampledToken,
+	)
+	workers[0].failClose = true
+	session, err := NewPlannedSession(
+		context.Background(), plan, targets, nil, PlannedSessionConfig{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := session.Generate(context.Background(), Request{
+		Prompt: "hello", MaxTokens: 1, SequenceID: "cleanup-failure",
+	})
+	if err == nil || result.SequenceCleanupConfirmed {
+		t.Fatalf("cleanup result=%+v error=%v", result, err)
+	}
+	workers[0].mu.Lock()
+	workers[0].failClose = false
+	workers[0].mu.Unlock()
+}
+
 func TestPlannedSessionRollbackPreservesAnotherOwnersCollidingSequence(t *testing.T) {
 	workers, _, plan, targets := plannedFakeSwarm(
 		t, []int32{3}, StageResponseTensor,
@@ -388,6 +413,7 @@ type plannedFakeWorker struct {
 	failCommand string
 	inferErr    error
 	failOpen    bool
+	failClose   bool
 	fingerprint string
 }
 
@@ -460,6 +486,9 @@ func (worker *plannedFakeWorker) Call(
 	case "closeSequence":
 		if request.Sequence == nil {
 			return workerproc.PersistentResponse{}, errors.New("missing sequence request")
+		}
+		if worker.failClose {
+			return workerproc.PersistentResponse{}, errors.New("injected close transport failure")
 		}
 		owner, exists := worker.sequences[request.Sequence.SequenceID]
 		if !exists {

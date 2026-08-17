@@ -283,6 +283,114 @@ func TestSequenceSchedulerReservesAndReleasesShardAdmission(t *testing.T) {
 	}
 }
 
+func TestSequenceSchedulerQuarantinesUnconfirmedCleanupUntilFreshStatus(t *testing.T) {
+	now := time.Date(2026, time.August, 17, 2, 45, 0, 0, time.UTC)
+	membership := registry.New(time.Minute, registry.WithClock(func() time.Time { return now }))
+	profiles, err := placement.NewProfileStore(placement.ProfileConfig{
+		MaxAge: time.Minute, MaxSeries: 16,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callers := map[string]*schedulerMetadataWorker{}
+	for _, id := range []string{"worker-a", "worker-b"} {
+		registration := schedulerRegistration(id)
+		registration.Capabilities.Admission.MaxOpenSequencesPerShard = 1
+		if _, err := membership.Register(registration); err != nil {
+			t.Fatal(err)
+		}
+		callers[id] = newSchedulerMetadataWorker()
+	}
+	scheduler, err := NewSequenceScheduler(
+		membership,
+		profiles,
+		TargetResolverFunc(func(binding TargetBinding) (workerproc.PersistentCaller, error) {
+			return callers[binding.WorkerID], nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := scheduler.Prepare(
+		context.Background(), schedulerPlanRequest(), nil, generation.PlannedSessionConfig{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.finish(false)
+	if second, _, err := scheduler.Prepare(
+		context.Background(), schedulerPlanRequest(), nil, generation.PlannedSessionConfig{},
+	); second != nil || !errors.Is(err, ErrSequenceCapacityReserved) {
+		t.Fatalf("ambiguous cleanup was not quarantined: sequence=%v err=%v", second, err)
+	}
+
+	now = now.Add(time.Second)
+	for _, id := range []string{"worker-a", "worker-b"} {
+		updateSchedulerStatus(t, membership, id, func(*registry.Status) {})
+	}
+	afterFreshStatus, _, err := scheduler.Prepare(
+		context.Background(), schedulerPlanRequest(), nil, generation.PlannedSessionConfig{},
+	)
+	if err != nil {
+		t.Fatalf("fresh empty status did not clear quarantine: %v", err)
+	}
+	if err := afterFreshStatus.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSequenceSchedulerBoundsPreparationAndReleasesReservation(t *testing.T) {
+	now := time.Date(2026, time.August, 17, 2, 50, 0, 0, time.UTC)
+	membership := registry.New(time.Minute, registry.WithClock(func() time.Time { return now }))
+	profiles, err := placement.NewProfileStore(placement.ProfileConfig{
+		MaxAge: time.Minute, MaxSeries: 16,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callers := map[string]workerproc.PersistentCaller{}
+	for _, id := range []string{"worker-a", "worker-b"} {
+		registration := schedulerRegistration(id)
+		registration.Capabilities.Admission.MaxOpenSequencesPerShard = 1
+		if _, err := membership.Register(registration); err != nil {
+			t.Fatal(err)
+		}
+		callers[id] = contextBlockingWorker{}
+	}
+	scheduler, err := NewSequenceScheduler(
+		membership,
+		profiles,
+		TargetResolverFunc(func(binding TargetBinding) (workerproc.PersistentCaller, error) {
+			return callers[binding.WorkerID], nil
+		}),
+		WithPrepareTimeout(20*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if sequence, _, err := scheduler.Prepare(
+		context.Background(), schedulerPlanRequest(), nil, generation.PlannedSessionConfig{},
+	); sequence != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("bounded prepare: sequence=%v err=%v", sequence, err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("bounded prepare took %s", elapsed)
+	}
+	for _, id := range []string{"worker-a", "worker-b"} {
+		callers[id] = newSchedulerMetadataWorker()
+	}
+	recovered, _, err := scheduler.Prepare(
+		context.Background(), schedulerPlanRequest(), nil, generation.PlannedSessionConfig{},
+	)
+	if err != nil {
+		t.Fatalf("failed setup retained reservation: %v", err)
+	}
+	if err := recovered.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSequenceSchedulerRetriesProfileSnapshotRace(t *testing.T) {
 	now := time.Date(2026, time.August, 17, 3, 0, 0, 0, time.UTC)
 	inventory := schedulerInventory(now, schedulerRegistration("worker-a"), schedulerRegistration("worker-b"))
@@ -456,6 +564,16 @@ func planTargetIDs(plan generation.ExecutionPlan) []string {
 type schedulerMetadataWorker struct {
 	mu     sync.Mutex
 	loaded []workerproc.PersistentShardSnapshot
+}
+
+type contextBlockingWorker struct{}
+
+func (contextBlockingWorker) Call(
+	ctx context.Context,
+	_ workerproc.PersistentRequest,
+) (workerproc.PersistentResponse, error) {
+	<-ctx.Done()
+	return workerproc.PersistentResponse{}, ctx.Err()
 }
 
 func newSchedulerMetadataWorker() *schedulerMetadataWorker { return &schedulerMetadataWorker{} }
