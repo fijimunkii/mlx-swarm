@@ -242,12 +242,15 @@ selected shard, one worker-wide request slot, and the selected stage's
 incremental memory before returning. Concurrent preparation cannot over-admit
 the last advertised slot or independently spend the same available-memory
 snapshot. Model-load memory remains reserved after setup until a newer dynamic
-status reflects the load; confirmed cleanup immediately releases the sequence
-memory reserve. `Generate` releases request and shard reservations after
+status sampled on that worker after the load reflects it; controller delivery
+time alone is not sufficient. Confirmed cleanup immediately releases the
+sequence memory reserve. `Generate` releases request and shard reservations after
 success or failure when worker cleanup is confirmed; callers that abandon a
 prepared sequence must call `Close`. Ambiguous cleanup quarantines the shard
-slot and sequence memory until a newer status accounts for the outcome or that
-worker incarnation leaves membership.
+slot and sequence memory. The scheduler takes a bounded post-cleanup state
+observation; a later heartbeat can reconcile the quarantine only when its
+worker-daemon observation sequence is ordered after that observation and reports no open
+sequence, or when that worker incarnation leaves membership.
 
 Selected-worker metadata checks and shard loads run under a configurable
 preparation timeout (ten minutes by default), so a stalled endpoint cannot hold

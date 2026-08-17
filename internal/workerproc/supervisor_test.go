@@ -26,14 +26,22 @@ done
 	defer terminateSupervisor(t, supervisor)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := supervisor.Call(ctx, PersistentRequest{Command: "health"}); err != nil {
+	initial, err := supervisor.Call(ctx, PersistentRequest{Command: "health"})
+	if err != nil {
 		t.Fatalf("initial health: %v", err)
+	}
+	if initial.WorkerObservationSequence != 1 {
+		t.Fatalf("initial observation sequence = %d", initial.WorkerObservationSequence)
 	}
 	if err := supervisor.Kill(); err != nil {
 		t.Fatalf("kill: %v", err)
 	}
-	if _, err := supervisor.Call(ctx, PersistentRequest{Command: "health"}); err != nil {
+	restarted, err := supervisor.Call(ctx, PersistentRequest{Command: "health"})
+	if err != nil {
 		t.Fatalf("health after restart: %v", err)
+	}
+	if restarted.WorkerObservationSequence != 2 {
+		t.Fatalf("restarted observation sequence = %d", restarted.WorkerObservationSequence)
 	}
 	if supervisor.RestartCount() != 1 {
 		t.Fatalf("restart count = %d", supervisor.RestartCount())

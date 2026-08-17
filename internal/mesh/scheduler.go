@@ -19,9 +19,11 @@ import (
 )
 
 const (
-	SchemaVersion           = 1
-	defaultSnapshotAttempts = 4
-	DefaultPrepareTimeout   = 10 * time.Minute
+	SchemaVersion                   = 1
+	defaultSnapshotAttempts         = 4
+	DefaultPrepareTimeout           = 10 * time.Minute
+	DefaultObservationTimeout       = 10 * time.Second
+	unreconciledObservationSequence = ^uint64(0)
 )
 
 var (
@@ -40,6 +42,9 @@ var (
 	// ErrWorkerMemoryReserved reports that in-flight work or a recently loaded
 	// shard consumes memory not yet reflected in the membership snapshot.
 	ErrWorkerMemoryReserved = errors.New("selected worker memory is reserved")
+	// ErrWorkerObservationUnavailable reports that membership cannot order the
+	// selected worker's state against scheduler-bound mutation observations.
+	ErrWorkerObservationUnavailable = errors.New("selected worker observation sequence is unavailable")
 	// ErrSequenceRunning reports an invalid attempt to cancel a sequence while
 	// its single Generate call is still active.
 	ErrSequenceRunning = errors.New("scheduled sequence is running")
@@ -74,6 +79,8 @@ type SequenceSelection struct {
 // TargetResolver turns one frozen membership binding into a worker caller.
 // Production uses HTTPResolver; tests and embedded coordinators can provide a
 // resolver without coupling placement policy to a transport implementation.
+// State responses must carry the worker daemon's monotonically increasing
+// WorkerObservationSequence so admission can prove post-mutation ordering.
 type TargetResolver interface {
 	Resolve(TargetBinding) (workerproc.PersistentCaller, error)
 }
@@ -144,7 +151,7 @@ type sequenceReservationKey struct {
 
 type sequenceReservationState struct {
 	active        int
-	poisonedAfter []time.Time
+	poisonedAfter []uint64
 }
 
 type workerReservationKey struct {
@@ -153,9 +160,9 @@ type workerReservationKey struct {
 }
 
 type pendingMemoryReservation struct {
-	availableBytes uint64
-	retainedBytes  uint64
-	after          time.Time
+	availableBytes             uint64
+	retainedBytes              uint64
+	minimumObservationSequence uint64
 }
 
 type workerReservationState struct {
@@ -166,10 +173,17 @@ type workerReservationState struct {
 }
 
 type stageReservation struct {
-	sequenceKey         sequenceReservationKey
-	workerKey           workerReservationKey
-	loadMemoryBytes     uint64
-	sequenceMemoryBytes uint64
+	sequenceKey                sequenceReservationKey
+	workerKey                  workerReservationKey
+	loadMemoryBytes            uint64
+	sequenceMemoryBytes        uint64
+	caller                     workerproc.PersistentCaller
+	setupObserved              bool
+	setupShardPresent          bool
+	setupObservationSequence   uint64
+	cleanupObserved            bool
+	cleanupShardOpen           bool
+	cleanupObservationSequence uint64
 }
 
 type reservationOutcome struct {
@@ -269,14 +283,20 @@ func (scheduler *SequenceScheduler) Prepare(
 		}
 		targets[index] = generation.ExecutionTarget{TargetID: binding.WorkerID, Caller: caller}
 	}
+	reservation.bindCallers(targets)
 	prepareContext, cancelPrepare := context.WithTimeout(ctx, scheduler.prepareTimeout)
 	defer cancelPrepare()
 	session, err := generation.NewPlannedSession(
 		prepareContext, construction.SelectedPlan.Plan, targets, reference, config,
 	)
 	if err != nil {
+		_ = reservation.observeSetup(prepareContext, false)
 		reservation.finish(reservationOutcome{mayHaveLoaded: true, cleanupConfirmed: true})
 		return nil, selection, fmt.Errorf("prepare selected mesh plan: %w", err)
+	}
+	if err := reservation.observeSetup(prepareContext, true); err != nil {
+		reservation.finish(reservationOutcome{mayHaveLoaded: true, cleanupConfirmed: true})
+		return nil, selection, fmt.Errorf("observe prepared mesh plan: %w", err)
 	}
 	return &ScheduledSequence{session: session, reservation: reservation}, selection, nil
 }
@@ -301,6 +321,12 @@ func (scheduler *SequenceScheduler) reserveAdmission(
 		worker, found := workers[stage.TargetID]
 		if !found {
 			return nil, fmt.Errorf("reserve target %q is not in the planning snapshot", stage.TargetID)
+		}
+		if worker.Status.WorkerObservationSequence == 0 {
+			return nil, fmt.Errorf(
+				"%w: worker %q instance %q",
+				ErrWorkerObservationUnavailable, worker.ID, worker.InstanceID,
+			)
 		}
 		sequenceKey := sequenceReservationKey{
 			workerID: worker.ID, instanceID: worker.InstanceID, shardID: stage.ShardID,
@@ -412,9 +438,9 @@ func (scheduler *SequenceScheduler) reconcileReservationsLocked(
 			}
 			if open == 0 {
 				retained := state.poisonedAfter[:0]
-				for _, baseline := range state.poisonedAfter {
-					if !worker.StatusObservedAt.After(baseline) {
-						retained = append(retained, baseline)
+				for _, minimumObservation := range state.poisonedAfter {
+					if worker.Status.WorkerObservationSequence < minimumObservation {
+						retained = append(retained, minimumObservation)
 					}
 				}
 				state.poisonedAfter = retained
@@ -433,7 +459,7 @@ func (scheduler *SequenceScheduler) reconcileReservationsLocked(
 		} else if len(state.pendingMemory) > 0 {
 			retained := state.pendingMemory[:0]
 			for _, pending := range state.pendingMemory {
-				if !worker.StatusObservedAt.After(pending.after) {
+				if worker.Status.WorkerObservationSequence < pending.minimumObservationSequence {
 					retained = append(retained, pending)
 				}
 			}
@@ -454,8 +480,92 @@ type sequenceReservation struct {
 	once      sync.Once
 }
 
+func (reservation *sequenceReservation) bindCallers(targets []generation.ExecutionTarget) {
+	for index := range reservation.stages {
+		if index < len(targets) {
+			reservation.stages[index].caller = targets[index].Caller
+		}
+	}
+}
+
+func (reservation *sequenceReservation) observeSetup(
+	ctx context.Context,
+	requireShards bool,
+) error {
+	var observationErr error
+	for index := range reservation.stages {
+		stage := &reservation.stages[index]
+		observation, err := workerproc.ObserveState(ctx, stage.caller)
+		if err != nil {
+			observationErr = errors.Join(
+				observationErr,
+				fmt.Errorf("stage %d worker state: %w", index, err),
+			)
+			continue
+		}
+		if observation.ObservationSequence == 0 {
+			observationErr = errors.Join(
+				observationErr,
+				fmt.Errorf("stage %d worker state has no observation sequence", index),
+			)
+			continue
+		}
+		stage.setupObserved = true
+		stage.setupObservationSequence = observation.ObservationSequence
+		stage.setupShardPresent = stateHasShard(observation.State, stage.sequenceKey.shardID)
+		if requireShards && !stage.setupShardPresent {
+			observationErr = errors.Join(
+				observationErr,
+				fmt.Errorf("stage %d shard %q is absent after setup", index, stage.sequenceKey.shardID),
+			)
+		}
+	}
+	return observationErr
+}
+
+func (reservation *sequenceReservation) observeCleanup(ctx context.Context) {
+	for index := range reservation.stages {
+		stage := &reservation.stages[index]
+		observation, err := workerproc.ObserveState(ctx, stage.caller)
+		if err != nil {
+			continue
+		}
+		if observation.ObservationSequence == 0 {
+			continue
+		}
+		stage.cleanupObserved = true
+		stage.cleanupObservationSequence = observation.ObservationSequence
+		stage.cleanupShardOpen = stateShardOpen(
+			observation.State, stage.sequenceKey.shardID,
+		)
+	}
+}
+
+func stateHasShard(state *workerproc.PersistentWorkerState, shardID string) bool {
+	for _, shard := range state.LoadedShards {
+		if shard.ShardID == shardID {
+			return true
+		}
+	}
+	return false
+}
+
+func stateShardOpen(state *workerproc.PersistentWorkerState, shardID string) bool {
+	for _, shard := range state.LoadedShards {
+		if shard.ShardID == shardID {
+			return shard.OpenSequenceCount > 0
+		}
+	}
+	return false
+}
+
 func (reservation *sequenceReservation) finish(outcome reservationOutcome) {
 	reservation.once.Do(func() {
+		if !outcome.cleanupConfirmed {
+			ctx, cancel := context.WithTimeout(context.Background(), DefaultObservationTimeout)
+			reservation.observeCleanup(ctx)
+			cancel()
+		}
 		reservation.scheduler.finishReservation(reservation.stages, outcome)
 	})
 }
@@ -464,10 +574,7 @@ func (scheduler *SequenceScheduler) finishReservation(
 	stages []stageReservation,
 	outcome reservationOutcome,
 ) {
-	inventory := registry.Inventory{}
-	if outcome.mayHaveLoaded || !outcome.cleanupConfirmed {
-		inventory = scheduler.inventory.Snapshot()
-	}
+	inventory := scheduler.inventory.Snapshot()
 	workers := make(map[string]registry.Worker, len(inventory.Workers))
 	for _, worker := range inventory.Workers {
 		workers[worker.ID] = worker
@@ -475,14 +582,20 @@ func (scheduler *SequenceScheduler) finishReservation(
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
 	for _, stage := range stages {
+		stageCleanupConfirmed := outcome.cleanupConfirmed ||
+			(stage.cleanupObserved && !stage.cleanupShardOpen)
 		sequenceState := scheduler.reservations[stage.sequenceKey]
 		if sequenceState.active > 0 {
 			sequenceState.active--
 		}
 		worker, found := workers[stage.workerKey.workerID]
-		if !outcome.cleanupConfirmed && found && worker.InstanceID == stage.workerKey.instanceID {
+		if !stageCleanupConfirmed && found && worker.InstanceID == stage.workerKey.instanceID {
+			minimumObservation := unreconciledObservationSequence
+			if stage.cleanupObserved {
+				minimumObservation = observationAfter(stage.cleanupObservationSequence)
+			}
 			sequenceState.poisonedAfter = append(
-				sequenceState.poisonedAfter, worker.StatusObservedAt,
+				sequenceState.poisonedAfter, minimumObservation,
 			)
 		}
 		if sequenceState.active == 0 && len(sequenceState.poisonedAfter) == 0 {
@@ -504,20 +617,33 @@ func (scheduler *SequenceScheduler) finishReservation(
 		)
 		pendingAvailable := uint64(0)
 		pendingRetained := uint64(0)
-		if outcome.mayHaveLoaded {
+		minimumObservation := uint64(0)
+		if outcome.mayHaveLoaded && (!stage.setupObserved || stage.setupShardPresent) {
 			pendingAvailable = stage.loadMemoryBytes
+			if stage.setupObserved {
+				minimumObservation = observationAfter(stage.setupObservationSequence)
+			} else {
+				minimumObservation = unreconciledObservationSequence
+			}
 		}
-		if !outcome.cleanupConfirmed {
+		if !stageCleanupConfirmed {
 			pendingAvailable, _ = addReservationBytes(
 				pendingAvailable, stage.sequenceMemoryBytes,
 			)
 			pendingRetained = stage.sequenceMemoryBytes
+			cleanupMinimum := unreconciledObservationSequence
+			if stage.cleanupObserved {
+				cleanupMinimum = observationAfter(stage.cleanupObservationSequence)
+			}
+			if cleanupMinimum > minimumObservation {
+				minimumObservation = cleanupMinimum
+			}
 		}
 		if pendingAvailable > 0 && found && worker.InstanceID == stage.workerKey.instanceID {
 			workerState.pendingMemory = append(workerState.pendingMemory, pendingMemoryReservation{
-				availableBytes: pendingAvailable,
-				retainedBytes:  pendingRetained,
-				after:          worker.StatusObservedAt,
+				availableBytes:             pendingAvailable,
+				retainedBytes:              pendingRetained,
+				minimumObservationSequence: minimumObservation,
 			})
 		}
 		if workerState.activeRequests == 0 && workerState.activeAvailableBytes == 0 &&
@@ -558,6 +684,13 @@ func subtractAvailable(available, reserved uint64) uint64 {
 		return 0
 	}
 	return available - reserved
+}
+
+func observationAfter(sequence uint64) uint64 {
+	if sequence == 0 || sequence == unreconciledObservationSequence {
+		return unreconciledObservationSequence
+	}
+	return sequence + 1
 }
 
 func (scheduler *SequenceScheduler) snapshots() (

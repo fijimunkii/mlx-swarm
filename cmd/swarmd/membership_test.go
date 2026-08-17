@@ -27,9 +27,10 @@ func (runner fixtureCapabilityRunner) Run(
 }
 
 type fixtureMembershipWorker struct {
-	state    workerproc.PersistentWorkerState
-	restarts int
-	err      error
+	state               workerproc.PersistentWorkerState
+	restarts            int
+	err                 error
+	observationSequence uint64
 }
 
 func (worker *fixtureMembershipWorker) Call(
@@ -39,9 +40,11 @@ func (worker *fixtureMembershipWorker) Call(
 	if worker.err != nil {
 		return workerproc.PersistentResponse{}, worker.err
 	}
+	worker.observationSequence++
 	state := worker.state
 	return workerproc.PersistentResponse{
-		OK: true, Result: &workerproc.PersistentWorkerResult{State: &state},
+		OK: true, WorkerObservationSequence: worker.observationSequence,
+		Result: &workerproc.PersistentWorkerResult{State: &state},
 	}, nil
 }
 
@@ -58,10 +61,11 @@ func (worker *blockingMembershipWorker) Call(
 	ctx context.Context,
 	_ workerproc.PersistentRequest,
 ) (workerproc.PersistentResponse, error) {
-	if worker.calls.Add(1) == 1 {
+	if sequence := worker.calls.Add(1); sequence == 1 {
 		state := worker.state
 		return workerproc.PersistentResponse{
-			OK: true, Result: &workerproc.PersistentWorkerResult{State: &state},
+			OK: true, WorkerObservationSequence: uint64(sequence),
+			Result: &workerproc.PersistentWorkerResult{State: &state},
 		}, nil
 	}
 	select {
@@ -72,7 +76,8 @@ func (worker *blockingMembershipWorker) Call(
 	case <-worker.release:
 		state := worker.state
 		return workerproc.PersistentResponse{
-			OK: true, Result: &workerproc.PersistentWorkerResult{State: &state},
+			OK: true, WorkerObservationSequence: uint64(worker.calls.Load()),
+			Result: &workerproc.PersistentWorkerResult{State: &state},
 		}, nil
 	case <-ctx.Done():
 		return workerproc.PersistentResponse{}, ctx.Err()
@@ -111,7 +116,7 @@ func TestMembershipAgentRegistersRefreshesAndRejoins(t *testing.T) {
 	record := inventory.Workers[0]
 	if record.ID != "mac-a" || record.Capabilities.Backend != "mlx" ||
 		len(record.Capabilities.Adapters) != 2 || record.Capabilities.Admission.MaxOpenSequencesPerShard != 16 ||
-		len(record.Status.RetainedShards) != 1 {
+		len(record.Status.RetainedShards) != 1 || record.Status.WorkerObservationSequence == 0 {
 		t.Fatalf("incomplete worker record: %+v", record)
 	}
 	boundTransport := false

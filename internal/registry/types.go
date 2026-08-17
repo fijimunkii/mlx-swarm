@@ -59,14 +59,15 @@ type RetainedShard struct {
 
 // Status is the dynamic worker state refreshed by heartbeats.
 type Status struct {
-	Health               Health          `json:"health"`
-	AvailableMemoryBytes uint64          `json:"availableMemoryBytes"`
-	MemoryPressureBytes  uint64          `json:"memoryPressureBytes"`
-	OpenSequenceCount    int             `json:"openSequenceCount"`
-	RetainedBytes        uint64          `json:"retainedBytes"`
-	RestartCount         int             `json:"restartCount"`
-	RecentFailureCount   int             `json:"recentFailureCount"`
-	RetainedShards       []RetainedShard `json:"retainedShards"`
+	Health                    Health          `json:"health"`
+	AvailableMemoryBytes      uint64          `json:"availableMemoryBytes"`
+	MemoryPressureBytes       uint64          `json:"memoryPressureBytes"`
+	OpenSequenceCount         int             `json:"openSequenceCount"`
+	RetainedBytes             uint64          `json:"retainedBytes"`
+	RestartCount              int             `json:"restartCount"`
+	RecentFailureCount        int             `json:"recentFailureCount"`
+	WorkerObservationSequence uint64          `json:"workerObservationSequence,omitempty"`
+	RetainedShards            []RetainedShard `json:"retainedShards"`
 }
 
 // Registration is supplied by a worker when it joins or refreshes its stable

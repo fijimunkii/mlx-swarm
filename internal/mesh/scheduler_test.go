@@ -335,6 +335,11 @@ func TestSequenceSchedulerQuarantinesUnconfirmedCleanupUntilFreshStatus(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, caller := range callers {
+		caller.mu.Lock()
+		caller.loaded[0].OpenSequenceCount = 1
+		caller.mu.Unlock()
+	}
 	first.finish(false)
 	if second, _, err := scheduler.Prepare(
 		context.Background(), schedulerPlanRequest(), nil, generation.PlannedSessionConfig{},
@@ -343,8 +348,33 @@ func TestSequenceSchedulerQuarantinesUnconfirmedCleanupUntilFreshStatus(t *testi
 	}
 
 	now = now.Add(time.Second)
+	minimumObservation := uint64(0)
+	scheduler.mu.Lock()
+	for _, state := range scheduler.reservations {
+		if len(state.poisonedAfter) > 0 && state.poisonedAfter[0] > minimumObservation {
+			minimumObservation = state.poisonedAfter[0]
+		}
+	}
+	scheduler.mu.Unlock()
+	if minimumObservation <= 1 || minimumObservation == unreconciledObservationSequence {
+		t.Fatalf("cleanup observation did not establish a worker sequence boundary: %d", minimumObservation)
+	}
 	for _, id := range []string{"worker-a", "worker-b"} {
-		updateSchedulerStatus(t, membership, id, func(*registry.Status) {})
+		updateSchedulerStatus(t, membership, id, func(status *registry.Status) {
+			status.WorkerObservationSequence = minimumObservation - 1
+		})
+	}
+	if stale, _, err := scheduler.Prepare(
+		context.Background(), schedulerPlanRequest(), nil, generation.PlannedSessionConfig{},
+	); stale != nil || !errors.Is(err, ErrSequenceCapacityReserved) {
+		t.Fatalf("late delivery of pre-cleanup state cleared quarantine: sequence=%v err=%v", stale, err)
+	}
+
+	now = now.Add(time.Second)
+	for _, id := range []string{"worker-a", "worker-b"} {
+		updateSchedulerStatus(t, membership, id, func(status *registry.Status) {
+			status.WorkerObservationSequence = minimumObservation + 1
+		})
 	}
 	afterFreshStatus, _, err := scheduler.Prepare(
 		context.Background(), schedulerPlanRequest(), nil, generation.PlannedSessionConfig{},
@@ -437,6 +467,20 @@ func TestSequenceSchedulerReservesWorkerRequestCapacity(t *testing.T) {
 	second.finish(reservationOutcome{cleanupConfirmed: true})
 }
 
+func TestSequenceSchedulerRequiresOrderedWorkerObservations(t *testing.T) {
+	now := time.Date(2026, time.August, 17, 2, 55, 30, 0, time.UTC)
+	registration := schedulerRegistration("worker-a")
+	registration.Status.WorkerObservationSequence = 0
+	inventory := schedulerInventory(now, registration)
+	scheduler := reservationTestScheduler(inventory)
+	reservation, err := scheduler.reserveAdmission(
+		inventory, reservationEvaluation("worker-a", "shard-a", 100, 10, false),
+	)
+	if reservation != nil || !errors.Is(err, ErrWorkerObservationUnavailable) {
+		t.Fatalf("unordered worker admission: reservation=%v err=%v", reservation, err)
+	}
+}
+
 func TestSequenceSchedulerBridgesStaleMemoryStatus(t *testing.T) {
 	now := time.Date(2026, time.August, 17, 2, 56, 0, 0, time.UTC)
 	registration := schedulerRegistration("worker-a")
@@ -452,6 +496,9 @@ func TestSequenceSchedulerBridgesStaleMemoryStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	loaded.stages[0].setupObserved = true
+	loaded.stages[0].setupShardPresent = true
+	loaded.stages[0].setupObservationSequence = 10
 	loaded.finish(reservationOutcome{mayHaveLoaded: true, cleanupConfirmed: true})
 	if next, err := scheduler.reserveAdmission(
 		inventory, reservationEvaluation("worker-a", "shard-b", 400, 100, false),
@@ -459,9 +506,20 @@ func TestSequenceSchedulerBridgesStaleMemoryStatus(t *testing.T) {
 		t.Fatalf("stale memory admission: reservation=%v err=%v", next, err)
 	}
 
+	lateStale := inventory
+	lateStale.Workers = append([]registry.Worker(nil), inventory.Workers...)
+	lateStale.Workers[0].StatusObservedAt = now.Add(time.Second)
+	lateStale.Workers[0].Status.WorkerObservationSequence = 9
+	if next, err := scheduler.reserveAdmission(
+		lateStale, reservationEvaluation("worker-a", "shard-b", 400, 100, false),
+	); next != nil || !errors.Is(err, ErrWorkerMemoryReserved) {
+		t.Fatalf("late delivery of pre-load memory cleared reservation: reservation=%v err=%v", next, err)
+	}
+
 	fresh := inventory
 	fresh.Workers = append([]registry.Worker(nil), inventory.Workers...)
 	fresh.Workers[0].StatusObservedAt = now.Add(time.Second)
+	fresh.Workers[0].Status.WorkerObservationSequence = 12
 	next, err := scheduler.reserveAdmission(
 		fresh, reservationEvaluation("worker-a", "shard-b", 400, 100, false),
 	)
@@ -672,6 +730,7 @@ func schedulerRegistration(id string) registry.Registration {
 		},
 		Status: registry.Status{
 			Health: registry.HealthHealthy, AvailableMemoryBytes: 10_000,
+			WorkerObservationSequence: 1,
 		},
 	}
 }
@@ -699,8 +758,9 @@ func planTargetIDs(plan generation.ExecutionPlan) []string {
 }
 
 type schedulerMetadataWorker struct {
-	mu     sync.Mutex
-	loaded []workerproc.PersistentShardSnapshot
+	mu                  sync.Mutex
+	loaded              []workerproc.PersistentShardSnapshot
+	observationSequence uint64
 }
 
 type contextBlockingWorker struct{}
@@ -724,6 +784,7 @@ func (worker *schedulerMetadataWorker) Call(
 	}
 	worker.mu.Lock()
 	defer worker.mu.Unlock()
+	worker.observationSequence++
 	result := &workerproc.PersistentWorkerResult{}
 	switch request.Command {
 	case "modelInfo":
@@ -751,5 +812,7 @@ func (worker *schedulerMetadataWorker) Call(
 	default:
 		return workerproc.PersistentResponse{}, fmt.Errorf("unexpected command %q", request.Command)
 	}
-	return workerproc.PersistentResponse{OK: true, Result: result}, nil
+	return workerproc.PersistentResponse{
+		OK: true, WorkerObservationSequence: worker.observationSequence, Result: result,
+	}, nil
 }

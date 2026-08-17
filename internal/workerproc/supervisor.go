@@ -17,12 +17,13 @@ type PersistentStarter func() (*PersistentClient, error)
 // triggering call error. Mutating requests are never retried; a subsequent
 // session must reload its shards and start a fresh sequence.
 type PersistentSupervisor struct {
-	mu           sync.Mutex
-	callGate     chan struct{}
-	starter      PersistentStarter
-	client       *PersistentClient
-	closed       bool
-	restartCount int
+	mu                  sync.Mutex
+	callGate            chan struct{}
+	starter             PersistentStarter
+	client              *PersistentClient
+	closed              bool
+	restartCount        int
+	observationSequence uint64
 }
 
 func StartPersistentSupervisor(path string) (*PersistentSupervisor, error) {
@@ -74,7 +75,10 @@ func (supervisor *PersistentSupervisor) Call(
 	client := supervisor.client
 	supervisor.mu.Unlock()
 	response, err := client.Call(ctx, request)
-	if err == nil || isWorkerRejection(err) || isNotDispatched(err) ||
+	if err == nil {
+		return supervisor.recordObservation(response), nil
+	}
+	if isWorkerRejection(err) || isNotDispatched(err) ||
 		errors.Is(err, ErrInferenceDeadlineRequired) {
 		return response, err
 	}
@@ -88,9 +92,23 @@ func (supervisor *PersistentSupervisor) Call(
 		supervisor.mu.Lock()
 		retryClient := supervisor.client
 		supervisor.mu.Unlock()
-		return retryClient.Call(ctx, request)
+		response, err = retryClient.Call(ctx, request)
+		if err == nil {
+			return supervisor.recordObservation(response), nil
+		}
+		return response, err
 	}
 	return response, err
+}
+
+func (supervisor *PersistentSupervisor) recordObservation(
+	response PersistentResponse,
+) PersistentResponse {
+	supervisor.mu.Lock()
+	supervisor.observationSequence++
+	response.WorkerObservationSequence = supervisor.observationSequence
+	supervisor.mu.Unlock()
+	return response
 }
 
 func (supervisor *PersistentSupervisor) RestartCount() int {
