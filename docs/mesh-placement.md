@@ -71,10 +71,54 @@ The evaluator reports every applicable rejection in a stable order rather than
 stopping at the first one. This gives operators and future scheduler evidence
 enough to explain why a worker was not considered.
 
+## Topology and compute profile
+
+`placement.ProfileStore` retains bounded rolling evidence for later plan
+scoring. Its default five-minute window keeps at most 64 observations per
+series and 4,096 total series; callers may set smaller or larger explicit
+limits. Link and compute updates are concurrency-safe, and a complete N-stage
+sample is admitted atomically so a rejected batch cannot leave a partial
+profile. Identity labels are bounded and retained once per series; rolling
+samples contain only timestamps and numeric measurements.
+
+Directional link observations are keyed by source and target process
+identities, protocol, and tensor encoding. Every observation carries an RTT.
+Payload probes may also carry bytes and elapsed time, producing an effective
+bytes-per-second distribution. The same shape represents coordinator-to-worker
+links today and direct worker-to-worker links if a future transport makes those
+relevant. Process identities prevent measurements from silently crossing a
+worker restart or coordinator run.
+
+Compute observations are keyed by worker process, backend, model/checkpoint,
+operation, and exact layer range. Their summaries preserve input-token and
+compute-time distributions rather than averaging unlike model ranges together.
+`ObservePlannedSample` converts a successful arbitrary N-stage generation
+sample into these per-worker observations using the inventory's instance and
+backend identity. The plan must pin the supplied inventory's exact revision.
+
+Generation stage overhead is not treated as bandwidth: it combines HTTP,
+queueing, serialization, and network time. Link throughput therefore requires
+an explicit measurement rather than manufacturing a misleading value from a
+normal inference call.
+
+Every update supplies a server-controlled acceptance time. Observations that
+are already stale or dated after acceptance are rejected before they can
+consume or evict rolling evidence. Snapshots cannot rewind before the latest
+accepted update. Fresh updates reclaim expired series before enforcing the
+global series limit. Snapshots record their revision, generation time,
+freshness and storage bounds, remove expired observations, and sort every
+profile by its stable identity. The same accepted observation history and
+snapshot time therefore produce identical machine-readable evidence.
+
+Current memory pressure, health, failures, restart counts, and retained-shard
+state remain in the server-stamped membership inventory rather than being
+duplicated into historical profiles. The planner must combine a fresh inventory
+snapshot with a fresh topology profile.
+
 ## Current boundary
 
 This package evaluates a proposed stage; it does not yet choose stage count,
-layer boundaries, workers, or a complete execution plan. It also does not
-measure topology or score compute and transfer cost. Those policy layers will
-consume this contract next, while the existing explicit-plan path remains the
-diagnostic fallback.
+layer boundaries, workers, or a complete execution plan. The profile accepts
+probe and successful-generation evidence but does not schedule active probes or
+score compute and transfer cost. Those policy layers consume these contracts
+next, while the existing explicit-plan path remains the diagnostic fallback.

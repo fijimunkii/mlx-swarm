@@ -155,7 +155,9 @@ clean shutdown. See the
 The placement foundation evaluates every worker against one proposed stage
 using deterministic, backend-neutral hard constraints. It rejects stale or
 incompatible candidates with stable machine-readable reasons and accounts for
-compatible retained-shard reuse. See the
+compatible retained-shard reuse. A bounded rolling profile supplies fresh,
+directional RTT/throughput evidence and per-worker compute observations for the
+later plan scorer. See the
 [placement eligibility contract](docs/mesh-placement.md).
 
 ### Failure characterization
