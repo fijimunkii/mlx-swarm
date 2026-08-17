@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/fijimunkii/mlx-swarm/internal/benchmark"
 	"github.com/fijimunkii/mlx-swarm/internal/generation"
@@ -71,6 +73,41 @@ func TestFailedSyntheticRegistrationRemainsEligibleForCleanup(t *testing.T) {
 	}
 	if path := <-removed; path != "/v1/membership/workers/"+specs[0].ID {
 		t.Fatalf("cleanup path = %q", path)
+	}
+}
+
+func TestSyntheticCleanupContinuesAfterOneRemovalTimesOut(t *testing.T) {
+	removed := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodDelete {
+			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+			return
+		}
+		if strings.HasSuffix(request.URL.Path, "synthetic-linux-00") {
+			<-request.Context().Done()
+			return
+		}
+		removed <- request.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	client, err := registry.NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs := hybridSyntheticSpecs(pooledproof.Reference{
+		ModelType: "adapter", CheckpointFingerprint: "checkpoint",
+	}, 2)
+	if err := removeSyntheticPeersWithTimeout(client, specs, 20*time.Millisecond); err == nil {
+		t.Fatal("timed-out removal was not reported")
+	}
+	select {
+	case path := <-removed:
+		if !strings.HasSuffix(path, "synthetic-linux-01") {
+			t.Fatalf("cleanup path = %q", path)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second peer was not removed after the first timed out")
 	}
 }
 

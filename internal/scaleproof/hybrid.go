@@ -453,11 +453,19 @@ func syntheticSpecIDs(specs []meshstress.WorkerSpec) []string {
 }
 
 func removeSyntheticPeers(client *registry.Client, specs []meshstress.WorkerSpec) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	return removeSyntheticPeersWithTimeout(client, specs, hybridControlRPCTimeout)
+}
+
+func removeSyntheticPeersWithTimeout(
+	client *registry.Client,
+	specs []meshstress.WorkerSpec,
+	timeout time.Duration,
+) error {
 	var cleanupErr error
 	for _, spec := range specs {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		err := client.Remove(ctx, spec.ID, spec.InstanceID)
+		cancel()
 		var remote *registry.RemoteError
 		if err != nil && (!errors.As(err, &remote) ||
 			(remote.Code != "worker_not_found" && remote.Code != "lease_expired")) {
