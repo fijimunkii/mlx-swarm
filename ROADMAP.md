@@ -242,14 +242,14 @@ Tracking: [#34](https://github.com/fijimunkii/mlx-swarm/issues/34)
 Use Linux concurrency to test a much larger membership set without consuming
 additional macOS inference slots.
 
-- [ ] create protocol-compatible synthetic workers with configurable memory,
+- [x] create protocol-compatible synthetic workers with configurable memory,
   backend, adapter, fingerprint, latency, topology, retained shards, and health
-- [ ] handle at least 32 concurrently visible worker records without fixed-size
+- [x] handle at least 32 concurrently visible worker records without fixed-size
   assumptions
-- [ ] exercise join, expiry, rejoin, duplicate identity, slowdown, and
+- [x] exercise join, expiry, rejoin, duplicate identity, slowdown, and
   incompatible capability changes
-- [ ] bound network probing and scheduler work as membership grows
-- [ ] record candidate rejection reasons and scheduler decision latency
+- [x] bound network probing and scheduler work as membership grows
+- [x] record candidate rejection reasons and scheduler decision latency
 - [ ] combine real Mac serving workers with many synthetic Linux peers and prove
   the chosen real plan still generates reference-correct output
 

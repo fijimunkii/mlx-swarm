@@ -168,10 +168,19 @@ requires the instance-bound HTTP capability, reserves worker, shard, and memory
 admission locally, and freezes that plan for one generation attempt. A later
 sequence always replans, so joins, removals, expiry, fresh failure state, and
 changed performance evidence cannot mutate an active sequence or reuse a stale
-plan. Control-plane API exposure and the scheduler-selected five-Mac run remain
-next.
+plan. A Linux-only synthetic proof drives 32 heterogeneous records through the
+same membership HTTP and placement contracts, exercises churn and capability
+changes, and records bounded search, scheduling latency, and stable rejection
+evidence. The scheduler-selected five-Mac hybrid run remains next.
 See the
-[placement and scoring contract](docs/mesh-placement.md).
+[placement and scoring contract](docs/mesh-placement.md) and the
+[synthetic scale/churn proof](docs/mesh-scale-churn.md).
+
+Run the control-plane proof without a model or macOS runner:
+
+```bash
+go run ./cmd/swarm-mesh-smoke > mesh-scale-churn.json
+```
 
 ### Failure characterization
 
