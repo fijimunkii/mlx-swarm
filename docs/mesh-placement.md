@@ -93,19 +93,20 @@ operation, and exact layer range. Their summaries preserve input-token and
 compute-time distributions rather than averaging unlike model ranges together.
 `ObservePlannedSample` converts a successful arbitrary N-stage generation
 sample into these per-worker observations using the inventory's instance and
-backend identity. When the plan pins an inventory revision, it must match the
-supplied snapshot.
+backend identity. The plan must pin the supplied inventory's exact revision.
 
 Generation stage overhead is not treated as bandwidth: it combines HTTP,
 queueing, serialization, and network time. Link throughput therefore requires
 an explicit measurement rather than manufacturing a misleading value from a
 normal inference call.
 
-Snapshots record their revision, generation time, freshness and storage
-bounds, then sort every profile by its stable identity. Expired observations
-are removed. Future-dated observations are quarantined until their timestamp is
-reached. The same accepted observation history and snapshot time therefore
-produce identical machine-readable evidence.
+Every update supplies a server-controlled acceptance time. Observations that
+are already stale or dated after acceptance are rejected before they can
+consume or evict rolling evidence. Snapshots cannot rewind before the latest
+accepted update. They record their revision, generation time, freshness and
+storage bounds, remove expired observations, and sort every profile by its
+stable identity. The same accepted observation history and snapshot time
+therefore produce identical machine-readable evidence.
 
 Current memory pressure, health, failures, restart counts, and retained-shard
 state remain in the server-stamped membership inventory rather than being

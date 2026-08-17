@@ -128,6 +128,7 @@ type ProfileStore struct {
 	maxSamplesPerSeries int
 	maxSeries           int
 	revision            uint64
+	latestAcceptedAt    time.Time
 	links               map[linkKey][]LinkObservation
 	compute             map[computeKey][]ComputeObservation
 }
@@ -157,13 +158,17 @@ func NewProfileStore(config ProfileConfig) (*ProfileStore, error) {
 	}, nil
 }
 
-func (store *ProfileStore) ObserveLink(observation LinkObservation) error {
+// ObserveLink accepts one measurement at the server-controlled reference time.
+func (store *ProfileStore) ObserveLink(at time.Time, observation LinkObservation) error {
 	normalized, key, err := normalizeLinkObservation(observation)
 	if err != nil {
 		return err
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if err := store.validateObservationTimeLocked(at, normalized.ObservedAt); err != nil {
+		return err
+	}
 	if _, exists := store.links[key]; !exists && store.seriesCountLocked() >= store.maxSeries {
 		return errors.New("profile series limit reached")
 	}
@@ -174,14 +179,20 @@ func (store *ProfileStore) ObserveLink(observation LinkObservation) error {
 	sortLinkObservations(store.links[key])
 	store.links[key] = retainNewest(store.links[key], store.maxSamplesPerSeries)
 	store.revision++
+	store.acceptTimeLocked(at)
 	return nil
 }
 
-func (store *ProfileStore) ObserveCompute(observation ComputeObservation) error {
-	return store.observeComputeBatch([]ComputeObservation{observation})
+// ObserveCompute accepts one execution measurement at the server-controlled
+// reference time.
+func (store *ProfileStore) ObserveCompute(at time.Time, observation ComputeObservation) error {
+	return store.observeComputeBatch(at, []ComputeObservation{observation})
 }
 
-func (store *ProfileStore) observeComputeBatch(observations []ComputeObservation) error {
+func (store *ProfileStore) observeComputeBatch(
+	at time.Time,
+	observations []ComputeObservation,
+) error {
 	if len(observations) == 0 {
 		return errors.New("compute observation batch is empty")
 	}
@@ -197,6 +208,11 @@ func (store *ProfileStore) observeComputeBatch(observations []ComputeObservation
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	for index, observation := range normalized {
+		if err := store.validateObservationTimeLocked(at, observation.ObservedAt); err != nil {
+			return fmt.Errorf("compute observation %d: %w", index, err)
+		}
+	}
 	newKeys := make(map[computeKey]struct{})
 	for _, key := range keys {
 		if _, exists := store.compute[key]; !exists {
@@ -216,12 +232,13 @@ func (store *ProfileStore) observeComputeBatch(observations []ComputeObservation
 		store.compute[key] = retainNewest(store.compute[key], store.maxSamplesPerSeries)
 	}
 	store.revision++
+	store.acceptTimeLocked(at)
 	return nil
 }
 
 // Snapshot drops expired evidence and returns only observations in the closed
-// interval [at-MaxAge, at]. Future-dated evidence stays quarantined until its
-// timestamp is reached rather than influencing current placement.
+// interval [at-MaxAge, at]. It rejects a reference time before the latest
+// accepted update so callers cannot rewind profile freshness.
 func (store *ProfileStore) Snapshot(at time.Time) (ProfileSnapshot, error) {
 	if at.IsZero() {
 		return ProfileSnapshot{}, errors.New("profile snapshot time is required")
@@ -230,6 +247,9 @@ func (store *ProfileStore) Snapshot(at time.Time) (ProfileSnapshot, error) {
 	cutoff := at.Add(-store.maxAge)
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if at.Before(store.latestAcceptedAt) {
+		return ProfileSnapshot{}, errors.New("profile snapshot time precedes the latest accepted update")
+	}
 	snapshot := ProfileSnapshot{
 		SchemaVersion: SchemaVersion, Revision: store.revision, GeneratedAt: at,
 		MaxAgeMillis:        store.maxAge.Milliseconds(),
@@ -266,6 +286,27 @@ func (store *ProfileStore) Snapshot(at time.Time) (ProfileSnapshot, error) {
 
 func (store *ProfileStore) seriesCountLocked() int {
 	return len(store.links) + len(store.compute)
+}
+
+func (store *ProfileStore) validateObservationTimeLocked(at, observedAt time.Time) error {
+	if at.IsZero() {
+		return errors.New("profile acceptance time is required")
+	}
+	at = at.UTC()
+	if observedAt.After(at) {
+		return errors.New("profile observation time is after its acceptance time")
+	}
+	if observedAt.Before(at.Add(-store.maxAge)) {
+		return errors.New("profile observation is already stale at acceptance")
+	}
+	return nil
+}
+
+func (store *ProfileStore) acceptTimeLocked(at time.Time) {
+	at = at.UTC()
+	if at.After(store.latestAcceptedAt) {
+		store.latestAcceptedAt = at
+	}
 }
 
 func normalizeLinkObservation(observation LinkObservation) (LinkObservation, linkKey, error) {

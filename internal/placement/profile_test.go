@@ -25,7 +25,7 @@ func TestProfileStoreLinkSnapshotIsBoundedAndDeterministic(t *testing.T) {
 			MaxAge: 10 * time.Second, MaxSamplesPerSeries: 2, MaxSeries: 4,
 		})
 		for _, observation := range input {
-			if err := store.ObserveLink(observation); err != nil {
+			if err := store.ObserveLink(now, observation); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -58,31 +58,38 @@ func TestProfileStoreLinkSnapshotIsBoundedAndDeterministic(t *testing.T) {
 	}
 }
 
-func TestProfileStoreExpiresAndQuarantinesObservations(t *testing.T) {
+func TestProfileStoreExpiresAndRejectsInvalidObservationTimes(t *testing.T) {
 	now := time.Date(2026, time.August, 17, 0, 0, 0, 0, time.UTC)
 	store := mustProfileStore(t, ProfileConfig{
 		MaxAge: 5 * time.Second, MaxSamplesPerSeries: 8, MaxSeries: 2,
 	})
 	for _, observation := range []LinkObservation{
-		testLinkObservation("worker-a", now.Add(-6*time.Second), 10, 0),
 		testLinkObservation("worker-a", now.Add(-5*time.Second), 20, 0),
-		testLinkObservation("worker-a", now.Add(time.Second), 30, 0),
+		testLinkObservation("worker-a", now, 30, 0),
 	} {
-		if err := store.ObserveLink(observation); err != nil {
+		if err := store.ObserveLink(now, observation); err != nil {
 			t.Fatal(err)
 		}
 	}
 	current := mustProfileSnapshot(t, store, now)
-	if len(current.Links) != 1 || current.Links[0].RTTMicros.Count != 1 ||
+	if len(current.Links) != 1 || current.Links[0].RTTMicros.Count != 2 ||
 		current.Links[0].RTTMicros.P50 != 20 {
-		t.Fatalf("stale or future observation affected current snapshot: %+v", current)
+		t.Fatalf("boundary observation was not retained: %+v", current)
 	}
-	future := mustProfileSnapshot(t, store, now.Add(time.Second))
-	if len(future.Links) != 1 || future.Links[0].RTTMicros.Count != 1 ||
-		future.Links[0].RTTMicros.P50 != 30 {
-		t.Fatalf("future observation was not admitted at its timestamp: %+v", future)
+	if err := store.ObserveLink(now, testLinkObservation(
+		"worker-a", now.Add(time.Second), 40, 0,
+	)); err == nil {
+		t.Fatal("future-dated observation was accepted")
 	}
-	expired := mustProfileSnapshot(t, store, now.Add(7*time.Second))
+	if err := store.ObserveLink(now, testLinkObservation(
+		"worker-a", now.Add(-6*time.Second), 10, 0,
+	)); err == nil {
+		t.Fatal("already-stale observation was accepted")
+	}
+	if _, err := store.Snapshot(now.Add(-time.Nanosecond)); err == nil {
+		t.Fatal("snapshot rewound before the latest accepted update")
+	}
+	expired := mustProfileSnapshot(t, store, now.Add(6*time.Second))
 	if len(expired.Links) != 0 {
 		t.Fatalf("expired observations remain visible: %+v", expired)
 	}
@@ -127,6 +134,18 @@ func TestProfileStoreIngestsPlannedComputeAtomically(t *testing.T) {
 	if err := store.ObservePlannedSample(now, mismatchedInventory, plan, sample); err == nil {
 		t.Fatal("sample from a different inventory revision was accepted")
 	}
+	unpinnedPlan, err := generation.BuildExecutionPlan(plan.Model, "", []generation.ExecutionStage{
+		{Name: "stage-0", TargetID: "worker-b", LayerStart: 0, LayerEnd: 6, OwnsInput: true, ResponseMode: generation.StageResponseTensor},
+		{Name: "stage-1", TargetID: "worker-a", LayerStart: 6, LayerEnd: 12, OwnsOutput: true, ResponseMode: generation.StageResponseSampledToken},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ObservePlannedSample(
+		now, inventory, unpinnedPlan, testPlannedSample(unpinnedPlan),
+	); err == nil {
+		t.Fatal("sample from an unpinned plan was accepted")
+	}
 	afterInvalid := mustProfileSnapshot(t, store, now)
 	if !reflect.DeepEqual(snapshot, afterInvalid) {
 		t.Fatalf("invalid batch partially mutated profile:\nbefore=%+v\nafter=%+v", snapshot, afterInvalid)
@@ -153,7 +172,7 @@ func TestProfileStoreIsConcurrencySafeAndKeepsNewestSamples(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			errors <- store.ObserveCompute(ComputeObservation{
+			errors <- store.ObserveCompute(base.Add(99*time.Millisecond), ComputeObservation{
 				WorkerID: "worker-a", WorkerInstanceID: "worker-a-instance",
 				Backend: "mlx", Model: testProfileModel(),
 				Operation: "decode", LayerStart: 0, LayerEnd: 6,
@@ -205,7 +224,7 @@ func TestProfileStoreRejectsInvalidInputsAndSeriesOverflow(t *testing.T) {
 		}(),
 	}
 	for _, observation := range invalidLinks {
-		if err := store.ObserveLink(observation); err == nil {
+		if err := store.ObserveLink(now, observation); err == nil {
 			t.Fatalf("invalid link was accepted: %+v", observation)
 		}
 	}
@@ -223,17 +242,20 @@ func TestProfileStoreRejectsInvalidInputsAndSeriesOverflow(t *testing.T) {
 		func() ComputeObservation { value := validCompute; value.ComputeMicros = 0; return value }(),
 	}
 	for _, observation := range invalidComputes {
-		if err := store.ObserveCompute(observation); err == nil {
+		if err := store.ObserveCompute(now, observation); err == nil {
 			t.Fatalf("invalid compute observation was accepted: %+v", observation)
 		}
+	}
+	if err := store.ObserveLink(time.Time{}, validLink); err == nil {
+		t.Fatal("zero acceptance time was accepted")
 	}
 	if _, err := store.Snapshot(time.Time{}); err == nil {
 		t.Fatal("zero snapshot time was accepted")
 	}
-	if err := store.ObserveLink(validLink); err != nil {
+	if err := store.ObserveLink(now, validLink); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.ObserveCompute(validCompute); err == nil {
+	if err := store.ObserveCompute(now, validCompute); err == nil {
 		t.Fatal("new compute series exceeded combined series limit")
 	}
 	snapshot := mustProfileSnapshot(t, store, now)

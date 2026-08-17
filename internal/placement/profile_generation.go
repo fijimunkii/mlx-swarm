@@ -32,8 +32,10 @@ func (store *ProfileStore) ObservePlannedSample(
 	if err := generation.ValidateExecutionPlan(plan); err != nil {
 		return fmt.Errorf("profile execution plan: %w", err)
 	}
-	if plan.InventoryRevision != "" &&
-		plan.InventoryRevision != strconv.FormatUint(inventory.Revision, 10) {
+	if plan.InventoryRevision == "" {
+		return errors.New("profile execution plan must pin an inventory revision")
+	}
+	if plan.InventoryRevision != strconv.FormatUint(inventory.Revision, 10) {
 		return fmt.Errorf(
 			"profile plan inventory revision is %q; current inventory revision is %d",
 			plan.InventoryRevision, inventory.Revision,
@@ -75,5 +77,5 @@ func (store *ProfileStore) ObservePlannedSample(
 			ComputeMicros:   execution.ComputeMicros, ObservedAt: at,
 		}
 	}
-	return store.observeComputeBatch(observations)
+	return store.observeComputeBatch(at, observations)
 }
