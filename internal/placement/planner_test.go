@@ -144,6 +144,40 @@ func TestConstructPlanDeclinesWhenNoCompletePlanIsEligible(t *testing.T) {
 	}
 }
 
+func TestConstructPlanSkipsWorkersAtReportedRequestCapacity(t *testing.T) {
+	now := time.Date(2026, time.August, 17, 18, 0, 0, 0, time.UTC)
+	inventory, profile, request := testConstructionFixture(t, now)
+	for index := range inventory.Workers {
+		worker := &inventory.Workers[index]
+		if worker.ID != "worker-a" {
+			continue
+		}
+		worker.Status.OpenSequenceCount = worker.Capabilities.Admission.MaxConcurrentRequests
+		worker.Status.RetainedShards = []registry.RetainedShard{{
+			ID: "unrelated-busy-shard", ModelID: "other-model",
+			CheckpointFingerprint: "other-checkpoint",
+			LayerStart:            0, LayerEnd: 1,
+			OpenSequenceCount: worker.Status.OpenSequenceCount,
+		}}
+	}
+
+	result, err := ConstructPlan(inventory, profile, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SelectedPlan == nil || planUsesWorker(result.SelectedPlan.Plan, "worker-a") {
+		t.Fatalf("full worker prevented fallback placement: %+v", result.SelectedPlan)
+	}
+	rangeEvidence := findRangeEvaluation(t, result.Ranges, 0, 6)
+	for _, candidate := range rangeEvidence.Eligibility.Candidates {
+		if candidate.WorkerID == "worker-a" && !slices.Contains(
+			rejectionCodes(candidate), RejectionWorkerCapacityExhausted,
+		) {
+			t.Fatalf("full worker has no capacity rejection: %+v", candidate)
+		}
+	}
+}
+
 func TestConstructPlanReactsToMembershipAndTopologyChanges(t *testing.T) {
 	now := time.Date(2026, time.August, 17, 18, 0, 0, 0, time.UTC)
 	inventory, profile, request := testConstructionFixture(t, now)

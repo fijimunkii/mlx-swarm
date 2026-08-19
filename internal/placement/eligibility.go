@@ -24,6 +24,7 @@ const (
 	RejectionUnsupportedTransport      RejectionCode = "unsupported_transport"
 	RejectionUnsupportedEncoding       RejectionCode = "unsupported_tensor_encoding"
 	RejectionTLSRequired               RejectionCode = "tls_required"
+	RejectionWorkerCapacityExhausted   RejectionCode = "worker_capacity_exhausted"
 	RejectionInsufficientMemory        RejectionCode = "insufficient_memory"
 	RejectionRetainedBudgetExceeded    RejectionCode = "retained_budget_exceeded"
 	RejectionSequenceCapacityExhausted RejectionCode = "sequence_capacity_exhausted"
@@ -240,6 +241,13 @@ func evaluateCandidate(
 		if requirement.Transport.RequireTLS && !transport.TLS {
 			candidate.reject(RejectionTLSRequired, "transport does not provide TLS")
 		}
+	}
+	if worker.Status.OpenSequenceCount >= worker.Capabilities.Admission.MaxConcurrentRequests {
+		candidate.reject(RejectionWorkerCapacityExhausted, fmt.Sprintf(
+			"worker has %d open sequences; request limit is %d",
+			worker.Status.OpenSequenceCount,
+			worker.Capabilities.Admission.MaxConcurrentRequests,
+		))
 	}
 	if worker.Status.AvailableMemoryBytes < candidate.RequiredAdditionalMemoryBytes {
 		candidate.reject(RejectionInsufficientMemory, fmt.Sprintf(

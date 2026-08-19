@@ -28,6 +28,7 @@ A candidate is eligible only when all of these conditions hold:
 - it advertises the required adapter, checkpoint fingerprint when its
   fingerprint allowlist is non-empty, and every required operation;
 - it supports the requested transport, tensor encoding, and TLS mode;
+- its reported open sequences remain below its worker-wide request limit;
 - its current available memory covers the required incremental allocation;
 - the new sequence fits its retained-byte budget; and
 - a reused retained shard has open-sequence capacity.
@@ -63,6 +64,7 @@ Every failed hard constraint emits a stable code and a human-readable detail:
 | `unsupported_transport` | Requested transport protocol is not advertised. |
 | `unsupported_tensor_encoding` | Transport does not support the requested tensor encoding. |
 | `tls_required` | The request requires TLS but the transport does not advertise it. |
+| `worker_capacity_exhausted` | Reported open sequences have reached the worker-wide request limit. |
 | `insufficient_memory` | Current available memory is below the incremental requirement. |
 | `retained_budget_exceeded` | The sequence reserve would exceed retained-state admission. |
 | `sequence_capacity_exhausted` | A reusable shard has reached its open-sequence limit. |

@@ -18,6 +18,8 @@ func TestEvaluateCandidatesIsDeterministicAndRecognizesReuse(t *testing.T) {
 	reused.Status.AvailableMemoryBytes = 150
 	reused.Status.RetainedBytes = 100
 	reused.Status.RetainedShards = []registry.RetainedShard{testRetainedShard(requirement, 1)}
+	reused.Status.OpenSequenceCount = 1
+	reused.Capabilities.Admission.MaxConcurrentRequests = 2
 	load := testWorker("worker-a", now)
 	inventory := testInventory(now, reused, load)
 
@@ -121,13 +123,15 @@ func TestEvaluateCandidatesChecksTransportAndRetainedCapacity(t *testing.T) {
 	worker := testWorker("worker-a", now)
 	worker.Capabilities.Transports[0].TensorEncodings = []string{"raw"}
 	worker.Status.RetainedShards = []registry.RetainedShard{testRetainedShard(requirement, 2)}
+	worker.Status.OpenSequenceCount = 2
 
 	evaluation, err := EvaluateCandidates(testInventory(now, worker), requirement)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []RejectionCode{
-		RejectionUnsupportedEncoding, RejectionTLSRequired, RejectionSequenceCapacityExhausted,
+		RejectionUnsupportedEncoding, RejectionTLSRequired, RejectionWorkerCapacityExhausted,
+		RejectionSequenceCapacityExhausted,
 	}
 	if got := rejectionCodes(evaluation.Candidates[0]); !slices.Equal(got, want) {
 		t.Fatalf("rejection codes = %v, want %v", got, want)
