@@ -467,6 +467,26 @@ func TestSequenceSchedulerReservesWorkerRequestCapacity(t *testing.T) {
 	second.finish(reservationOutcome{cleanupConfirmed: true})
 }
 
+func TestSequenceSchedulerIncludesReportedRequestsInWorkerCapacity(t *testing.T) {
+	now := time.Date(2026, time.August, 17, 2, 55, 15, 0, time.UTC)
+	registration := schedulerRegistration("worker-a")
+	registration.Capabilities.Admission.MaxConcurrentRequests = 1
+	registration.Status.OpenSequenceCount = 1
+	registration.Status.RetainedShards = []registry.RetainedShard{{
+		ID: "shard-a", ModelID: "test-model", CheckpointFingerprint: "test-checkpoint",
+		LayerStart: 0, LayerEnd: 1, MemoryBytes: 100, OpenSequenceCount: 1,
+	}}
+	inventory := schedulerInventory(now, registration)
+	scheduler := reservationTestScheduler(inventory)
+
+	reservation, err := scheduler.reserveAdmission(
+		inventory, reservationEvaluation("worker-a", "shard-b", 100, 10, false),
+	)
+	if reservation != nil || !errors.Is(err, ErrWorkerCapacityReserved) {
+		t.Fatalf("reported worker request was ignored: reservation=%v err=%v", reservation, err)
+	}
+}
+
 func TestSequenceSchedulerRequiresOrderedWorkerObservations(t *testing.T) {
 	now := time.Date(2026, time.August, 17, 2, 55, 30, 0, time.UTC)
 	registration := schedulerRegistration("worker-a")

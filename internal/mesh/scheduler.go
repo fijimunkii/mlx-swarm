@@ -352,11 +352,12 @@ func (scheduler *SequenceScheduler) reserveAdmission(
 
 		workerState := scheduler.workers[workerKey]
 		requestLimit := worker.Capabilities.Admission.MaxConcurrentRequests
-		if workerState.activeRequests >= requestLimit {
+		reportedRequests := worker.Status.OpenSequenceCount
+		if reportedRequests+workerState.activeRequests >= requestLimit {
 			return nil, fmt.Errorf(
-				"%w: worker %q instance %q has %d local requests; limit is %d",
+				"%w: worker %q instance %q has %d reported and %d local requests; limit is %d",
 				ErrWorkerCapacityReserved, worker.ID, worker.InstanceID,
-				workerState.activeRequests, requestLimit,
+				reportedRequests, workerState.activeRequests, requestLimit,
 			)
 		}
 		candidate := evaluation.Stages[index].SelectedCandidate
