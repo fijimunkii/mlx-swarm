@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,6 +11,23 @@ import (
 
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
+
+func TestBindListenerFailsBeforeStartupWhenAddressIsOccupied(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+
+	listener, err := bindListener(occupied.Addr().String())
+	if listener != nil {
+		_ = listener.Close()
+		t.Fatal("occupied address returned a listener")
+	}
+	if err == nil {
+		t.Fatal("occupied address was accepted")
+	}
+}
 
 func TestDebugCompleteHandler(t *testing.T) {
 	t.Run("disabled", func(t *testing.T) {

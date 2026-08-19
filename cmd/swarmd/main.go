@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -44,6 +45,11 @@ func run() error {
 	exitAfterDebugShard := os.Getenv("SWARMD_EXIT_AFTER_DEBUG_SHARD") == "1"
 	allowDebugComplete := os.Getenv("SWARMD_ALLOW_DEBUG_COMPLETE") == "1"
 	debugShardComplete := make(chan struct{}, 1)
+	listener, err := bindListener(addr)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
 
 	worker := workerproc.Client{Path: workerproc.DefaultPath()}
 	persistentWorker, err := workerproc.StartPersistentSupervisor(worker.Path)
@@ -219,7 +225,7 @@ func run() error {
 	}()
 
 	log.Printf("swarmd listening on %s", addr)
-	serveErr := server.ListenAndServe()
+	serveErr := server.Serve(listener)
 	close(serverStopped)
 	stopMembership()
 	if membershipStopped != nil {
@@ -239,6 +245,14 @@ func run() error {
 		return fmt.Errorf("serve: %w", serveErr)
 	}
 	return nil
+}
+
+func bindListener(addr string) (net.Listener, error) {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %s: %w", addr, err)
+	}
+	return listener, nil
 }
 
 func validateExpectedWorkerIdentity(
