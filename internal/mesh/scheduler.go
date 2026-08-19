@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -89,6 +90,10 @@ type transportValidatingResolver interface {
 	ValidateTransport(placement.TransportRequirement) error
 }
 
+type targetValidatingResolver interface {
+	ValidateTarget(TargetBinding, placement.TransportRequirement) error
+}
+
 // TargetResolverFunc adapts a function to TargetResolver.
 type TargetResolverFunc func(TargetBinding) (workerproc.PersistentCaller, error)
 
@@ -115,6 +120,25 @@ func (HTTPResolver) ValidateTransport(requirement placement.TransportRequirement
 		return fmt.Errorf(
 			"HTTP mesh scheduler requires tensor encoding %q, got %q",
 			workerproc.Base64JSONTensorEncoding, requirement.TensorEncoding,
+		)
+	}
+	return nil
+}
+
+// ValidateTarget binds a TLS placement requirement to the selected endpoint,
+// rather than trusting an independently advertised transport capability.
+func (HTTPResolver) ValidateTarget(
+	binding TargetBinding,
+	requirement placement.TransportRequirement,
+) error {
+	if !requirement.RequireTLS {
+		return nil
+	}
+	endpoint, err := url.Parse(binding.Endpoint)
+	if err != nil || endpoint.Scheme != "https" {
+		return fmt.Errorf(
+			"worker %q endpoint %q does not provide required TLS",
+			binding.WorkerID, binding.Endpoint,
 		)
 	}
 	return nil
@@ -266,6 +290,15 @@ func (scheduler *SequenceScheduler) Prepare(
 		return nil, selection, err
 	}
 	selection.Targets = bindings
+	if validator, ok := scheduler.resolver.(targetValidatingResolver); ok {
+		for index, binding := range bindings {
+			if err := validator.ValidateTarget(binding, request.Scoring.Transport); err != nil {
+				return nil, selection, fmt.Errorf(
+					"validate selected stage %d transport: %w", index, err,
+				)
+			}
+		}
+	}
 	reservation, err := scheduler.reserveAdmission(inventory, *construction.SelectedPlan)
 	if err != nil {
 		return nil, selection, err

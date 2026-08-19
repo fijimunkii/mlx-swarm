@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,6 +31,61 @@ func TestHTTPResolverRequiresInstanceBoundTransport(t *testing.T) {
 		TensorEncoding: workerproc.Base64JSONTensorEncoding,
 	}); err != nil {
 		t.Fatalf("instance-bound transport was rejected: %v", err)
+	}
+}
+
+func TestHTTPResolverBindsTLSRequirementToSelectedEndpoint(t *testing.T) {
+	resolver := HTTPResolver{}
+	requirement := placement.TransportRequirement{RequireTLS: true}
+	if err := resolver.ValidateTarget(TargetBinding{
+		WorkerID: "worker-a", Endpoint: "http://worker-a.example:8080",
+	}, requirement); err == nil {
+		t.Fatal("HTTP endpoint satisfied a TLS-required selection")
+	}
+	if err := resolver.ValidateTarget(TargetBinding{
+		WorkerID: "worker-a", Endpoint: "https://worker-a.example:8080",
+	}, requirement); err != nil {
+		t.Fatalf("HTTPS endpoint was rejected: %v", err)
+	}
+	if err := resolver.ValidateTarget(TargetBinding{
+		WorkerID: "worker-a", Endpoint: "http://worker-a.example:8080",
+	}, placement.TransportRequirement{}); err != nil {
+		t.Fatalf("optional TLS rejected an HTTP endpoint: %v", err)
+	}
+}
+
+func TestSequenceSchedulerRejectsInsecureSelectedTLSBinding(t *testing.T) {
+	now := time.Date(2026, time.August, 17, 1, 55, 0, 0, time.UTC)
+	registrations := make([]registry.Registration, 0, 2)
+	for _, id := range []string{"worker-a", "worker-b"} {
+		registration := schedulerRegistration(id)
+		registration.Capabilities.Transports[0].Protocol = workerproc.InstanceBoundHTTPProtocol
+		registration.Capabilities.Transports[0].TLS = true
+		registrations = append(registrations, registration)
+	}
+	profiles, err := placement.NewProfileStore(placement.ProfileConfig{
+		MaxAge: time.Minute, MaxSeries: 16,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler, err := NewSequenceScheduler(
+		staticInventorySource{inventory: schedulerInventory(now, registrations...)},
+		profiles,
+		HTTPResolver{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := schedulerPlanRequest()
+	request.Scoring.Transport.Protocol = workerproc.InstanceBoundHTTPProtocol
+	request.Scoring.Transport.RequireTLS = true
+	sequence, selection, err := scheduler.Prepare(
+		context.Background(), request, nil, generation.PlannedSessionConfig{},
+	)
+	if sequence != nil || selection.Construction.SelectedPlan == nil ||
+		!strings.Contains(fmt.Sprint(err), "does not provide required TLS") {
+		t.Fatalf("insecure TLS binding: sequence=%v selection=%+v err=%v", sequence, selection, err)
 	}
 }
 
