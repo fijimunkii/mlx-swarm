@@ -6,13 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"time"
 
-	"github.com/fijimunkii/mlx-swarm/internal/tensorcheck"
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
 
@@ -167,10 +164,7 @@ type failurePoint struct {
 }
 
 type Session struct {
-	producer       workerproc.PersistentCaller
-	consumer       workerproc.PersistentCaller
-	reference      workerproc.PersistentCaller
-	config         SessionConfig
+	planned        *PlannedSession
 	model          workerproc.PersistentModelResult
 	plan           ShardPlan
 	referenceShard string
@@ -198,381 +192,160 @@ func NewSession(
 	reference workerproc.PersistentCaller,
 	config SessionConfig,
 ) (*Session, error) {
-	started := time.Now()
 	if producer == nil || consumer == nil {
 		return nil, errors.New("producer and consumer callers are required")
 	}
-	if config.Model == "" {
-		return nil, errors.New("model is required")
+	responseMode := StageResponseTensor
+	if config.TerminalSampling {
+		responseMode = StageResponseSampledToken
 	}
-	if config.RTol < 0 || config.ATol < 0 ||
-		math.IsNaN(config.RTol) || math.IsNaN(config.ATol) ||
-		math.IsInf(config.RTol, 0) || math.IsInf(config.ATol, 0) {
-		return nil, errors.New("numeric tolerances must be finite and non-negative")
+	plannedConfig := PlannedSessionConfig{
+		RTol: config.RTol, ATol: config.ATol,
+		ForwardTimeout: config.ForwardTimeout,
+		LogitsObserver: config.LogitsObserver,
 	}
-	if config.ForwardTimeout < 0 {
-		return nil, errors.New("forward timeout must be non-negative")
+	if config.Observer != nil {
+		plannedConfig.Observer = func(sample PlannedStageSample) {
+			config.Observer(legacyStageSample(sample))
+		}
 	}
-	if config.ForwardTimeout > 0 && config.ForwardTimeout < time.Millisecond {
-		return nil, errors.New("forward timeout must be at least 1ms")
+	targets := []ExecutionTarget{
+		{TargetID: "producer", Caller: producer},
+		{TargetID: "consumer", Caller: consumer},
 	}
-	if config.ForwardTimeout == 0 {
-		config.ForwardTimeout = DefaultForwardTimeout
-	}
-	if config.TerminalSampling && (reference != nil || config.LogitsObserver != nil) {
-		return nil, errors.New("terminal sampling cannot return logits for reference verification")
-	}
-
-	producerModel, err := modelInfo(ctx, producer, config.Model)
+	planned, err := NewBalancedPlannedSession(
+		ctx, config.Model, targets, reference, responseMode, plannedConfig,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("producer model info: %w", err)
-	}
-	consumerModel, err := modelInfo(ctx, consumer, config.Model)
-	if err != nil {
-		return nil, fmt.Errorf("consumer model info: %w", err)
-	}
-	if err := matchModel(producerModel, consumerModel, "consumer"); err != nil {
+		var loadErr *ExecutionStageLoadError
+		if errors.As(err, &loadErr) {
+			role := loadErr.Stage.Name
+			if loadErr.Index == 0 {
+				role = "producer"
+			} else if loadErr.Index == 1 {
+				role = "consumer"
+			}
+			return nil, fmt.Errorf("%s shard: %w", role, loadErr.Err)
+		}
 		return nil, err
 	}
-	if producerModel.LayerCount < 2 {
-		return nil, fmt.Errorf("model %s has %d layers; at least two are required", config.Model, producerModel.LayerCount)
+	legacyPlan, ok := planned.plan.LegacyShardPlan()
+	if !ok {
+		return nil, errors.New("balanced two-stage session did not produce a legacy plan")
 	}
-
-	split := producerModel.LayerCount / 2
-	suffix := modelHashSuffix(config.Model, producerModel.CheckpointFingerprint)
-	plan := ShardPlan{
-		Producer: Shard{ID: "generate-producer-" + suffix, LayerStart: 0, LayerEnd: split},
-		Consumer: Shard{ID: "generate-consumer-" + suffix, LayerStart: split, LayerEnd: producerModel.LayerCount},
-	}
-	if _, err := ensureShard(ctx, producer, workerproc.PersistentLoadShardRequest{
-		ModelID: config.Model, ShardID: plan.Producer.ID,
-		CheckpointFingerprint: producerModel.CheckpointFingerprint,
-		LayerStart:            plan.Producer.LayerStart, LayerEnd: plan.Producer.LayerEnd, OwnsInput: true,
-	}); err != nil {
-		return nil, fmt.Errorf("producer shard: %w", err)
-	}
-	if _, err := ensureShard(ctx, consumer, workerproc.PersistentLoadShardRequest{
-		ModelID: config.Model, ShardID: plan.Consumer.ID,
-		CheckpointFingerprint: producerModel.CheckpointFingerprint,
-		LayerStart:            plan.Consumer.LayerStart, LayerEnd: plan.Consumer.LayerEnd, OwnsOutput: true,
-	}); err != nil {
-		return nil, fmt.Errorf("consumer shard: %w", err)
-	}
-
-	referenceShard := ""
-	if reference != nil {
-		referenceModel, infoErr := modelInfo(ctx, reference, config.Model)
-		if infoErr != nil {
-			return nil, fmt.Errorf("reference model info: %w", infoErr)
-		}
-		if err := matchModel(producerModel, referenceModel, "reference"); err != nil {
-			return nil, err
-		}
-		referenceShard = "generate-reference-" + suffix
-		if _, err := ensureShard(ctx, reference, workerproc.PersistentLoadShardRequest{
-			ModelID: config.Model, ShardID: referenceShard,
-			CheckpointFingerprint: producerModel.CheckpointFingerprint,
-			LayerStart:            0, LayerEnd: producerModel.LayerCount, OwnsInput: true, OwnsOutput: true,
-		}); err != nil {
-			return nil, fmt.Errorf("reference shard: %w", err)
-		}
-	}
-
 	return &Session{
-		producer: producer, consumer: consumer, reference: reference,
-		config: config, model: *producerModel, plan: plan, referenceShard: referenceShard,
-		setupMicros: time.Since(started).Microseconds(),
+		planned: planned, model: planned.model, plan: legacyPlan,
+		referenceShard: planned.referenceShard, setupMicros: planned.setupMicros,
 	}, nil
 }
 
-func (s *Session) Generate(ctx context.Context, request Request) (result Result, returnErr error) {
-	started := time.Now()
-	defer func() { result.Timing.TotalMicros = time.Since(started).Microseconds() }()
-	if err := ctx.Err(); err != nil {
-		return Result{}, err
+func (s *Session) Generate(ctx context.Context, request Request) (Result, error) {
+	if s == nil || s.planned == nil {
+		return Result{}, errors.New("generation session is not initialized")
 	}
-	if request.Prompt == "" {
-		return Result{}, errors.New("prompt is required")
+	planned, err := s.planned.Generate(ctx, request)
+	result := legacyResult(planned)
+	var generationErr *GenerationError
+	if errors.As(err, &generationErr) {
+		failure := generationErr.Failure
+		failure.Phase = legacyFailurePhase(failure.Phase)
+		err = &GenerationError{Failure: failure, Err: generationErr.Err}
 	}
-	if request.MaxTokens <= 0 {
-		return Result{}, errors.New("max tokens must be positive")
+	return result, err
+}
+
+func legacyResult(planned PlannedResult) Result {
+	shardPlan, _ := planned.ExecutionPlan.LegacyShardPlan()
+	result := Result{
+		Model: planned.Model, ModelType: planned.ModelType,
+		CheckpointFingerprint: planned.CheckpointFingerprint,
+		CheckpointBytes:       planned.CheckpointBytes, ShardPlan: shardPlan,
+		SequenceID: planned.SequenceID, Prompt: planned.Prompt,
+		PromptTokenIDs:    planned.PromptTokenIDs,
+		GeneratedTokenIDs: planned.GeneratedTokenIDs,
+		Text:              planned.Text, MaxTokens: planned.MaxTokens,
+		StopReason: planned.StopReason, EOSTokenID: planned.EOSTokenID,
+		RTol: planned.RTol, ATol: planned.ATol,
+		ForwardTimeoutMillis: planned.ForwardTimeoutMillis,
+		Timing: Timing{
+			SessionSetupMicros:     planned.Timing.SessionSetupMicros,
+			TokenizeMicros:         planned.Timing.TokenizeMicros,
+			PrefillMicros:          planned.Timing.PrefillMicros,
+			DecodeMicros:           planned.Timing.DecodeMicros,
+			DetokenizeMicros:       planned.Timing.DetokenizeMicros,
+			TotalMicros:            planned.Timing.TotalMicros,
+			ReferenceComputeMicros: planned.Timing.ReferenceComputeMicros,
+		},
+		Verification: planned.Verification,
 	}
-	if request.SequenceID == "" {
-		sequenceID, err := randomSequenceID()
-		if err != nil {
-			return Result{}, err
-		}
-		request.SequenceID = sequenceID
+	if len(planned.StageKVCacheBytes) == 2 {
+		result.ProducerKVCacheBytes = planned.StageKVCacheBytes[0]
+		result.ConsumerKVCacheBytes = planned.StageKVCacheBytes[1]
 	}
-	result = Result{
-		Model: s.config.Model, ModelType: s.model.ModelType,
-		CheckpointFingerprint: s.model.CheckpointFingerprint,
-		CheckpointBytes:       s.model.CheckpointBytes, ShardPlan: s.plan,
-		SequenceID: request.SequenceID, Prompt: request.Prompt, MaxTokens: request.MaxTokens,
-		RTol: s.config.RTol, ATol: s.config.ATol,
-		ForwardTimeoutMillis: s.config.ForwardTimeout.Milliseconds(),
-		Timing:               Timing{SessionSetupMicros: s.setupMicros},
+	if len(planned.Timing.StageComputeMicros) == 2 {
+		result.Timing.ProducerComputeMicros = planned.Timing.StageComputeMicros[0]
+		result.Timing.ConsumerComputeMicros = planned.Timing.StageComputeMicros[1]
 	}
-	point := failurePoint{phase: "tokenize", shardID: s.plan.Producer.ID}
-	defer func() {
-		if returnErr == nil || result.Failure != nil {
-			return
-		}
-		failure := failureFrom(point, result, returnErr)
+	if planned.Failure != nil {
+		failure := *planned.Failure
+		failure.Phase = legacyFailurePhase(failure.Phase)
 		result.Failure = &failure
-		returnErr = &GenerationError{Failure: failure, Err: returnErr}
-	}()
+	}
+	return result
+}
 
-	tokenizeStarted := time.Now()
-	tokenized, err := tokenize(ctx, s.producer, s.config.Model, request.Prompt)
-	result.Timing.TokenizeMicros = time.Since(tokenizeStarted).Microseconds()
-	if err != nil {
-		return result, fmt.Errorf("tokenize prompt: %w", err)
+func legacyStageSample(sample PlannedStageSample) StageSample {
+	legacy := StageSample{
+		Operation: sample.Operation, Position: sample.Position,
+		InputTokenCount:             sample.InputTokenCount,
+		DistributedEndToEndMicros:   sample.DistributedEndToEndMicros,
+		SamplingMicros:              sample.SamplingMicros,
+		TokenLatencyMicros:          sample.TokenLatencyMicros,
+		ReferenceWallMicros:         sample.ReferenceWallMicros,
+		ReferenceComputeMicros:      sample.ReferenceComputeMicros,
+		ReferenceSamplingMicros:     sample.ReferenceSamplingMicros,
+		ReferenceTokenLatencyMicros: sample.ReferenceTokenLatencyMicros,
+		ReferenceKVCacheBytes:       sample.ReferenceKVCacheBytes,
+		ReferenceMemory:             sample.ReferenceMemory,
 	}
-	if len(tokenized.TokenIDs) == 0 {
-		return result, errors.New("tokenizer returned no prompt tokens")
+	if len(sample.Stages) != 2 {
+		return legacy
 	}
-	result.PromptTokenIDs = tokenized.TokenIDs
-	result.EOSTokenID = tokenized.EOSTokenID
+	producer := sample.Stages[0]
+	consumer := sample.Stages[1]
+	legacy.ProducerWallMicros = producer.WallMicros
+	legacy.ProducerComputeMicros = producer.ComputeMicros
+	legacy.ProducerOverheadMicros = producer.OverheadMicros
+	legacy.BoundarySerializationMicros = consumer.RequestSerializationMicros
+	legacy.ConsumerResponseSerializationMicros = consumer.ResponseSerializationMicros
+	legacy.ConsumerRoundTripMicros = consumer.WallMicros
+	legacy.ConsumerComputeMicros = consumer.ComputeMicros
+	legacy.TransportOverheadMicros = consumer.OverheadMicros
+	legacy.BoundaryTensorBytes = consumer.InputTensorBytes
+	legacy.BoundaryWireBytes = consumer.InputWireBytes
+	legacy.ConsumerResponseTensorBytes = consumer.ResponseTensorBytes
+	legacy.ConsumerResponseWireBytes = consumer.ResponseWireBytes
+	legacy.TerminalSampling = consumer.TerminalSampling
+	legacy.ProducerKVCacheBytes = producer.KVCacheBytes
+	legacy.ConsumerKVCacheBytes = consumer.KVCacheBytes
+	legacy.ProducerMemory = producer.Memory
+	legacy.ConsumerMemory = consumer.Memory
+	return legacy
+}
 
-	targets := []workerproc.SequenceTarget{
-		{Name: "producer", Caller: s.producer, ShardID: s.plan.Producer.ID},
-		{Name: "consumer", Caller: s.consumer, ShardID: s.plan.Consumer.ID},
+func legacyFailurePhase(phase string) string {
+	switch phase {
+	case "stage_0_prefill":
+		return "producer_prefill"
+	case "stage_1_prefill":
+		return "consumer_prefill"
+	case "stage_0_decode":
+		return "producer_decode"
+	case "stage_1_decode":
+		return "consumer_decode"
+	default:
+		return phase
 	}
-	if s.reference != nil {
-		targets = append(targets, workerproc.SequenceTarget{
-			Name: "reference", Caller: s.reference, ShardID: s.referenceShard,
-		})
-	}
-	point = failurePoint{phase: "open_sequences"}
-	sequences, err := workerproc.OpenSequences(ctx, targets, request.SequenceID)
-	if sequences != nil {
-		defer func() {
-			cleanupErr := sequences.Cleanup()
-			if cleanupErr != nil {
-				if returnErr == nil {
-					point = failurePoint{phase: "sequence_cleanup"}
-				}
-				if returnErr == nil {
-					returnErr = cleanupErr
-				} else {
-					returnErr = errors.Join(returnErr, cleanupErr)
-				}
-			}
-		}()
-	}
-	if err != nil {
-		return result, fmt.Errorf("open generation sequences: %w", err)
-	}
-
-	prompt := tokenTensor(tokenized.TokenIDs)
-	prefillStarted := time.Now()
-	distributedStarted := time.Now()
-	point = failurePoint{
-		phase: "producer_prefill", shardID: s.plan.Producer.ID,
-		operation: "prefill", position: 0,
-	}
-	producerResult, producerWallMicros, err := measuredInfer(
-		ctx, s.config.ForwardTimeout, s.producer,
-		"prefill", s.plan.Producer.ID, request.SequenceID, 0, "tokens", prompt, false,
-	)
-	if err != nil {
-		return result, fmt.Errorf("producer prefill: %w", err)
-	}
-	point = failurePoint{
-		phase: "consumer_prefill", shardID: s.plan.Consumer.ID,
-		operation: "prefill", position: 0,
-	}
-	consumerResult, consumerWallMicros, err := measuredInfer(
-		ctx, s.config.ForwardTimeout, s.consumer,
-		"prefill", s.plan.Consumer.ID, request.SequenceID, 0, "hidden", producerResult.Output,
-		s.config.TerminalSampling,
-	)
-	if err != nil {
-		return result, fmt.Errorf("consumer prefill: %w", err)
-	}
-	distributedEndToEndMicros := time.Since(distributedStarted).Microseconds()
-	var referenceResult *workerproc.PersistentForwardResult
-	var referenceWallMicros int64
-	if s.reference != nil {
-		point = failurePoint{
-			phase: "reference_prefill", shardID: s.referenceShard,
-			operation: "prefill", position: 0,
-		}
-		referenceResult, referenceWallMicros, err = measuredInfer(
-			ctx, s.config.ForwardTimeout, s.reference,
-			"prefill", s.referenceShard, request.SequenceID, 0, "tokens", prompt, false,
-		)
-		if err != nil {
-			return result, fmt.Errorf("reference prefill: %w", err)
-		}
-	}
-	result.Timing.PrefillMicros = time.Since(prefillStarted).Microseconds()
-	result.Timing.ProducerComputeMicros += producerResult.ComputeMicros
-	result.Timing.ConsumerComputeMicros += consumerResult.ComputeMicros
-	result.ProducerKVCacheBytes = producerResult.KVCacheBytes
-	result.ConsumerKVCacheBytes = consumerResult.KVCacheBytes
-	if referenceResult != nil {
-		result.Timing.ReferenceComputeMicros += referenceResult.ComputeMicros
-		result.Verification = &Verification{GreedyTokenIDsMatch: true}
-	}
-	var pendingSample *StageSample
-	if s.config.Observer != nil {
-		sample := newStageSample(
-			"prefill", 0, len(tokenized.TokenIDs), request.SequenceID,
-			producerResult, producerWallMicros, consumerResult, consumerWallMicros,
-			distributedEndToEndMicros, referenceResult, referenceWallMicros,
-		)
-		pendingSample = &sample
-	}
-
-	position := uint64(len(tokenized.TokenIDs))
-	distributedLogits := consumerResult.Output
-	distributedSampledToken := consumerResult.SampledTokenID
-	var referenceLogits workerproc.WireTensor
-	if referenceResult != nil {
-		referenceLogits = referenceResult.Output
-	}
-	decodeStarted := time.Now()
-	for len(result.GeneratedTokenIDs) < request.MaxTokens {
-		point = failurePoint{phase: "sample", operation: "sample", position: position}
-		if err := ctx.Err(); err != nil {
-			return result, err
-		}
-		if s.config.LogitsObserver != nil {
-			s.config.LogitsObserver(
-				len(result.GeneratedTokenIDs),
-				cloneWireTensor(distributedLogits),
-			)
-		}
-		samplingStarted := time.Now()
-		nextToken, err := sampledToken(distributedSampledToken, distributedLogits)
-		samplingMicros := time.Since(samplingStarted).Microseconds()
-		if err != nil {
-			return result, fmt.Errorf("sample distributed logits: %w", err)
-		}
-		if pendingSample != nil {
-			pendingSample.SamplingMicros = samplingMicros
-			pendingSample.TokenLatencyMicros = pendingSample.DistributedEndToEndMicros + samplingMicros
-		}
-		if result.Verification != nil {
-			difference, compareErr := tensorcheck.CompareFinalLogits(
-				distributedLogits, referenceLogits, s.config.RTol, s.config.ATol,
-			)
-			if compareErr != nil {
-				return result, fmt.Errorf("generation step %d logits: %w", len(result.GeneratedTokenIDs), compareErr)
-			}
-			result.Verification.MaxAbsoluteDifference = math.Max(
-				result.Verification.MaxAbsoluteDifference, difference.Absolute,
-			)
-			result.Verification.MaxRelativeDifference = math.Max(
-				result.Verification.MaxRelativeDifference, difference.Relative,
-			)
-			referenceSamplingStarted := time.Now()
-			referenceToken, sampleErr := greedyToken(referenceLogits)
-			referenceSamplingMicros := time.Since(referenceSamplingStarted).Microseconds()
-			if sampleErr != nil {
-				return result, fmt.Errorf("sample reference logits: %w", sampleErr)
-			}
-			if pendingSample != nil {
-				pendingSample.ReferenceSamplingMicros = referenceSamplingMicros
-				pendingSample.ReferenceTokenLatencyMicros =
-					pendingSample.ReferenceWallMicros + referenceSamplingMicros
-			}
-			if nextToken != referenceToken {
-				result.Verification.GreedyTokenIDsMatch = false
-				return result, fmt.Errorf(
-					"generation step %d chose token %d; reference chose %d",
-					len(result.GeneratedTokenIDs), nextToken, referenceToken,
-				)
-			}
-			result.Verification.ComparedTokens++
-		}
-		if pendingSample != nil {
-			s.config.Observer(*pendingSample)
-			pendingSample = nil
-		}
-		result.GeneratedTokenIDs = append(result.GeneratedTokenIDs, nextToken)
-		if !request.IgnoreEOS && result.EOSTokenID != nil && nextToken == *result.EOSTokenID {
-			result.StopReason = "eos"
-			break
-		}
-		if len(result.GeneratedTokenIDs) == request.MaxTokens {
-			result.StopReason = "max_tokens"
-			break
-		}
-
-		token := tokenTensor([]int32{nextToken})
-		distributedStarted = time.Now()
-		point = failurePoint{
-			phase: "producer_decode", shardID: s.plan.Producer.ID,
-			operation: "decode", position: position,
-		}
-		producerResult, producerWallMicros, err = measuredInfer(
-			ctx, s.config.ForwardTimeout, s.producer,
-			"decode", s.plan.Producer.ID, request.SequenceID, position, "tokens", token, false,
-		)
-		if err != nil {
-			return result, fmt.Errorf("producer decode step %d: %w", len(result.GeneratedTokenIDs), err)
-		}
-		point = failurePoint{
-			phase: "consumer_decode", shardID: s.plan.Consumer.ID,
-			operation: "decode", position: position,
-		}
-		consumerResult, consumerWallMicros, err = measuredInfer(
-			ctx, s.config.ForwardTimeout, s.consumer,
-			"decode", s.plan.Consumer.ID, request.SequenceID, position, "hidden", producerResult.Output,
-			s.config.TerminalSampling,
-		)
-		if err != nil {
-			return result, fmt.Errorf("consumer decode step %d: %w", len(result.GeneratedTokenIDs), err)
-		}
-		distributedEndToEndMicros = time.Since(distributedStarted).Microseconds()
-		result.Timing.ProducerComputeMicros += producerResult.ComputeMicros
-		result.Timing.ConsumerComputeMicros += consumerResult.ComputeMicros
-		result.ProducerKVCacheBytes = producerResult.KVCacheBytes
-		result.ConsumerKVCacheBytes = consumerResult.KVCacheBytes
-		distributedLogits = consumerResult.Output
-		distributedSampledToken = consumerResult.SampledTokenID
-		referenceResult = nil
-		referenceWallMicros = 0
-		if s.reference != nil {
-			point = failurePoint{
-				phase: "reference_decode", shardID: s.referenceShard,
-				operation: "decode", position: position,
-			}
-			referenceResult, referenceWallMicros, err = measuredInfer(
-				ctx, s.config.ForwardTimeout, s.reference,
-				"decode", s.referenceShard, request.SequenceID, position, "tokens", token, false,
-			)
-			if err != nil {
-				return result, fmt.Errorf("reference decode step %d: %w", len(result.GeneratedTokenIDs), err)
-			}
-			result.Timing.ReferenceComputeMicros += referenceResult.ComputeMicros
-			referenceLogits = referenceResult.Output
-		}
-		if s.config.Observer != nil {
-			sample := newStageSample(
-				"decode", position, 1, request.SequenceID,
-				producerResult, producerWallMicros, consumerResult, consumerWallMicros,
-				distributedEndToEndMicros, referenceResult, referenceWallMicros,
-			)
-			pendingSample = &sample
-		}
-		position++
-	}
-	result.Timing.DecodeMicros = time.Since(decodeStarted).Microseconds()
-
-	point = failurePoint{phase: "detokenize", shardID: s.plan.Producer.ID}
-	detokenizeStarted := time.Now()
-	text, err := detokenize(ctx, s.producer, s.config.Model, result.GeneratedTokenIDs)
-	result.Timing.DetokenizeMicros = time.Since(detokenizeStarted).Microseconds()
-	if err != nil {
-		return result, fmt.Errorf("detokenize generated tokens: %w", err)
-	}
-	result.Text = text
-	point = failurePoint{}
-	return result, nil
 }
 
 func modelInfo(
@@ -613,13 +386,13 @@ func ensureShard(
 	ctx context.Context,
 	caller workerproc.PersistentCaller,
 	request workerproc.PersistentLoadShardRequest,
-) (*workerproc.PersistentShardSnapshot, error) {
+) (*workerproc.PersistentShardSnapshot, bool, error) {
 	state, err := workerState(ctx, caller)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if shard, found, err := findLoadedShard(state, request); found || err != nil {
-		return shard, err
+		return shard, found, err
 	}
 	response, err := call(ctx, caller, workerproc.PersistentRequest{Command: "loadShard", LoadShard: &request})
 	if err != nil {
@@ -630,19 +403,19 @@ func ensureShard(
 			// current state before failing this session.
 			if refreshed, stateErr := workerState(ctx, caller); stateErr == nil {
 				if shard, found, validationErr := findLoadedShard(refreshed, request); found || validationErr != nil {
-					return shard, validationErr
+					return shard, found, validationErr
 				}
 			}
 		}
-		return nil, err
+		return nil, false, err
 	}
 	if response.Result == nil || response.Result.Shard == nil {
-		return nil, errors.New("loadShard returned no shard snapshot")
+		return nil, false, errors.New("loadShard returned no shard snapshot")
 	}
 	if err := validateLoadedShard(response.Result.Shard, request); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return response.Result.Shard, nil
+	return response.Result.Shard, false, nil
 }
 
 func findLoadedShard(
@@ -763,65 +536,6 @@ func measuredInfer(
 	return result, time.Since(started).Microseconds(), err
 }
 
-func newStageSample(
-	operation string,
-	position uint64,
-	inputTokenCount int,
-	sequenceID string,
-	producer *workerproc.PersistentForwardResult,
-	producerWallMicros int64,
-	consumer *workerproc.PersistentForwardResult,
-	consumerWallMicros int64,
-	distributedEndToEndMicros int64,
-	reference *workerproc.PersistentForwardResult,
-	referenceWallMicros int64,
-) StageSample {
-	serializationStarted := time.Now()
-	wirePayload, _ := json.Marshal(workerproc.PersistentRequest{
-		Command: operation, DeadlineUnixMillis: time.Now().UnixMilli(),
-		Forward: &workerproc.PersistentForwardRequest{
-			ShardID: consumer.ShardID, SequenceID: sequenceID, Position: position,
-			InputKind: "hidden", Input: producer.Output,
-			ReturnSampledToken: consumer.SampledTokenID != nil,
-		},
-	})
-	boundarySerializationMicros := time.Since(serializationStarted).Microseconds()
-	responseSerializationStarted := time.Now()
-	responsePayload, _ := json.Marshal(workerproc.PersistentResponse{
-		OK: true,
-		Result: &workerproc.PersistentWorkerResult{
-			Forward: consumer,
-		},
-	})
-	sample := StageSample{
-		Operation: operation, Position: position, InputTokenCount: inputTokenCount,
-		ProducerWallMicros: producerWallMicros, ProducerComputeMicros: producer.ComputeMicros,
-		ProducerOverheadMicros:              positiveDifference(producerWallMicros, producer.ComputeMicros),
-		BoundarySerializationMicros:         boundarySerializationMicros,
-		ConsumerResponseSerializationMicros: time.Since(responseSerializationStarted).Microseconds(),
-		ConsumerRoundTripMicros:             consumerWallMicros,
-		ConsumerComputeMicros:               consumer.ComputeMicros,
-		TransportOverheadMicros:             positiveDifference(consumerWallMicros, consumer.ComputeMicros),
-		DistributedEndToEndMicros:           distributedEndToEndMicros,
-		BoundaryTensorBytes:                 len(producer.Output.Data),
-		BoundaryWireBytes:                   len(wirePayload),
-		ConsumerResponseTensorBytes:         len(consumer.Output.Data),
-		ConsumerResponseWireBytes:           len(responsePayload),
-		TerminalSampling:                    consumer.SampledTokenID != nil,
-		ProducerKVCacheBytes:                producer.KVCacheBytes,
-		ConsumerKVCacheBytes:                consumer.KVCacheBytes,
-		ProducerMemory:                      producer.Memory,
-		ConsumerMemory:                      consumer.Memory,
-	}
-	if reference != nil {
-		sample.ReferenceWallMicros = referenceWallMicros
-		sample.ReferenceComputeMicros = reference.ComputeMicros
-		sample.ReferenceKVCacheBytes = reference.KVCacheBytes
-		sample.ReferenceMemory = reference.Memory
-	}
-	return sample
-}
-
 func positiveDifference(wallMicros int64, computeMicros uint64) int64 {
 	if computeMicros >= uint64(wallMicros) {
 		return 0
@@ -878,21 +592,6 @@ func infer(
 		)
 	}
 	return result, nil
-}
-
-func failureFrom(point failurePoint, result Result, err error) Failure {
-	failure := Failure{
-		SequenceID: result.SequenceID, ShardID: point.shardID,
-		Phase: point.phase, Operation: point.operation, Position: point.position,
-		LastAcceptedTokenIndex: len(result.GeneratedTokenIDs) - 1,
-		TimedOut:               errors.Is(err, context.DeadlineExceeded),
-		Canceled:               errors.Is(err, context.Canceled), Cause: err.Error(),
-	}
-	if len(result.GeneratedTokenIDs) > 0 {
-		token := result.GeneratedTokenIDs[len(result.GeneratedTokenIDs)-1]
-		failure.LastAcceptedTokenID = &token
-	}
-	return failure
 }
 
 func call(

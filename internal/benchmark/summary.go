@@ -4,7 +4,6 @@ package benchmark
 
 import (
 	"math"
-	"sort"
 
 	"github.com/fijimunkii/mlx-swarm/internal/generation"
 )
@@ -141,20 +140,10 @@ func micros(
 	value func(generation.StageSample) int64,
 ) Distribution {
 	values := make([]int64, len(samples))
-	var sum int64
 	for index, sample := range samples {
 		values[index] = value(sample)
-		sum += values[index]
 	}
-	if len(values) == 0 {
-		return Distribution{}
-	}
-	sort.Slice(values, func(left, right int) bool { return values[left] < values[right] })
-	return Distribution{
-		Count: len(values), MinMicros: values[0],
-		P50Micros: percentile(values, 0.50), P95Micros: percentile(values, 0.95),
-		MaxMicros: values[len(values)-1], MeanMicros: float64(sum) / float64(len(values)),
-	}
+	return summarizeMicros(values)
 }
 
 func bytes(
@@ -162,20 +151,10 @@ func bytes(
 	value func(generation.StageSample) int64,
 ) ByteDistribution {
 	values := make([]int64, len(samples))
-	var sum int64
 	for index, sample := range samples {
 		values[index] = value(sample)
-		sum += values[index]
 	}
-	if len(values) == 0 {
-		return ByteDistribution{}
-	}
-	sort.Slice(values, func(left, right int) bool { return values[left] < values[right] })
-	return ByteDistribution{
-		Count: len(values), MinBytes: values[0],
-		P50Bytes: percentile(values, 0.50), P95Bytes: percentile(values, 0.95),
-		MaxBytes: values[len(values)-1], SumBytes: sum,
-	}
+	return summarizeBytes(values)
 }
 
 func percentile(sorted []int64, quantile float64) int64 {

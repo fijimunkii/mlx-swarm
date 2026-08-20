@@ -51,7 +51,7 @@ The supported commands are:
 | `forward` | `forward` | Runs a retained stage without mutating sequence cache; retained for diagnostics and the stateless reuse proof. |
 | `prefill` | `forward` | Runs a prompt exactly once at position zero and populates every owned layer cache. |
 | `decode` | `forward` | Runs exactly one new position at the sequence's expected next position and reuses every owned layer cache. |
-| `state` | none | Reports loaded ranges, adapter/model type, sequence and reuse counts, KV bytes, physical memory, configured MLX/cache limits, and allocator memory. |
+| `state` | none | Reports loaded ranges, adapter/model type, sequence and reuse counts, per-shard open-sequence admission, KV bytes, physical memory, configured MLX/cache limits, and allocator memory. |
 | `shutdown` | none | Releases all shards, clears the MLX cache, acknowledges shutdown, and exits cleanly. Only the supervising daemon sends it. |
 
 `modelInfo` keeps the Go planner independent of model-family layer counts,

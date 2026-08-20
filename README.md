@@ -143,6 +143,48 @@ go run ./cmd/swarm-generate-smoke -worker "$worker"
 The framed request contract is documented in
 [`docs/persistent-worker-protocol.md`](docs/persistent-worker-protocol.md).
 
+### Trusted mesh membership
+
+`swarm-control` maintains a versioned, leased inventory for private-LAN or
+tailnet workers. A configured `swarmd` advertises backend-neutral capabilities,
+admission limits, health, memory pressure, and retained shard state, renews its
+lease independently from server-stamped status freshness, and removes it on
+clean shutdown. See the
+[membership runbook and API contract](docs/mesh-membership.md).
+
+The placement foundation evaluates every worker against one proposed stage
+using deterministic, backend-neutral hard constraints. It rejects stale or
+incompatible candidates with stable machine-readable reasons and accounts for
+compatible retained-shard reuse. A bounded rolling profile supplies fresh,
+directional RTT/throughput evidence and per-worker compute observations. A
+complete-plan scorer combines those snapshots with explicit conservative
+fallbacks, preserves every candidate rejection, and ranks valid plans by
+latency, failure history, memory pressure, and retained reuse. A bounded dynamic
+planner searches model-supplied contiguous ranges, may omit eligible workers
+that worsen the result, and emits the selected plan plus every range/worker
+rejection. The mesh sequence scheduler snapshots live membership and profiles
+at each admission boundary, binds the selected worker instances and endpoints,
+requires the instance-bound HTTP capability, reserves worker, shard, and memory
+admission locally, and freezes that plan for one generation attempt. A later
+sequence always replans, so joins, removals, expiry, fresh failure state, and
+changed performance evidence cannot mutate an active sequence or reuse a stale
+plan. A Linux-only synthetic proof drives 32 heterogeneous records through the
+same membership HTTP and placement contracts, exercises churn and capability
+changes, and records bounded search, scheduling latency, and stable rejection
+evidence. The five-Mac workflow then registers the real serving processes in a
+shared control plane, adds 27 incompatible synthetic Linux peers, and requires
+the live scheduler to select five real instance-bound targets whose 12B output
+still matches the deterministic reference.
+See the
+[placement and scoring contract](docs/mesh-placement.md) and the
+[synthetic scale/churn proof](docs/mesh-scale-churn.md).
+
+Run the control-plane proof without a model or macOS runner:
+
+```bash
+go run ./cmd/swarm-mesh-smoke > mesh-scale-churn.json
+```
+
 ### Failure characterization
 
 Run the deterministic process and transport fault proof without a model or

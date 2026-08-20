@@ -146,6 +146,7 @@ struct PersistentWorkerState: Codable {
     let kvCacheBytes: Int
     let retainedBytes: Int
     let retainedByteBudget: Int
+    let maxOpenSequencesPerShard: Int
     let physicalMemoryBytes: UInt64
     let mlxMemoryLimitBytes: Int
     let mlxCacheLimitBytes: Int
@@ -1014,6 +1015,7 @@ final class PersistentShardService {
             kvCacheBytes: shards.values.reduce(0) { $0 + cacheBytes(shard: $1) },
             retainedBytes: retainedBytes(),
             retainedByteBudget: configuration.workerBudgetBytes,
+            maxOpenSequencesPerShard: configuration.maxOpenSequencesPerShard,
             physicalMemoryBytes: WorkerRuntimeMemory.physicalMemoryBytes,
             mlxMemoryLimitBytes: Memory.memoryLimit,
             mlxCacheLimitBytes: Memory.cacheLimit,

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -44,6 +45,11 @@ func run() error {
 	exitAfterDebugShard := os.Getenv("SWARMD_EXIT_AFTER_DEBUG_SHARD") == "1"
 	allowDebugComplete := os.Getenv("SWARMD_ALLOW_DEBUG_COMPLETE") == "1"
 	debugShardComplete := make(chan struct{}, 1)
+	listener, err := bindListener(addr)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
 
 	worker := workerproc.Client{Path: workerproc.DefaultPath()}
 	persistentWorker, err := workerproc.StartPersistentSupervisor(worker.Path)
@@ -56,6 +62,28 @@ func run() error {
 	cancelStartup()
 	if err != nil {
 		return fmt.Errorf("persistent MLX worker health: %w", err)
+	}
+	membershipConfig, membershipEnabled, err := membershipConfigFromEnvironment()
+	if err != nil {
+		return err
+	}
+	var membership *membershipAgent
+	if membershipEnabled {
+		membershipContext, cancelMembership := context.WithTimeout(context.Background(), 10*time.Second)
+		membership, err = newMembershipAgent(
+			membershipContext, membershipConfig, worker, persistentWorker,
+		)
+		if err == nil {
+			err = membership.Register(membershipContext)
+		}
+		cancelMembership()
+		if err != nil {
+			return fmt.Errorf("join mesh membership: %w", err)
+		}
+		log.Printf(
+			"swarmd registered worker %s instance %s with %s",
+			membershipConfig.WorkerID, membershipConfig.InstanceID, membershipConfig.ControlURL,
+		)
 	}
 	mux := http.NewServeMux()
 
@@ -84,6 +112,12 @@ func run() error {
 	// Trusted-network worker API. The daemon owns worker process shutdown;
 	// clients own shard and sequence lifecycle through framed requests.
 	mux.HandleFunc("POST /v1/worker/request", func(w http.ResponseWriter, r *http.Request) {
+		if err := validateExpectedWorkerIdentity(
+			r, membershipEnabled, membershipConfig.WorkerID, membershipConfig.InstanceID,
+		); err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxDebugTensorPayload)
 		var request workerproc.PersistentRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -146,8 +180,26 @@ func run() error {
 		syscall.SIGTERM,
 	)
 	defer stopSignals()
+	var membershipFailure <-chan error
+	var membershipStopped <-chan struct{}
+	stopMembership := func() {}
+	if membership != nil {
+		membershipContext, cancelMembership := context.WithCancel(context.Background())
+		failures := make(chan error, 1)
+		stopped := make(chan struct{})
+		membershipFailure = failures
+		membershipStopped = stopped
+		stopMembership = cancelMembership
+		go func() {
+			defer close(stopped)
+			if err := membership.Run(membershipContext); err != nil {
+				failures <- err
+			}
+		}()
+	}
 	serverStopped := make(chan struct{})
 	shutdownComplete := make(chan struct{})
+	var membershipErr error
 	var debugShutdown <-chan struct{}
 	if exitAfterDebugShard || allowDebugComplete {
 		debugShutdown = debugShardComplete
@@ -160,6 +212,8 @@ func run() error {
 			shutdownReason = "signal"
 		case <-debugShutdown:
 			shutdownReason = "debug one-shot"
+		case membershipErr = <-membershipFailure:
+			shutdownReason = "membership failure"
 		case <-serverStopped:
 			return
 		}
@@ -171,11 +225,58 @@ func run() error {
 	}()
 
 	log.Printf("swarmd listening on %s", addr)
-	serveErr := server.ListenAndServe()
+	serveErr := server.Serve(listener)
 	close(serverStopped)
+	stopMembership()
+	if membershipStopped != nil {
+		<-membershipStopped
+	}
 	<-shutdownComplete
+	if membershipErr == nil && membershipFailure != nil {
+		select {
+		case membershipErr = <-membershipFailure:
+		default:
+		}
+	}
+	if membershipErr != nil {
+		return fmt.Errorf("membership: %w", membershipErr)
+	}
 	if serveErr != nil && serveErr != http.ErrServerClosed {
 		return fmt.Errorf("serve: %w", serveErr)
+	}
+	return nil
+}
+
+func bindListener(addr string) (net.Listener, error) {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %s: %w", addr, err)
+	}
+	return listener, nil
+}
+
+func validateExpectedWorkerIdentity(
+	request *http.Request,
+	membershipEnabled bool,
+	workerID string,
+	instanceID string,
+) error {
+	expectedWorkerID := request.Header.Get(workerproc.ExpectedWorkerIDHeader)
+	expectedInstanceID := request.Header.Get(workerproc.ExpectedWorkerInstanceHeader)
+	if expectedWorkerID == "" && expectedInstanceID == "" {
+		return nil
+	}
+	if expectedWorkerID == "" || expectedInstanceID == "" {
+		return errors.New("worker identity precondition is incomplete")
+	}
+	if !membershipEnabled {
+		return errors.New("worker is not registered with mesh membership")
+	}
+	if expectedWorkerID != workerID || expectedInstanceID != instanceID {
+		return fmt.Errorf(
+			"worker identity changed: expected %s/%s; serving %s/%s",
+			expectedWorkerID, expectedInstanceID, workerID, instanceID,
+		)
 	}
 	return nil
 }

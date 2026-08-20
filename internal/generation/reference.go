@@ -75,7 +75,7 @@ func VerifyTrace(
 	shardID := "generate-reference-" + modelHashSuffix(
 		expectedModel.ModelID, expectedModel.CheckpointFingerprint,
 	)
-	if _, err := ensureShard(ctx, caller, workerproc.PersistentLoadShardRequest{
+	if _, _, err := ensureShard(ctx, caller, workerproc.PersistentLoadShardRequest{
 		ModelID: expectedModel.ModelID, ShardID: shardID,
 		CheckpointFingerprint: expectedModel.CheckpointFingerprint,
 		LayerStart:            0, LayerEnd: expectedModel.LayerCount,

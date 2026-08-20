@@ -48,3 +48,34 @@ jobs:
         with:
           name: mlx-swarm-failure-characterization-${{ github.run_id }}
           path: ${{ steps.failure-characterization.outputs.failure_path }}
+      - name: Prove synthetic mesh scale and churn
+        id: mesh-stress
+        run: |
+          mesh_path="$RUNNER_TEMP/mlx-swarm-mesh-scale-churn.json"
+          go run ./cmd/swarm-mesh-smoke > "$mesh_path"
+          jq -e '
+            .schemaVersion == 1 and
+            .checks.allPassed and
+            .bounds.workerCount >= 32 and
+            .bounds.networkProbeCount <= .bounds.networkProbeLimit and
+            ([.decisions[].visibleWorkerCount] | max) >= 32 and
+            ([.decisions[].searchOperationCount] | max) <= .bounds.maxSearchOperations and
+            ([.decisions[].decisionMicros] | max) <= .bounds.maxDecisionMicros
+          ' "$mesh_path" >/dev/null
+          printf 'mesh_path=%s\n' "$mesh_path" >> "$GITHUB_OUTPUT"
+          {
+            echo '## Synthetic mesh scale and churn'
+            echo
+            printf 'Visible workers: **%s**; membership requests: **%s**; active placement probes: **%s**\n\n' \
+              "$(jq -r '.bounds.workerCount' "$mesh_path")" \
+              "$(jq -r '.bounds.membershipRequestCount' "$mesh_path")" \
+              "$(jq -r '.bounds.networkProbeCount' "$mesh_path")"
+            echo '| Decision | Visible | Eligible | Search operations | Decision (μs) | Selected plan |'
+            echo '|---|---:|---:|---:|---:|---|'
+            jq -r '.decisions[] | "| \(.name) | \(.visibleWorkerCount) | \(.eligibleWorkerCount) | \(.searchOperationCount) | \(.decisionMicros) | `\(.planSignature)` |"' "$mesh_path"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload synthetic mesh evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlx-swarm-mesh-scale-churn-${{ github.run_id }}
+          path: ${{ steps.mesh-stress.outputs.mesh_path }}

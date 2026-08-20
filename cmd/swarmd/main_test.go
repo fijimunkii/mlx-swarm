@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,6 +11,23 @@ import (
 
 	"github.com/fijimunkii/mlx-swarm/internal/workerproc"
 )
+
+func TestBindListenerFailsBeforeStartupWhenAddressIsOccupied(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+
+	listener, err := bindListener(occupied.Addr().String())
+	if listener != nil {
+		_ = listener.Close()
+		t.Fatal("occupied address returned a listener")
+	}
+	if err == nil {
+		t.Fatal("occupied address was accepted")
+	}
+}
 
 func TestDebugCompleteHandler(t *testing.T) {
 	t.Run("disabled", func(t *testing.T) {
@@ -137,6 +155,28 @@ func TestForwardPersistentRequestPreservesGeneratedIDWhenCallerOmitsOne(t *testi
 	}
 	if response.RequestID != "daemon-request-1" {
 		t.Fatalf("response request ID = %q, want daemon ID", response.RequestID)
+	}
+}
+
+func TestValidateExpectedWorkerIdentity(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/worker/request", nil)
+	if err := validateExpectedWorkerIdentity(request, false, "", ""); err != nil {
+		t.Fatalf("unbound diagnostic request: %v", err)
+	}
+
+	request.Header.Set(workerproc.ExpectedWorkerIDHeader, "worker-a")
+	if err := validateExpectedWorkerIdentity(request, true, "worker-a", "instance-a"); err == nil {
+		t.Fatal("incomplete identity precondition was accepted")
+	}
+	request.Header.Set(workerproc.ExpectedWorkerInstanceHeader, "instance-a")
+	if err := validateExpectedWorkerIdentity(request, false, "", ""); err == nil {
+		t.Fatal("unregistered daemon accepted a bound request")
+	}
+	if err := validateExpectedWorkerIdentity(request, true, "worker-a", "instance-a"); err != nil {
+		t.Fatalf("matching identity: %v", err)
+	}
+	if err := validateExpectedWorkerIdentity(request, true, "worker-a", "instance-b"); err == nil {
+		t.Fatal("restarted worker instance was accepted")
 	}
 }
 

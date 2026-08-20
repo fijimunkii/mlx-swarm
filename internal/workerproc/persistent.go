@@ -99,10 +99,11 @@ type WireTensor struct {
 }
 
 type PersistentResponse struct {
-	RequestID string                  `json:"requestID"`
-	OK        bool                    `json:"ok"`
-	Error     string                  `json:"error,omitempty"`
-	Result    *PersistentWorkerResult `json:"result,omitempty"`
+	RequestID                 string                  `json:"requestID"`
+	OK                        bool                    `json:"ok"`
+	Error                     string                  `json:"error,omitempty"`
+	WorkerObservationSequence uint64                  `json:"workerObservationSequence,omitempty"`
+	Result                    *PersistentWorkerResult `json:"result,omitempty"`
 }
 
 type PersistentWorkerResult struct {
@@ -162,16 +163,17 @@ type PersistentShardSnapshot struct {
 }
 
 type PersistentWorkerState struct {
-	LoadedShards        []PersistentShardSnapshot `json:"loadedShards"`
-	LoadCount           int                       `json:"loadCount"`
-	ForwardCount        int                       `json:"forwardCount"`
-	KVCacheBytes        int                       `json:"kvCacheBytes"`
-	RetainedBytes       int                       `json:"retainedBytes"`
-	RetainedByteBudget  int                       `json:"retainedByteBudget"`
-	PhysicalMemoryBytes uint64                    `json:"physicalMemoryBytes"`
-	MLXMemoryLimitBytes int                       `json:"mlxMemoryLimitBytes"`
-	MLXCacheLimitBytes  int                       `json:"mlxCacheLimitBytes"`
-	Memory              StageMemory               `json:"memory"`
+	LoadedShards             []PersistentShardSnapshot `json:"loadedShards"`
+	LoadCount                int                       `json:"loadCount"`
+	ForwardCount             int                       `json:"forwardCount"`
+	KVCacheBytes             int                       `json:"kvCacheBytes"`
+	RetainedBytes            int                       `json:"retainedBytes"`
+	RetainedByteBudget       int                       `json:"retainedByteBudget"`
+	MaxOpenSequencesPerShard int                       `json:"maxOpenSequencesPerShard"`
+	PhysicalMemoryBytes      uint64                    `json:"physicalMemoryBytes"`
+	MLXMemoryLimitBytes      int                       `json:"mlxMemoryLimitBytes"`
+	MLXCacheLimitBytes       int                       `json:"mlxCacheLimitBytes"`
+	Memory                   StageMemory               `json:"memory"`
 }
 
 type StageMemory struct {
